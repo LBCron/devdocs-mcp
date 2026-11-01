@@ -3,7 +3,7 @@ type: guide
 title: Project Scaffolding
 description: The exact commands, file tree, Cargo workspace, and config files that create the devdocs repository. Run the steps in order from an empty directory.
 tags: [devdocs, scaffolding, cargo, workspace]
-timestamp: 2026-11-01T00:00:00Z
+timestamp: 2026-11-02T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -325,7 +325,7 @@ The committed `justfile` at the repository root is the source of truth for the r
 | `ci` | `fmt-check` + `lint` + `test` + `test-doc` + `docs` + `deny` + `features` |
 ## lefthook.yml
 
-`lefthook.yml` defines four gates and delegates every command to a justfile recipe, so hook flags cannot drift from CI. The full file (PATH preambles, globs, skip rules) is the source of truth; the shape:
+`lefthook.yml` defines four gates and delegates every command to a justfile recipe, so hook flags cannot drift from CI and the file carries no toolchain plumbing — the justfile's own PATH export covers every recipe the hooks call. The full file (globs, skip rules) is the source of truth; the shape:
 
 - `pre-commit` — `just fmt` with auto-staged fixes and `just lint`, gated to staged Rust/TOML files, skipped on merge and rebase.
 - `commit-msg` — the Conventional Commits regex. A failed match blocks the commit.
