@@ -74,7 +74,9 @@ predicates = "3.1.4"
 wiremock = "0.6.5"
 
 [workspace.lints.rust]
-unsafe_code = "deny"
+# forbid, not deny: deny is overridable by a local #[allow(unsafe_code)],
+# which is how raw libc FFI reached the Codacy PR check in M2.
+unsafe_code = "forbid"
 missing_docs = "warn"
 
 [workspace.lints.clippy]
