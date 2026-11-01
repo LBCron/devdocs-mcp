@@ -933,7 +933,7 @@ dependencies = [
  "devdocs-model",
  "devdocs-testkit",
  "fastembed",
- "libc",
+ "nix",
  "proptest",
  "rusqlite",
  "serde_json",
