@@ -50,6 +50,11 @@ pre-push:
         else
           echo "deny: skipped — Cargo.toml and Cargo.lock are unchanged against @{push}"
         fi
+    codacy:
+      # Gated inside the recipe: skipped cleanly when the CLI or its repo
+      # config is absent, findings fail the push. Mirrors the Opengrep
+      # patterns of the Codacy PR check (see docs/implementation/03).
+      run: just codacy
 
 pre-merge-commit:
   commands:

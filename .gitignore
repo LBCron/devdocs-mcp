@@ -60,3 +60,6 @@ desktop.ini
 # Agent/session tooling working directories
 .zcode/
 .mimosa/
+
+# Codacy analysis CLI local state (per-machine; init via codacy-analysis)
+/.codacy/

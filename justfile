@@ -73,6 +73,23 @@ audit:
         exit 1; \
     fi
 
+# Codacy static analysis locally, against the main-branch diff. Mirrors the
+# Opengrep patterns of the "Codacy Static Code Analysis" PR check (Codacy
+# runs no clippy for Rust). Optional gate: skipped cleanly when the CLI or
+# its repo config is absent, findings fail with exit 1. Not part of `just ci`
+# and not a CI job — the cloud app already runs the same patterns on PRs
+# (gap named per the agent-ready-repo contract).
+codacy:
+    @if ! command -v codacy-analysis >/dev/null 2>&1; then \
+        echo "codacy-analysis not installed (optional gate, skipped): npm i -g @codacy/analysis-cli"; \
+    elif [ ! -f .codacy/codacy.config.json ]; then \
+        echo "codacy-analysis not initialized (optional gate, skipped): codacy-analysis init --remote gh iamwatchdogs devdocs-mcp"; \
+    elif [ -z "$(git rev-parse -q --verify origin/main 2>/dev/null)" ]; then \
+        echo "codacy gate skipped: origin/main not found to diff against"; \
+    else \
+        CODACY_DISABLE_UPDATE_CHECK=1 codacy-analysis analyze --no-log --tool Semgrep --diff origin/main; \
+    fi
+
 # Unused dependency scan.
 machete:
     @if command -v cargo-machete >/dev/null 2>&1; then \
