@@ -112,12 +112,12 @@ pub(crate) fn check_network_mount(path: &Path) -> Result<(), StoreError> {
     // An unreadable mountinfo fails closed: a FUSE filesystem of unknown
     // origin stays refused until it can be identified.
     if fs_type == FUSE_SUPER_MAGIC {
-        let Some(fstype) = covering_mount_fstype(&existing_ancestor(path)?) else {
+        let Some(covering) = covering_mount_fstype(&existing_ancestor(path)?) else {
             return Err(StoreError::NetworkFsPath {
                 path: path.to_owned(),
             });
         };
-        if let Some(subtype) = fstype.strip_prefix("fuse.")
+        if let Some(subtype) = covering.strip_prefix("fuse.")
             && NETWORK_FUSE_SUBTYPES.contains(&subtype)
         {
             return Err(StoreError::NetworkFsPath {
@@ -172,7 +172,10 @@ fn covering_mount_fstype_from_lines(mountinfo: &str, target: &Path) -> Option<St
         }
         // Equal lengths mean an overmount: the later line shadows the
         // earlier one covering the same mount point.
-        if best.is_none_or(|(best_len, _)| mountpoint.len() >= best_len) {
+        if best
+            .as_ref()
+            .is_none_or(|(best_len, _)| mountpoint.len() >= best_len)
+        {
             best = Some((mountpoint.len(), fields[separator + 1].to_owned()));
         }
     }
