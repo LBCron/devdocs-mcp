@@ -1,5 +1,9 @@
 # Hooks run via sh without the user's profile: rustup's cargo (~/.cargo/bin)
-# is not on the default PATH, so every cargo command re-exports it below.
+# and Homebrew's just are not on the default PATH, so every command re-exports
+# them and then delegates to a justfile recipe. The recipes own the exact
+# flags (e.g. --locked), so hooks and CI can never drift apart. See
+# docs/implementation/03 §Git hooks for what each stage intentionally does
+# not cover (Linux-only cfg code, MSRV, coverage — those stay in CI).
 pre-commit:
   skip:
     - merge
@@ -8,13 +12,14 @@ pre-commit:
     fmt:
       glob: "*.rs"
       run: |
-        export PATH="$HOME/.cargo/bin:$PATH"
-        cargo fmt --all
+        export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+        just fmt
       stage_fixed: true
     clippy:
+      glob: "*.{rs,toml}"
       run: |
-        export PATH="$HOME/.cargo/bin:$PATH"
-        cargo clippy --workspace --all-targets -- -D warnings
+        export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+        just lint
 
 commit-msg:
   skip:
@@ -25,3 +30,46 @@ commit-msg:
       run: |
         head -1 {1} | grep -qE \
         '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9-]+\))?!?: .{1,72}$'
+
+pre-push:
+  commands:
+    fmt-check:
+      run: |
+        export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+        just fmt-check
+    lint:
+      run: |
+        export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+        just lint
+    test:
+      run: |
+        export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+        just test
+    test-doc:
+      run: |
+        export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+        just test-doc
+    docs:
+      run: |
+        export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+        just docs
+    deny:
+      # Only relevant when dependencies changed. Without an upstream
+      # (brand-new branch) @{push} cannot resolve: run the check anyway.
+      run: |
+        export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+        base="$(git rev-parse -q --verify '@{push}' 2>/dev/null || true)"
+        if [ -z "$base" ] || git diff --name-only "$base..HEAD" -- Cargo.toml Cargo.lock | grep -q .; then
+          just deny
+        else
+          echo "deny: skipped — Cargo.toml and Cargo.lock are unchanged against @{push}"
+        fi
+
+pre-merge-commit:
+  commands:
+    ci:
+      # A merge commit lands on the target branch directly, so it gets the
+      # full local gate, not the per-commit fast checks.
+      run: |
+        export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+        just ci
