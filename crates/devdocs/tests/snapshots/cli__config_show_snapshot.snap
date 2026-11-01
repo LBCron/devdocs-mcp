@@ -1,6 +1,6 @@
 ---
 source: crates/devdocs/tests/cli.rs
-assertion_line: 321
+assertion_line: 465
 expression: shown
 ---
 {
@@ -9,7 +9,7 @@ expression: shown
     "max_bytes": 20971520,
     "max_redirects": 3,
     "timeout_ms": 15000,
-    "user_agent": "devdocs/0.1.0 (+https://github.com/OWNER/devdocs-mcp)"
+    "user_agent": "devdocs/0.2.0 (+https://github.com/OWNER/devdocs-mcp)"
   },
   "index": {
     "embeddings": false,
