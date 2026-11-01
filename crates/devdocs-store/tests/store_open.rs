@@ -78,11 +78,17 @@ fn concurrent_first_opens_all_succeed() {
     let handles: Vec<_> = (0..4)
         .map(|_| {
             let path = Arc::clone(&path);
-            std::thread::spawn(move || Store::open(&path).is_ok())
+            std::thread::spawn(move || {
+                Store::open(&path)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            })
         })
         .collect();
     for handle in handles {
-        assert!(handle.join().unwrap(), "every concurrent open must succeed");
+        if let Err(error) = handle.join().unwrap() {
+            panic!("every concurrent open must succeed, got: {error}");
+        }
     }
 }
 
