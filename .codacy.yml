@@ -1,0 +1,7 @@
+---
+# The migration files are SQLite DDL, verified against the bundled SQLite
+# engine by the store tests. Codacy's SQL compatibility analyzer parses them
+# with a PostgreSQL grammar and reports valid SQLite syntax (CREATE VIRTUAL
+# TABLE, trigger bodies) as errors, so the directory stays out of analysis.
+exclude_paths:
+  - "migrations/**"
