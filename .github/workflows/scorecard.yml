@@ -45,7 +45,7 @@ jobs:
       # security-events: write uploads results.sarif to the Security tab.
       security-events: write
       # id-token: write signs the results uploaded to the OpenSSF API. The
-      # crates.io trusted publisher is scoped to the `release` environment,
+      # crates.io trusted publisher is scoped to the `crates` environment,
       # so this OIDC token is rejected there (docs 09).
       id-token: write
     steps:

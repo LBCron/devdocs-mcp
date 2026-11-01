@@ -107,14 +107,15 @@ jobs:
       # The release gate is the ruleset's checks, not a human merge (docs 11;
       # reversal recorded in docs 01): queue the release PR to merge itself
       # once those checks pass. The action's `pr` output is empty when there
-      # was nothing to release, so this skips on no-op runs.
+      # was nothing to release, so this skips on no-op runs. The output is a
+      # JSON PR object (html_url, number, ...), not a URL string.
       - name: Enable auto-merge on the release PR
         if: steps.release-plz.outputs.pr != ''
         shell: bash
         env:
           GH_TOKEN: ${{ steps.release-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
-          PR_URL: ${{ steps.release-plz.outputs.pr }}
+          PR_URL: ${{ fromJSON(steps.release-plz.outputs.pr).html_url }}
         run: gh pr merge --auto --squash --delete-branch "${PR_URL}"
 
   release-plz-release:
@@ -139,7 +140,7 @@ jobs:
     # it (e.g. by a compromised release.yml build leg, which also holds
     # id-token: write) are rejected by crates.io. Branch restriction and
     # reviewers are configured in the repo's environment settings.
-    environment: release
+    environment: crates
     permissions:
       contents: write
       pull-requests: read

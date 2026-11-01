@@ -3,7 +3,7 @@ type: guide
 title: CI/CD and Release
 description: The GitHub Actions workflows (CI, release, publish, audits, and the security workflows: CodeQL, Scorecard, dependency review, zizmor), the release build matrix, the crates.io publish path with trusted publishing, and the versioning policy. Action versions digest-pinned 2026-10-30.
 tags: [devdocs, ci, github-actions, release, crates-io, security]
-timestamp: 2026-10-31T12:05:00Z
+timestamp: 2026-11-02T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -163,10 +163,10 @@ Two deliberate deviations from "add a concurrency group everywhere": the release
 
 One-time setup:
 
-1. On crates.io, open each crate's Settings and add a Trusted Publisher: this repository, the workflow filename `publish.yml`, **and the environment `release`**. A brand-new crate needs one manual first publish before it can use trusted publishing.
+1. On crates.io, open each crate's Settings and add a Trusted Publisher: this repository, the workflow filename `publish.yml`, **and the environment `crates`**. A brand-new crate needs one manual first publish before it can use trusted publishing.
 2. Create a GitHub App for this repository. Leave its webhook inactive. Grant repository permissions `Contents: read/write` and `Pull requests: read/write`. Install it on this repository only. Create a private key.
 3. Add the App **Client ID** as the repository variable `RELEASE_APP_CLIENT_ID` — copy it from the app's About section; client IDs look like `Iv1.xxxxxxxxxxxxxxxx` or start with `Iv23`, and the 40-character hex client secret is not it. Add the private key as the repository secret `RELEASE_APP_PRIVATE_KEY` from the whole downloaded `.pem` file — `gh secret set RELEASE_APP_PRIVATE_KEY < path/to/app.private-key.pem` keeps the newlines where a web-UI paste can lose them. The workflow checks both values' shapes before minting a token, then creates a short-lived installation token for each job, scoped to this repository.
-4. Create the `release` GitHub environment (repo Settings → Environments) restricted to the `main` branch; the release-plz-release job declares it. The environment claim in the Trusted Publisher entry means OIDC tokens minted by any other job in the repo — including the release.yml build legs, which hold `id-token: write` for attestations and execute dependency build scripts — are rejected by crates.io.
+4. Create the `crates` GitHub environment (repo Settings → Environments) restricted to the `main` branch; the release-plz-release job declares it. The environment claim in the Trusted Publisher entry means OIDC tokens minted by any other job in the repo — including the release.yml build legs, which hold `id-token: write` for attestations and execute dependency build scripts — are rejected by crates.io.
 
 If the first token mint fails with 401 `A JSON web token could not be decoded`, the two values do not belong to the same app or one of them is misshapen: re-copy the Client ID from the app's About section and re-set the secret from the app's current `.pem` — rotating a key in the app settings does not update the repository secret. A 404 on the same step means the JWT was fine but the app is not installed on this repository.
 
