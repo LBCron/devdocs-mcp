@@ -81,12 +81,16 @@ pub(crate) fn check_network_mount(path: &Path) -> Result<(), StoreError> {
     use nix::sys::statfs::{AFS_SUPER_MAGIC, CODA_SUPER_MAGIC, FUSE_SUPER_MAGIC, NFS_SUPER_MAGIC};
     use nix::sys::statfs::{NCP_SUPER_MAGIC, OCFS2_SUPER_MAGIC, SMB_SUPER_MAGIC};
 
-    // Magic numbers from linux/magic.h that nix does not ship.
+    // Magic numbers from linux/magic.h that nix does not ship. CIFS rides
+    // with them: nix's SMB_SUPER_MAGIC is 0x517B (SMB1 only), while a CIFS
+    // mount reports 0xFF53_4D42.
+    const CIFS_SUPER_MAGIC: FsType = FsType(0xFF53_4D42);
     const SMB2_SUPER_MAGIC: FsType = FsType(0xFE53_4D42);
     const V9FS_SUPER_MAGIC: FsType = FsType(0x0102_1997);
-    const NETWORK_MAGICS: [FsType; 8] = [
+    const NETWORK_MAGICS: [FsType; 9] = [
         NFS_SUPER_MAGIC,
         SMB_SUPER_MAGIC,
+        CIFS_SUPER_MAGIC,
         SMB2_SUPER_MAGIC,
         AFS_SUPER_MAGIC,
         NCP_SUPER_MAGIC,
@@ -105,15 +109,21 @@ pub(crate) fn check_network_mount(path: &Path) -> Result<(), StoreError> {
     // Every FUSE mount reports FUSE_SUPER_MAGIC, local ones included
     // (ntfs-3g over FUSE), so the refusal needs the subtype from
     // /proc/self/mountinfo: sshfs and friends hide behind the shared magic.
-    if fs_type == FUSE_SUPER_MAGIC
-        && let Some(subtype) = covering_mount_fstype(&existing_ancestor(path)?)
-            .as_deref()
-            .and_then(|fstype| fstype.strip_prefix("fuse."))
-        && NETWORK_FUSE_SUBTYPES.contains(&subtype)
-    {
-        return Err(StoreError::NetworkFsPath {
-            path: path.to_owned(),
-        });
+    // An unreadable mountinfo fails closed: a FUSE filesystem of unknown
+    // origin stays refused until it can be identified.
+    if fs_type == FUSE_SUPER_MAGIC {
+        let Some(fstype) = covering_mount_fstype(&existing_ancestor(path)?) else {
+            return Err(StoreError::NetworkFsPath {
+                path: path.to_owned(),
+            });
+        };
+        if let Some(subtype) = fstype.strip_prefix("fuse.")
+            && NETWORK_FUSE_SUBTYPES.contains(&subtype)
+        {
+            return Err(StoreError::NetworkFsPath {
+                path: path.to_owned(),
+            });
+        }
     }
     Ok(())
 }
