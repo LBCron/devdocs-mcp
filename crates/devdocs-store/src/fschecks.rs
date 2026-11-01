@@ -112,7 +112,17 @@ pub(crate) fn check_network_mount(path: &Path) -> Result<(), StoreError> {
     // An unreadable mountinfo fails closed: a FUSE filesystem of unknown
     // origin stays refused until it can be identified.
     if fs_type == FUSE_SUPER_MAGIC {
-        let Some(covering) = covering_mount_fstype(&existing_ancestor(path)?) else {
+        let ancestor = existing_ancestor(path)?;
+        // Mountinfo lists absolute mount points only, and statfs followed
+        // the symlinks, so the lookup needs the resolved ancestor: a
+        // relative path would fail closed, and a same-owner symlink into a
+        // network mount must be judged by its destination, not by where
+        // the link sits.
+        let resolved = ancestor.canonicalize().map_err(|source| StoreError::Io {
+            path: ancestor,
+            source,
+        })?;
+        let Some(covering) = covering_mount_fstype(&resolved) else {
             return Err(StoreError::NetworkFsPath {
                 path: path.to_owned(),
             });
