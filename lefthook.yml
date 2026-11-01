@@ -1,7 +1,8 @@
-# Hooks run via sh without the user's profile: rustup's cargo (~/.cargo/bin)
-# and Homebrew's just are not on the default PATH, so every command re-exports
-# them and then delegates to a justfile recipe. The recipes own the exact
-# flags (e.g. --locked), so hooks and CI can never drift apart. See
+# Hooks delegate every check to a justfile recipe: the recipes own the exact
+# flags (e.g. --locked) and the toolchain PATH export, so hooks and CI can
+# never drift and this file carries no PATH plumbing. Git spawns hooks with
+# the invoking shell's environment, which resolves `just`; cargo and the
+# binstall tools resolve through the justfile's own PATH export. See
 # docs/implementation/03 §Git hooks for what each stage intentionally does
 # not cover (Linux-only cfg code, MSRV, coverage — those stay in CI).
 pre-commit:
@@ -11,15 +12,11 @@ pre-commit:
   commands:
     fmt:
       glob: "*.rs"
-      run: |
-        export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-        just fmt
+      run: just fmt
       stage_fixed: true
     clippy:
       glob: "*.{rs,toml}"
-      run: |
-        export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-        just lint
+      run: just lint
 
 commit-msg:
   skip:
@@ -34,30 +31,19 @@ commit-msg:
 pre-push:
   commands:
     fmt-check:
-      run: |
-        export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-        just fmt-check
+      run: just fmt-check
     lint:
-      run: |
-        export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-        just lint
+      run: just lint
     test:
-      run: |
-        export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-        just test
+      run: just test
     test-doc:
-      run: |
-        export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-        just test-doc
+      run: just test-doc
     docs:
-      run: |
-        export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-        just docs
+      run: just docs
     deny:
       # Only relevant when dependencies changed. Without an upstream
       # (brand-new branch) @{push} cannot resolve: run the check anyway.
       run: |
-        export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
         base="$(git rev-parse -q --verify '@{push}' 2>/dev/null || true)"
         if [ -z "$base" ] || git diff --name-only "$base..HEAD" -- Cargo.toml Cargo.lock | grep -q .; then
           just deny
@@ -70,6 +56,4 @@ pre-merge-commit:
     ci:
       # A merge commit lands on the target branch directly, so it gets the
       # full local gate, not the per-commit fast checks.
-      run: |
-        export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-        just ci
+      run: just ci
