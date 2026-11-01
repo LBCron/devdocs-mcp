@@ -66,8 +66,11 @@ fn allow_network_fs_option_opens_local_paths() {
 /// the `create_new` race falls through to a normal open instead of failing.
 ///
 /// A loser that hits the journal-mode switch race may report the documented
-/// `WalUnavailable` loud failure — the switch returned the old mode — so the
-/// test accepts that error and nothing else.
+/// `WalUnavailable` loud failure — the switch returned the old mode — or the
+/// switch itself may return `SQLITE_BUSY` immediately when another open
+/// holds the lock, before the readback step (seen on loaded macOS runners,
+/// where the busy timeout does not cover the switch). The test accepts both
+/// errors and nothing else.
 ///
 /// Unix-only: the pre-creation the race runs through is a no-op elsewhere,
 /// and the Windows VFS can refuse a concurrent journal-mode switch without
@@ -88,6 +91,11 @@ fn concurrent_first_opens_all_succeed() {
     for handle in handles {
         match handle.join().unwrap() {
             Ok(()) | Err(devdocs_store::StoreError::WalUnavailable { .. }) => {}
+            Err(devdocs_store::StoreError::Sql(rusqlite::Error::SqliteFailure(error, _)))
+                if matches!(
+                    error.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                ) => {}
             Err(error) => panic!("every concurrent open must succeed, got: {error}"),
         }
     }
