@@ -12,7 +12,7 @@ This project is a local, read-only documentation MCP server for coding agents. I
 
 - `cargo` is the build/test runner; the toolchain is pinned by `rust-toolchain.toml`.
 - `just` is the task runner. All primary commands are aggregated within the justfile; `just` with no target prints the full list.
-- `lefthook` runs the git hooks.
+- `lefthook` runs the git hooks; they delegate to justfile recipes, so a hook failure means the same command CI runs failed. Run `lefthook install` after changing `lefthook.yml`.
 - Its commit-msg hook enforces Conventional Commits: `type(scope): subject`, scope optional, subject ≤ 72 chars.
 - `just test` runs nextest with `.config/nextest.toml` (`retries = 0`, `fail-fast = false`): a failing test surfaces immediately and is never retried.
 - Use `bash` as your primary terminal and `rg` instead of plain `grep`.

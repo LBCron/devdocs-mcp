@@ -3,7 +3,7 @@ type: guide
 title: Project Scaffolding
 description: The exact commands, file tree, Cargo workspace, and config files that create the devdocs repository. Run the steps in order from an empty directory.
 tags: [devdocs, scaffolding, cargo, workspace]
-timestamp: 2026-10-31T00:00:00Z
+timestamp: 2026-11-01T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -325,29 +325,20 @@ The committed `justfile` at the repository root is the source of truth for the r
 | `ci` | `fmt-check` + `lint` + `test` + `test-doc` + `docs` + `deny` + `features` |
 ## lefthook.yml
 
-```yaml
-pre-commit:
-  commands:
-    fmt:
-      run: cargo fmt --all --check
-    clippy:
-      run: cargo clippy --workspace --all-targets -- -D warnings
+`lefthook.yml` defines four gates and delegates every command to a justfile recipe, so hook flags cannot drift from CI. The full file (PATH preambles, globs, skip rules) is the source of truth; the shape:
 
-commit-msg:
-  commands:
-    conventional:
-      run: |
-        head -1 {1} | grep -qE \
-        '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9-]+\))?: .{1,72}$'
-```
+- `pre-commit` — `just fmt` with auto-staged fixes and `just lint`, gated to staged Rust/TOML files, skipped on merge and rebase.
+- `commit-msg` — the Conventional Commits regex. A failed match blocks the commit.
+- `pre-push` — `fmt-check`, `lint`, `test`, `test-doc`, `docs`, and `deny` (only when `Cargo.toml`/`Cargo.lock` changed against the push target).
+- `pre-merge-commit` — `just ci`, because a merge commit lands on the target branch directly.
 
-Activate the hooks after the first commit:
+What the gates do not cover and why lives in [03](03-code-quality-toolchain.md) §Git hooks.
+
+Activate the hooks after cloning or after changing `lefthook.yml`:
 
 ```sh
 lefthook install
 ```
-
-The hook block above uses a shell one-liner. Keep the regex simple. A failed match blocks the commit.
 
 ## Licenses and README
 

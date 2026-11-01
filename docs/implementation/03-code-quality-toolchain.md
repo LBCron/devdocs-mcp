@@ -91,7 +91,14 @@ Clippy churn note. Clippy 1.91 through 1.99 renamed and moved several lints (for
 
 ## Git hooks
 
-`lefthook.yml` (see [02](02-project-scaffolding.md)) runs the format check and clippy on `pre-commit`, and the Conventional Commits regex on `commit-msg`. Heavy checks (tests, deny, audit) stay in CI. This split keeps the hook under 10 seconds on the reference laptop.
+`lefthook.yml` (see [02](02-project-scaffolding.md)) runs three gates, and every hook command delegates to a justfile recipe so hook flags (e.g. `--locked`) cannot drift from CI:
+
+- `pre-commit` — fast, per commit: `cargo fmt` with auto-staged fixes, and clippy `-D warnings` via `just lint`. Both are gated to staged Rust and TOML files so docs-only commits skip them.
+- `commit-msg` — the Conventional Commits regex (also enforced on PR titles by CI, see the `commits` job).
+- `pre-push` — the CI-facing gate, once per push before workflows trigger: `fmt-check`, `lint`, `test`, `test-doc`, `docs`, plus `deny` only when `Cargo.toml`/`Cargo.lock` changed against the push target. This is the backstop that catches doc warnings, test failures, and shared-code lints before CI runs.
+- `pre-merge-commit` — the full `just ci` gate, because a merge commit lands on the target branch directly and per-commit checks cannot cover its combined state.
+
+What hooks deliberately do not cover: code behind Linux-only `#[cfg]` gates is invisible to a macOS host, the msrv and coverage jobs are CI-only, and load-sensitive test races only reproduce on loaded CI runners. Those stay CI's job.
 
 ## Pull-request checklist
 
