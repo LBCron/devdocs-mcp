@@ -229,6 +229,48 @@ fn license_gate_refuses_publish_below_the_index_stage() {
     assert_eq!(rows, 0, "a refused publish must write nothing");
 }
 
+/// A terminal license state withdraws a previously indexed source: the
+/// stored status lands, the source deactivates, and its chunks leave the
+/// search results — while the refused-publish error still returns.
+#[test]
+fn a_terminal_license_state_withdraws_the_source() {
+    let rig = rig();
+    rig.store
+        .publish_generation(
+            &source(LicenseStatus::ApprovedIndex),
+            &[chunk(0, None, "a generation that later gets withdrawn.")],
+        )
+        .unwrap();
+
+    let error = rig
+        .store
+        .publish_generation(&source(LicenseStatus::Revoked), &[])
+        .unwrap_err();
+    match error {
+        devdocs_store::StoreError::LicenseNotApproved { status: refused } => {
+            assert_eq!(refused, LicenseStatus::Revoked)
+        }
+        other => panic!("expected LicenseNotApproved, got {other:?}"),
+    }
+
+    let (status, active): (String, i64) = rig
+        .conn
+        .query_row(
+            "SELECT license_status, active FROM sources WHERE library = 'next.js'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "revoked");
+    assert_eq!(active, 0, "a revoked source must deactivate");
+
+    let term = build_match_query("withdrawn").into_owned();
+    assert!(
+        rig.store.search_fts(&term, 10).unwrap().is_empty(),
+        "a withdrawn source must leave the search results"
+    );
+}
+
 /// The fetched-at format survives a round trip through storage.
 #[test]
 fn fetched_at_is_rfc3339_utc() {

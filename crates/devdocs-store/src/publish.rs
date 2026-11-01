@@ -48,12 +48,26 @@ impl Store {
     /// triggers firing, and the source flips to `active` — all inside one
     /// transaction. The license gate refuses sources below the index
     /// approval stage before any write happens.
+    ///
+    /// A terminal license state (`denied`, `expired`, `revoked`) additionally
+    /// withdraws a previously indexed source: the stored status and the
+    /// `active` flip land before the gate error returns, so the source leaves
+    /// search results at this enforcement point and not only at retrieve-time
+    /// filtering (docs/implementation/09 §License gate enforcement points).
     pub fn publish_generation(
         &self,
         src: &devdocs_model::SourceRecord,
         chunks: &[NewChunk],
     ) -> Result<(), StoreError> {
         if !src.license_status.allows_index() {
+            if matches!(
+                src.license_status,
+                devdocs_model::LicenseStatus::Denied
+                    | devdocs_model::LicenseStatus::Expired
+                    | devdocs_model::LicenseStatus::Revoked
+            ) {
+                self.withdraw_source(src)?;
+            }
             return Err(StoreError::LicenseNotApproved {
                 status: src.license_status,
             });
@@ -70,6 +84,26 @@ impl Store {
                 Err(error)
             }
         }
+    }
+
+    /// Records the terminal license state and deactivates the matching
+    /// source row. A source that was never published matches no row, and
+    /// the single UPDATE is its own transaction.
+    fn withdraw_source(&self, src: &devdocs_model::SourceRecord) -> Result<(), StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
+        conn.execute(
+            "UPDATE sources SET license_status = ?1, active = 0 \
+             WHERE library = ?2 AND version = ?3 AND kind = ?4 AND origin_url = ?5",
+            params![
+                src.license_status.as_str(),
+                src.library,
+                src.version,
+                src.kind.as_str(),
+                src.origin_url.as_str(),
+            ],
+        )
+        .map_err(StoreError::Sql)?;
+        Ok(())
     }
 }
 

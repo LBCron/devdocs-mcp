@@ -82,7 +82,7 @@ From the research local-profile controls (research: security-licensing.md §2):
 The state machine is defined in [07](07-ingest-pipeline.md). Enforcement is layered so a bug in one place cannot serve a denied source:
 
 1. The ingest planner refuses sources below `approved_fetch`.
-2. The store refuses to flip a source to `active` below `approved_index`.
+2. The store refuses to flip a source to `active` below `approved_index`, and publishing a terminal license state (`denied`, `expired`, `revoked`) deactivates the source, withdrawing it from search.
 3. The retrieve layer filters on license state at query time. A source revoked after indexing drops out of results at the next query, not just at the next sync.
 4. Output rendering enforces the snippet-vs-full rule per source state.
 
