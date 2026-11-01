@@ -22,7 +22,7 @@ struct Rig {
 
 fn rig() -> Rig {
     let dir = tempdir().unwrap();
-    let store = devdocs_testkit::open_migrated(&dir.path().join("docs.db"));
+    let store = devdocs_testkit::open_migrated(&dir.path().join("docs.db")).unwrap();
     let conn = Connection::open(dir.path().join("docs.db")).unwrap();
     Rig {
         store,
@@ -248,7 +248,7 @@ fn a_terminal_license_state_withdraws_the_source() {
         .unwrap_err();
     match error {
         devdocs_store::StoreError::LicenseNotApproved { status: refused } => {
-            assert_eq!(refused, LicenseStatus::Revoked)
+            assert_eq!(refused, LicenseStatus::Revoked);
         }
         other => panic!("expected LicenseNotApproved, got {other:?}"),
     }

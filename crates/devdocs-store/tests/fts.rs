@@ -25,9 +25,9 @@ struct Seeded {
 
 fn seeded() -> Seeded {
     let dir = tempdir().unwrap();
-    let store = devdocs_testkit::open_migrated(&dir.path().join("docs.db"));
+    let store = devdocs_testkit::open_migrated(&dir.path().join("docs.db")).unwrap();
     let conn = Connection::open(dir.path().join("docs.db")).unwrap();
-    let source_id = devdocs_testkit::seed_source(&conn, "next.js", true);
+    let source_id = devdocs_testkit::seed_source(&conn, "next.js", true).unwrap();
     // Title hit: the FTS title column is section_path + symbol.
     let title_chunk = devdocs_testkit::seed_chunk(
         &conn,
@@ -36,7 +36,8 @@ fn seeded() -> Seeded {
         "[\"Routing\",\"use_router\"]",
         Some("use_router"),
         "Unrelated body about storage.",
-    );
+    )
+    .unwrap();
     // Body hit only.
     let body_chunk = devdocs_testkit::seed_chunk(
         &conn,
@@ -45,7 +46,8 @@ fn seeded() -> Seeded {
         "[\"Storage\"]",
         None,
         "The routing hook configures navigation.",
-    );
+    )
+    .unwrap();
     conn.execute(
         "INSERT INTO symbols(symbol, chunk_id, kind) VALUES ('use_router', ?1, 'function')",
         rusqlite::params![title_chunk],
@@ -109,7 +111,8 @@ fn tokenizer_keeps_code_tokens_whole() {
         "[\"Hooks\"]",
         Some("use-route"),
         "Composes with use-route helpers and routes requests.",
-    );
+    )
+    .unwrap();
 
     // Both spellings stay whole tokens and match their own symbols.
     let hyphen = build_match_query("use-route").into_owned();

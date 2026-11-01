@@ -25,7 +25,7 @@ fn raw_wal_connection(path: &std::path::Path) -> Connection {
 fn seeded(path: &std::path::Path) -> Connection {
     let mut conn = raw_wal_connection(path);
     devdocs_store::migrate(&mut conn).unwrap();
-    let source_id = devdocs_testkit::seed_source(&conn, "w", true);
+    let source_id = devdocs_testkit::seed_source(&conn, "w", true).unwrap();
     devdocs_testkit::seed_chunk(
         &conn,
         source_id,
@@ -33,7 +33,8 @@ fn seeded(path: &std::path::Path) -> Connection {
         "[]",
         None,
         "first generation chunk about routing",
-    );
+    )
+    .unwrap();
     conn
 }
 

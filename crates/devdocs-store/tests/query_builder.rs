@@ -19,9 +19,9 @@ use devdocs_store::build_match_query;
 /// queries cannot match it.
 fn seeded_db() -> (tempfile::TempDir, Connection) {
     let dir = tempdir().unwrap();
-    let _store = devdocs_testkit::open_migrated(&dir.path().join("docs.db"));
+    let _store = devdocs_testkit::open_migrated(&dir.path().join("docs.db")).unwrap();
     let conn = Connection::open(dir.path().join("docs.db")).unwrap();
-    let source_id = devdocs_testkit::seed_source(&conn, "p", true);
+    let source_id = devdocs_testkit::seed_source(&conn, "p", true).unwrap();
     devdocs_testkit::seed_chunk(
         &conn,
         source_id,
@@ -29,7 +29,8 @@ fn seeded_db() -> (tempfile::TempDir, Connection) {
         "[\"Docs\"]",
         None,
         "The router hook configures navigation. use-route stays whole.",
-    );
+    )
+    .unwrap();
     (dir, conn)
 }
 
