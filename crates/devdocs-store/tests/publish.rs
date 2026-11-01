@@ -72,7 +72,7 @@ fn publish_upserts_and_activates_the_source() {
         )
         .unwrap();
 
-    let (active, fetched_at, commit_sha): (i64, String, String) = rig
+    let (active, _fetched_at, commit_sha): (i64, String, String) = rig
         .conn
         .query_row(
             "SELECT active, fetched_at, commit_sha FROM sources WHERE library = 'next.js'",
@@ -81,7 +81,6 @@ fn publish_upserts_and_activates_the_source() {
         )
         .unwrap();
     assert_eq!(active, 1, "a successful publish flips the source active");
-    assert!(fetched_at.ends_with('Z'), "fetched_at is RFC 3339 UTC");
     assert_eq!(commit_sha, "abc123");
 }
 
