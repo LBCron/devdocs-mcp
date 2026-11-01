@@ -43,7 +43,10 @@ pub fn migrate(conn: &mut Connection) -> Result<Vec<AppliedMigration>, StoreErro
 }
 
 /// Applies `migrations` in order, skipping versions at or below the current
-/// `user_version`.
+/// `user_version`. The unlocked read is a fast path for up-to-date
+/// databases; [`apply_one`] re-checks the version under the write lock, so
+/// a concurrent runner that applied the migration after the read skips it
+/// instead of failing on the existing DDL.
 fn apply_all(
     conn: &mut Connection,
     migrations: &[EmbeddedMigration],
@@ -56,18 +59,30 @@ fn apply_all(
         if i64::from(migration.version) <= current {
             continue;
         }
-        applied.push(apply_one(conn, migration)?);
+        if let Some(done) = apply_one(conn, migration)? {
+            applied.push(done);
+        }
     }
     Ok(applied)
 }
 
 /// Applies one migration inside a single transaction: SQL first, then the
 /// `user_version` bump, so both land or both roll back.
+///
+/// Returns `None` when another connection applied this migration between
+/// the unlocked read and the transaction: the `Immediate` transaction now
+/// holds the write lock, so the re-read `user_version` is authoritative.
 fn apply_one(
     conn: &mut Connection,
     migration: &EmbeddedMigration,
-) -> Result<AppliedMigration, StoreError> {
+) -> Result<Option<AppliedMigration>, StoreError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let stored: i64 = tx
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(StoreError::Sql)?;
+    if i64::from(migration.version) <= stored {
+        return Ok(None);
+    }
     let result = tx
         .execute_batch(migration.sql)
         .and_then(|()| tx.pragma_update(None, "user_version", i64::from(migration.version)));
@@ -80,17 +95,17 @@ fn apply_one(
         });
     }
     tx.commit().map_err(StoreError::Sql)?;
-    Ok(AppliedMigration {
+    Ok(Some(AppliedMigration {
         version: migration.version,
         name: migration.name.to_owned(),
-    })
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{EmbeddedMigration, apply_all};
+    use super::{EmbeddedMigration, apply_all, apply_one};
     use crate::error::StoreError;
 
     /// The shipped migrations form a contiguous run starting at 1.
@@ -138,5 +153,30 @@ mod tests {
             )
             .unwrap();
         assert_eq!(broken_left, 0, "failed DDL must roll back");
+    }
+
+    /// A runner that read `user_version` before another connection applied
+    /// the migration re-checks the version inside its transaction and skips
+    /// instead of failing on the existing DDL.
+    #[test]
+    fn a_stale_version_read_skips_an_already_applied_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut first = rusqlite::Connection::open(dir.path().join("docs.db")).unwrap();
+        let mut second = rusqlite::Connection::open(dir.path().join("docs.db")).unwrap();
+
+        // Another connection wins the race and applies the migration.
+        let applied = apply_all(&mut first, super::MIGRATIONS).unwrap();
+        assert_eq!(applied.len(), 1);
+
+        // The loser's `apply_all` fast path would still see the migration
+        // as pending if its read happened before the winner committed;
+        // apply it directly to stand in for that stale state.
+        let stale = EmbeddedMigration {
+            version: 1,
+            name: "0001_init",
+            sql: super::MIGRATIONS[0].sql,
+        };
+        let loser = apply_one(&mut second, &stale).unwrap();
+        assert!(loser.is_none(), "the re-check must skip, not re-apply");
     }
 }
