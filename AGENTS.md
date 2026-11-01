@@ -39,6 +39,23 @@ Here're the commands that you need for every task,
 
 Style config lives in `rustfmt.toml` and `Cargo.toml` — read them, do not restate them.
 
+### Worktrees (worktrunk)
+
+`wt` (worktrunk, https://worktrunk.dev) manages git worktrees by branch name. Worktrees live as sibling directories (`../devdocs-mcp.<branch>`); `wt list` shows all of them with branch, CI, and integration status. Full docs live at worktrunk.dev; every page also serves raw markdown at `<page>.md`.
+
+Agents use it to run tasks in isolation without touching the main checkout:
+
+- `wt switch --create <branch>` — create and enter a worktree for `<branch>`. Add `--format json` for machine-readable output.
+- `wt switch --create <branch> -x <command> -- <args>` — create the worktree and run `<command>` inside it, for example an agent session.
+- `wt merge [target]` — commit, squash, rebase onto the target, fast-forward merge, then remove the worktree. `--no-squash` keeps your commits. `wt` never fetches; it merges the local target, so fetch or pull first.
+- `wt remove <branch>` — remove the worktree; it deletes the branch only when its content is integrated.
+- `wt step copy-ignored` — reflink-copy gitignored files such as `target/` into a new worktree, so the first build reuses compiled dependencies. Project hooks (for example a `post-start` copy) live in `.config/wt.toml`.
+
+Notes:
+
+- Project hooks and aliases from `.config/wt.toml` run only after you approve each concrete command template once; `wt config approvals list` shows the state.
+- Shell integration is what makes `wt switch` change the shell's directory. In a non-interactive shell that change does not happen — pass `-C <path>` or run commands inside the worktree path instead.
+
 ## Workspace Layout
 
 Crate sources live under `crates/`: `devdocs` (CLI/MCP binary), `devdocs-model`, `devdocs-ingest`, `devdocs-store`, `devdocs-retrieve`, `devdocs-mcp`, `devdocs-eval`, `devdocs-testkit`, plus `context-*` helpers. Design and testing strategy docs live under `docs/implementation/`.
