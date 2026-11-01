@@ -157,7 +157,7 @@ fn covering_mount_fstype_from_lines(mountinfo: &str, target: &Path) -> Option<St
             continue;
         };
         let mountpoint = decode_mountinfo_escapes(mountpoint);
-        if !target.strip_prefix(&mountpoint).is_ok() {
+        if target.strip_prefix(&mountpoint).is_none() {
             continue;
         }
         // Equal lengths mean an overmount: the later line shadows the
