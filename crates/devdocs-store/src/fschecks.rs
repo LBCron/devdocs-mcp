@@ -174,7 +174,7 @@ fn covering_mount_fstype_from_lines(mountinfo: &str, target: &Path) -> Option<St
         // earlier one covering the same mount point.
         if best
             .as_ref()
-            .is_none_or(|(best_len, _)| mountpoint.len() >= best_len)
+            .is_none_or(|(best_len, _)| mountpoint.len() >= *best_len)
         {
             best = Some((mountpoint.len(), fields[separator + 1].to_owned()));
         }
