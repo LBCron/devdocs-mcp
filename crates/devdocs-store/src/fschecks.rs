@@ -147,7 +147,7 @@ fn covering_mount_fstype(target: &Path) -> Option<String> {
 /// `\011`, `\012`, and `\134`.
 #[cfg(target_os = "linux")]
 fn covering_mount_fstype_from_lines(mountinfo: &str, target: &Path) -> Option<String> {
-    let mut best: Option<String> = None;
+    let mut best: Option<(usize, String)> = None;
     for line in mountinfo.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
         let Some(separator) = fields.iter().position(|field| *field == "-") else {
@@ -162,11 +162,11 @@ fn covering_mount_fstype_from_lines(mountinfo: &str, target: &Path) -> Option<St
         }
         // Equal lengths mean an overmount: the later line shadows the
         // earlier one covering the same mount point.
-        if best.is_none() || mountpoint.len() >= best.as_ref().map_or(0, String::len) {
-            best = Some(fields[separator + 1].to_owned());
+        if best.is_none_or(|(best_len, _)| mountpoint.len() >= best_len) {
+            best = Some((mountpoint.len(), fields[separator + 1].to_owned()));
         }
     }
-    best
+    best.map(|(_, fstype)| fstype)
 }
 
 /// Decodes the four mountinfo escape sequences.
@@ -369,5 +369,20 @@ mod linux_tests {
             decode_mountinfo_escapes("a\\011b\\012c\\134040d"),
             "a\tb\nc\\040d"
         );
+    }
+
+    /// Shadowing compares mount points, not fstype names: a short nested
+    /// mount wins even when the parent's fstype name is the longer string.
+    #[test]
+    fn shadowing_compares_mount_point_lengths() {
+        let mountinfo = "\
+21 1 0:20 / / rw - ext4 /dev/sda1 rw
+50 21 0:50 / /f rw - fuse.s3fs s3fs://bucket
+51 50 0:54 / /f/db rw - fuse.ext4 /dev/loop0 rw";
+        // /f/db is 5 characters; /f is 2. The parent fstype name
+        // fuse.s3fs is 9 — longer than both, and it must not win.
+        let fstype =
+            covering_mount_fstype_from_lines(mountinfo, Path::new("/f/db/docs.db")).unwrap();
+        assert_eq!(fstype, "fuse.ext4");
     }
 }
