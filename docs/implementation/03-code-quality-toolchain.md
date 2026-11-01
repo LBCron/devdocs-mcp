@@ -3,7 +3,7 @@ type: guide
 title: Code Quality Toolchain
 description: The pinned toolchain, formatter policy, lint table, MSRV policy, docs policy, and the pull-request checklist for devdocs. Tool versions verified 2026-10-28.
 tags: [devdocs, toolchain, rustfmt, clippy, msrv]
-timestamp: 2026-11-01T00:00:00Z
+timestamp: 2026-11-02T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -54,7 +54,7 @@ The workspace lint table lives in the root `Cargo.toml` (see [02](02-project-sca
 
 | Lint | Level | Reason |
 |---|---|---|
-| `unsafe_code` (rust) | deny | No exceptions in workspace code. Bundled SQLite and rustls cover the FFI surface, and the store's storage controls read `statfs(2)`/`geteuid(2)` through the safe `nix` wrappers (docs/implementation/09 §Local storage controls) |
+| `unsafe_code` (rust) | forbid | No exceptions in workspace code — `forbid`, not `deny`, because a local `#[allow(unsafe_code)]` overrode `deny` and carried raw libc FFI to the Codacy PR check during M2. Bundled SQLite and rustls cover the FFI surface, and the store's storage controls read `statfs(2)`/`geteuid(2)` through the safe `nix` wrappers (docs/implementation/09 §Local storage controls) |
 | `missing_docs` (rust) | warn | Public API of lib crates needs doc comments |
 | clippy `all` | warn | Default correctness and style set |
 | clippy `pedantic` | warn | High-value extra checks. Noise is handled with targeted allows |
@@ -91,7 +91,16 @@ Clippy churn note. Clippy 1.91 through 1.99 renamed and moved several lints (for
 
 ## Git hooks
 
-`lefthook.yml` (see [02](02-project-scaffolding.md)) runs the format check and clippy on `pre-commit`, and the Conventional Commits regex on `commit-msg`. Heavy checks (tests, deny, audit) stay in CI. This split keeps the hook under 10 seconds on the reference laptop.
+`lefthook.yml` (see [02](02-project-scaffolding.md)) runs three gates, and every hook command delegates to a justfile recipe so hook flags (e.g. `--locked`) cannot drift from CI:
+
+- `pre-commit` — fast, per commit: `cargo fmt` with auto-staged fixes, and clippy `-D warnings` via `just lint`. Both are gated to staged Rust and TOML files so docs-only commits skip them.
+- `commit-msg` — the Conventional Commits regex (also enforced on PR titles by CI, see the `commits` job).
+- `pre-push` — the CI-facing gate, once per push before workflows trigger: `fmt-check`, `lint`, `test`, `test-doc`, `docs`, plus `deny` only when `Cargo.toml`/`Cargo.lock` changed against the push target, plus `codacy` (see below). This is the backstop that catches doc warnings, test failures, and shared-code lints before CI runs.
+- `pre-merge-commit` — the full `just ci` gate, because a merge commit lands on the target branch directly and per-commit checks cannot cover its combined state.
+
+`just codacy` runs the Codacy analysis CLI locally (`@codacy/analysis-cli`) with Opengrep over the main-branch diff — the same pattern engine behind the "Codacy Static Code Analysis" PR check, which for Rust is Opengrep only (Codacy runs no clippy). It is an optional gate, unlike the required tools: when `codacy-analysis` or its repo config (`.codacy/codacy.config.json`, generated once by `codacy-analysis init`) is absent, the check skips cleanly; findings fail the push. It is not part of `just ci` and not a CI job — the cloud app already analyzes every PR, so a CI job would duplicate it (gap named per the agent-ready-repo contract). The gate mirrors the local exclusion policy in `.codacy.yml`, including the `.github/**` exclusion: workflow security is owned by zizmor and CodeQL, and Codacy's pinning pattern misreads local `$`-prefixed action refs.
+
+What hooks deliberately do not cover: code behind Linux-only `#[cfg]` gates is invisible to a macOS host, the msrv and coverage jobs are CI-only, and load-sensitive test races only reproduce on loaded CI runners. Review-tool classes also stay out of reach: CodeRabbit's semantic findings (edge-case regressions, mount-lookup shadowing, fail-open branches) are AI review, Codacy's Lizard lexer bug and Duplication/Complexity advisories are that platform's own non-gating metrics, and none of them have a mechanical local equivalent. Those stay with the review bots and CI.
 
 ## Pull-request checklist
 

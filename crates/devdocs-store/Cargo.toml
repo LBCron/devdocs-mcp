@@ -30,6 +30,8 @@ fastembed = { workspace = true, optional = true }
 nix.workspace = true
 
 [dev-dependencies]
+# rusqlite: the concurrent-open test matches the busy error by code.
+rusqlite.workspace = true
 tempfile.workspace = true
 url.workspace = true
 proptest.workspace = true

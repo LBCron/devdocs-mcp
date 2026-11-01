@@ -1,5 +1,10 @@
-# Hooks run via sh without the user's profile: rustup's cargo (~/.cargo/bin)
-# is not on the default PATH, so every cargo command re-exports it below.
+# Hooks delegate every check to a justfile recipe: the recipes own the exact
+# flags (e.g. --locked) and the toolchain PATH export, so hooks and CI can
+# never drift and this file carries no PATH plumbing. Git spawns hooks with
+# the invoking shell's environment, which resolves `just`; cargo and the
+# binstall tools resolve through the justfile's own PATH export. See
+# docs/implementation/03 §Git hooks for what each stage intentionally does
+# not cover (Linux-only cfg code, MSRV, coverage — those stay in CI).
 pre-commit:
   skip:
     - merge
@@ -7,14 +12,11 @@ pre-commit:
   commands:
     fmt:
       glob: "*.rs"
-      run: |
-        export PATH="$HOME/.cargo/bin:$PATH"
-        cargo fmt --all
+      run: just fmt
       stage_fixed: true
     clippy:
-      run: |
-        export PATH="$HOME/.cargo/bin:$PATH"
-        cargo clippy --workspace --all-targets -- -D warnings
+      glob: "*.{rs,toml}"
+      run: just lint
 
 commit-msg:
   skip:
@@ -25,3 +27,38 @@ commit-msg:
       run: |
         head -1 {1} | grep -qE \
         '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9-]+\))?!?: .{1,72}$'
+
+pre-push:
+  commands:
+    fmt-check:
+      run: just fmt-check
+    lint:
+      run: just lint
+    test:
+      run: just test
+    test-doc:
+      run: just test-doc
+    docs:
+      run: just docs
+    deny:
+      # Only relevant when dependencies changed. Without an upstream
+      # (brand-new branch) @{push} cannot resolve: run the check anyway.
+      run: |
+        base="$(git rev-parse -q --verify '@{push}' 2>/dev/null || true)"
+        if [ -z "$base" ] || git diff --name-only "$base..HEAD" -- Cargo.toml Cargo.lock | grep -q .; then
+          just deny
+        else
+          echo "deny: skipped — Cargo.toml and Cargo.lock are unchanged against @{push}"
+        fi
+    codacy:
+      # Gated inside the recipe: skipped cleanly when the CLI or its repo
+      # config is absent, findings fail the push. Mirrors the Opengrep
+      # patterns of the Codacy PR check (see docs/implementation/03).
+      run: just codacy
+
+pre-merge-commit:
+  commands:
+    ci:
+      # A merge commit lands on the target branch directly, so it gets the
+      # full local gate, not the per-commit fast checks.
+      run: just ci
