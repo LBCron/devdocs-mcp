@@ -5,3 +5,7 @@
 # TABLE, trigger bodies) as errors, so the directory stays out of analysis.
 exclude_paths:
   - "migrations/**"
+  # Workflow security is owned by zizmor and CodeQL in CI. Codacy's
+  # GitHub-Actions pinning pattern misreads the local `$`-prefixed action
+  # refs as unpinned third-party actions and reports false positives.
+  - ".github/**"
