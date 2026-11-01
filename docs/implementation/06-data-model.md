@@ -3,7 +3,7 @@ type: guide
 title: Data Model
 description: The complete SQLite schema for devdocs, the FTS5 configuration, the migration system, and the hashing policy. Targets SQLite 3.54 bundled in rusqlite 0.41.
 tags: [devdocs, sqlite, fts5, schema, migrations]
-timestamp: 2026-10-28T00:00:00Z
+timestamp: 2026-10-31T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -70,11 +70,21 @@ CREATE TABLE chunks (
 CREATE INDEX idx_chunks_symbol ON chunks(source_id, symbol) WHERE symbol IS NOT NULL;
 CREATE INDEX idx_chunks_hash   ON chunks(content_hash);
 
--- chunks_fts: FTS5 external-content index over chunks
+-- chunks_content: view over chunks that spells the FTS5 columns by name.
+-- FTS5 external-content reads resolve the FTS5 column names (title, body)
+-- against the content table, so the view derives them without storing
+-- derived columns in chunks.
+CREATE VIEW chunks_content AS
+  SELECT chunk_id,
+         section_path || ' ' || COALESCE(symbol, '') AS title,
+         text AS body
+  FROM chunks;
+
+-- chunks_fts: FTS5 external-content index over chunks_content
 CREATE VIRTUAL TABLE chunks_fts USING fts5(
   title,
   body,
-  content='chunks',
+  content='chunks_content',
   content_rowid='chunk_id',
   tokenize="porter unicode61 remove_diacritics 2 tokenchars '-_'"
 );
@@ -115,7 +125,7 @@ CREATE TABLE session_trajectory (
 
 Verified against the SQLite 3.54 FTS5 documentation on 2026-10-28.
 
-- External content (`content='chunks'`) over a plain or contentless table. Only the external-content form supports `snippet()` for the stored text. Contentless tables return NULL from `snippet()` columns.
+- External content through the `chunks_content` view over `chunks`. FTS5 content reads resolve the FTS5 column names against the content object (`SELECT <content_rowid>, <cols> FROM <content>`), and `chunks` names its columns `section_path`, `symbol`, and `text`, so a bare `content='chunks'` cannot serve `snippet()`; the view supplies `title` and `body` by name. The external-content form supports `snippet()` for the stored text; contentless tables return NULL from `snippet()` columns.
 - The `delete` trigger form shown above is the documented sync method for external-content tables.
 - Tokenizer: `porter unicode61 remove_diacritics 2 tokenchars '-_'`. Porter stems English prose. `remove_diacritics 2` handles multi-diacritic codepoints. Code symbols keep `-` and `_` inside tokens, so `use_router` and `use-route` tokenize whole.
 - The `title` column carries the breadcrumb plus the symbol. It gets the high weight in ranking. The `body` column carries the text.
@@ -144,6 +154,7 @@ The scan is in-process Rust over the blobs (hamming distance on bytes). sqlite-v
   2. Every migration is idempotent under failure because it runs in one transaction. SQLite DDL is transactional.
   3. `devdocs db migrate` runs at CLI start and at MCP server start. It is fast (one read of `user_version`) and safe to run concurrently thanks to the write lock.
   4. Destructive migrations (drops) require a `--force` flag on `devdocs db migrate` for that migration only, recorded in the migration header comment.
+  5. Migration tests cover the up direction on a temp file, the no-op re-run on an up-to-date database, and rollback of a failed migration inside its transaction. There is no down direction to test: applied migrations never change (rule 1), so a failure rolls back to the previous version's schema and nothing else exists to roll back to.
 
 Runner signature in `devdocs-store`:
 

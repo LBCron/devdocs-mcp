@@ -3,7 +3,7 @@ type: guide
 title: Code Quality Toolchain
 description: The pinned toolchain, formatter policy, lint table, MSRV policy, docs policy, and the pull-request checklist for devdocs. Tool versions verified 2026-10-28.
 tags: [devdocs, toolchain, rustfmt, clippy, msrv]
-timestamp: 2026-10-28T00:00:00Z
+timestamp: 2026-11-01T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -54,7 +54,7 @@ The workspace lint table lives in the root `Cargo.toml` (see [02](02-project-sca
 
 | Lint | Level | Reason |
 |---|---|---|
-| `unsafe_code` (rust) | deny | The design needs no unsafe code. Bundled SQLite and rustls cover the FFI surface |
+| `unsafe_code` (rust) | deny | No exceptions in workspace code. Bundled SQLite and rustls cover the FFI surface, and the store's storage controls read `statfs(2)`/`geteuid(2)` through the safe `nix` wrappers (docs/implementation/09 §Local storage controls) |
 | `missing_docs` (rust) | warn | Public API of lib crates needs doc comments |
 | clippy `all` | warn | Default correctness and style set |
 | clippy `pedantic` | warn | High-value extra checks. Noise is handled with targeted allows |

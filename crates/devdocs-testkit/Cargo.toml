@@ -15,6 +15,7 @@ path = "src/lib.rs"
 [dependencies]
 devdocs-model.workspace = true
 devdocs-store.workspace = true
+rusqlite.workspace = true
 insta.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true

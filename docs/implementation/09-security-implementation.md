@@ -3,7 +3,7 @@ type: guide
 title: Security Implementation
 description: The mapping from the research threat model to concrete controls in code, the fetch-guard invariants and tests, injection-filter operations, storage controls, and the security checklist.
 tags: [devdocs, security, ssrf, injection, licensing]
-timestamp: 2026-10-28T00:00:00Z
+timestamp: 2026-11-01T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -75,14 +75,14 @@ From the research local-profile controls (research: security-licensing.md §2):
 - `DEVDOCS_HOME` created with mode 0700. `docs.db` with 0600. The store verifies modes at open and warns on drift.
 - Symlink check: the store refuses a DB path that is a symlink into another user's territory (ownership check on the resolved path).
 - Secure temp cleanup: `tmp/` contents removed on process exit, including the SIGINT/SIGTERM path.
-- Network filesystems: the store refuses a DB path on a known network mount prefix (for example `/net/`, SMB mountpoints) unless `--allow-network-fs` is set, because SQLite locking over network FS is unreliable.
+- Network filesystems: the store refuses a DB path on a known network filesystem — matched by `statfs` filesystem type (NFS, SMB/CIFS, AFS, NCP, CODA, 9P, OCFS2) plus network-backed FUSE subtypes such as sshfs, whose FUSE magic hides them from the type list — unless `--allow-network-fs` is set, because SQLite locking over network FS is unreliable.
 
 ## License gate enforcement points
 
 The state machine is defined in [07](07-ingest-pipeline.md). Enforcement is layered so a bug in one place cannot serve a denied source:
 
 1. The ingest planner refuses sources below `approved_fetch`.
-2. The store refuses to flip a source to `active` below `approved_index`.
+2. The store refuses to flip a source to `active` below `approved_index`, and publishing a terminal license state (`denied`, `expired`, `revoked`) deactivates the source, withdrawing it from search.
 3. The retrieve layer filters on license state at query time. A source revoked after indexing drops out of results at the next query, not just at the next sync.
 4. Output rendering enforces the snippet-vs-full rule per source state.
 
