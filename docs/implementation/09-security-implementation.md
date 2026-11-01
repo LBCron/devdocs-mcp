@@ -3,7 +3,7 @@ type: guide
 title: Security Implementation
 description: The mapping from the research threat model to concrete controls in code, the fetch-guard invariants and tests, injection-filter operations, storage controls, and the security checklist.
 tags: [devdocs, security, ssrf, injection, licensing]
-timestamp: 2026-10-28T00:00:00Z
+timestamp: 2026-11-01T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -75,7 +75,7 @@ From the research local-profile controls (research: security-licensing.md §2):
 - `DEVDOCS_HOME` created with mode 0700. `docs.db` with 0600. The store verifies modes at open and warns on drift.
 - Symlink check: the store refuses a DB path that is a symlink into another user's territory (ownership check on the resolved path).
 - Secure temp cleanup: `tmp/` contents removed on process exit, including the SIGINT/SIGTERM path.
-- Network filesystems: the store refuses a DB path on a known network mount prefix (for example `/net/`, SMB mountpoints) unless `--allow-network-fs` is set, because SQLite locking over network FS is unreliable.
+- Network filesystems: the store refuses a DB path on a known network filesystem — matched by `statfs` filesystem type (NFS, SMB/CIFS, AFS, NCP, CODA, 9P, OCFS2) plus network-backed FUSE subtypes such as sshfs, whose FUSE magic hides them from the type list — unless `--allow-network-fs` is set, because SQLite locking over network FS is unreliable.
 
 ## License gate enforcement points
 

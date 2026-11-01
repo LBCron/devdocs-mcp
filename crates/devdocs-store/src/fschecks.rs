@@ -96,12 +96,90 @@ pub(crate) fn check_network_mount(path: &Path) -> Result<(), StoreError> {
     ];
 
     let mount = statfs_of(path)?;
-    if NETWORK_MAGICS.contains(&mount.filesystem_type()) {
+    let fs_type = mount.filesystem_type();
+    if NETWORK_MAGICS.contains(&fs_type) {
+        return Err(StoreError::NetworkFsPath {
+            path: path.to_owned(),
+        });
+    }
+    // Every FUSE mount reports FUSE_SUPER_MAGIC, local ones included
+    // (ntfs-3g over FUSE), so the refusal needs the subtype from
+    // /proc/self/mountinfo: sshfs and friends hide behind the shared magic.
+    if fs_type == FUSE_SUPER_MAGIC
+        && let Some(subtype) = covering_mount_fstype(&existing_ancestor(path)?)
+            .as_deref()
+            .and_then(|fstype| fstype.strip_prefix("fuse."))
+        && NETWORK_FUSE_SUBTYPES.contains(&subtype)
+    {
         return Err(StoreError::NetworkFsPath {
             path: path.to_owned(),
         });
     }
     Ok(())
+}
+
+/// FUSE subtypes that serve a store from network or object storage. A plain
+/// `fuse` fstype with no subtype, and local FUSE filesystems, stay allowed.
+#[cfg(target_os = "linux")]
+const NETWORK_FUSE_SUBTYPES: &[&str] = &[
+    "sshfs",
+    "s3fs",
+    "rclone",
+    "gcsfuse",
+    "goofys",
+    "juicefs",
+    "blobfuse2",
+];
+
+/// The fstype of the mount covering `target`, read from
+/// `/proc/self/mountinfo`: the line with the longest mount point that is a
+/// path-prefix of `target` wins, so a nested mount shadows its parent.
+#[cfg(target_os = "linux")]
+fn covering_mount_fstype(target: &Path) -> Option<String> {
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    covering_mount_fstype_from_lines(&mountinfo, target)
+}
+
+/// Pure core of [`covering_mount_fstype`]: finds the covering mount in the
+/// given mountinfo lines.
+///
+/// Mountinfo fields escape space, tab, newline, and backslash as `\040`,
+/// `\011`, `\012`, and `\134`.
+#[cfg(target_os = "linux")]
+fn covering_mount_fstype_from_lines(mountinfo: &str, target: &Path) -> Option<String> {
+    let mut best: Option<String> = None;
+    for line in mountinfo.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let Some(separator) = fields.iter().position(|field| *field == "-") else {
+            continue;
+        };
+        let Some(mountpoint) = fields.get(4) else {
+            continue;
+        };
+        let mountpoint = decode_mountinfo_escapes(mountpoint);
+        if !target.strip_prefix(&mountpoint).is_ok() {
+            continue;
+        }
+        // Equal lengths mean an overmount: the later line shadows the
+        // earlier one covering the same mount point.
+        if best.is_none() || mountpoint.len() >= best.as_ref().map_or(0, String::len) {
+            best = Some(fields[separator + 1].to_owned());
+        }
+    }
+    best
+}
+
+/// Decodes the four mountinfo escape sequences.
+#[cfg(target_os = "linux")]
+fn decode_mountinfo_escapes(field: &str) -> String {
+    // `\134` (a literal backslash) last, so an escaped backslash followed by
+    // an escape like `\134040` survives as `\040` instead of becoming a
+    // second decode.
+    field
+        .replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
 }
 
 /// No portable network-mount signal exists on other platforms; the check
@@ -113,30 +191,35 @@ pub(crate) fn check_network_mount(path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// The deepest existing ancestor of `path` — the file itself when it exists,
+/// its parent directory otherwise (a fresh database has no file yet).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn existing_ancestor(path: &Path) -> Result<std::path::PathBuf, StoreError> {
+    if path.exists() {
+        return Ok(path.to_owned());
+    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if !parent.exists() {
+        return Err(StoreError::Io {
+            path: path.to_owned(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "database directory does not exist",
+            ),
+        });
+    }
+    Ok(parent.to_owned())
+}
+
 /// `statfs` on the deepest existing ancestor of `path` — the DB file when it
 /// exists, its parent directory when it does not (a fresh database has no
 /// file yet).
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn statfs_of(path: &Path) -> Result<nix::sys::statfs::Statfs, StoreError> {
-    let target = if path.exists() {
-        path.to_owned()
-    } else {
-        let parent = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        if !parent.exists() {
-            return Err(StoreError::Io {
-                path: path.to_owned(),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "database directory does not exist",
-                ),
-            });
-        }
-        parent.to_owned()
-    };
-
+    let target = existing_ancestor(path)?;
     nix::sys::statfs::statfs(&target).map_err(|source| StoreError::Io {
         path: target,
         source: std::io::Error::from(source),
@@ -233,4 +316,58 @@ pub(crate) fn warn_on_mode_drift(path: &Path) {
 #[cfg(not(unix))]
 pub(crate) fn warn_on_mode_drift(path: &Path) {
     let _ = path;
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{covering_mount_fstype_from_lines, decode_mountinfo_escapes};
+    use std::path::Path;
+
+    /// A representative `/proc/self/mountinfo` body: a root mount, an sshfs
+    /// mount under `/mnt`, and a nested FUSE mount with an escaped space.
+    const MOUNTINFO: &str = "\
+21 1 0:20 / / rw - ext4 /dev/sda1 rw
+35 21 0:34 / /mnt rw - fuse.sshfs user@host:/srv/docs
+38 35 0:40 / /mnt/ssh/my\\040docs rw - fuse.sshfs sshfs#user@host:/srv rw
+41 21 0:44 / /mnt/inner rw - fuse.ext4 /dev/loop0 rw";
+
+    /// sshfs hides behind FUSE_SUPER_MAGIC in statfs; mountinfo carries the
+    /// subtype, and the deepest covering mount wins.
+    #[test]
+    fn the_covering_mount_fstype_comes_from_the_deepest_prefix() {
+        let fstype =
+            covering_mount_fstype_from_lines(MOUNTINFO, Path::new("/mnt/ssh/docs.db")).unwrap();
+        assert_eq!(fstype, "fuse.sshfs");
+        let nested =
+            covering_mount_fstype_from_lines(MOUNTINFO, Path::new("/mnt/ssh/my docs/x")).unwrap();
+        assert_eq!(nested, "fuse.sshfs", "escaped space in the mount point");
+    }
+
+    /// A local FUSE filesystem under a network one is reported by its own
+    /// covering mount, and prefixes stop at component boundaries.
+    #[test]
+    fn prefix_matching_stops_at_component_boundaries() {
+        let fstype =
+            covering_mount_fstype_from_lines(MOUNTINFO, Path::new("/mnt/inner/db")).unwrap();
+        assert_eq!(fstype, "fuse.ext4", "a deeper mount shadows its parent");
+        let outside =
+            covering_mount_fstype_from_lines(MOUNTINFO, Path::new("/mntx/docs.db")).unwrap();
+        assert_eq!(
+            outside, "ext4",
+            "/mnt must not cover /mntx; the root mount answers"
+        );
+    }
+
+    /// The four escape sequences decode; an escaped backslash before an
+    /// escape stays a literal.
+    #[test]
+    fn mountinfo_escapes_decode() {
+        assert_eq!(decode_mountinfo_escapes("my\\040docs"), "my docs");
+        assert_eq!(
+            decode_mountinfo_escapes("a\\011b\\012c\\134040d"),
+            "a\tb\nc\\040d"
+        );
+    }
 }
