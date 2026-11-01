@@ -333,7 +333,7 @@ mod linux_tests {
 38 35 0:40 / /mnt/ssh/my\\040docs rw - fuse.sshfs sshfs#user@host:/srv rw
 41 21 0:44 / /mnt/inner rw - fuse.ext4 /dev/loop0 rw";
 
-    /// sshfs hides behind FUSE_SUPER_MAGIC in statfs; mountinfo carries the
+    /// sshfs hides behind `FUSE_SUPER_MAGIC` in statfs; mountinfo carries the
     /// subtype, and the deepest covering mount wins.
     #[test]
     fn the_covering_mount_fstype_comes_from_the_deepest_prefix() {
