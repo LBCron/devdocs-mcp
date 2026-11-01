@@ -329,7 +329,7 @@ The committed `justfile` at the repository root is the source of truth for the r
 
 - `pre-commit` — `just fmt` with auto-staged fixes and `just lint`, gated to staged Rust/TOML files, skipped on merge and rebase.
 - `commit-msg` — the Conventional Commits regex. A failed match blocks the commit.
-- `pre-push` — `fmt-check`, `lint`, `test`, `test-doc`, `docs`, and `deny` (only when `Cargo.toml`/`Cargo.lock` changed against the push target).
+- `pre-push` — `fmt-check`, `lint`, `test`, `test-doc`, `docs`, `deny` (only when `Cargo.toml`/`Cargo.lock` changed against the push target), and `codacy` (optional gate, skips when the CLI is absent — see [03](03-code-quality-toolchain.md) §Git hooks).
 - `pre-merge-commit` — `just ci`, because a merge commit lands on the target branch directly.
 
 What the gates do not cover and why lives in [03](03-code-quality-toolchain.md) §Git hooks.
