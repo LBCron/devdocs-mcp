@@ -61,22 +61,14 @@ fn chunk(ordinal: u32, symbol: Option<(&str, &str)>, body: &str) -> NewChunk {
     }
 }
 
-/// A publish upserts the source, inserts chunks and symbols, and flips the
-/// source active; the generation is searchable right away.
+/// A publish upserts the source and flips it active with its metadata.
 #[test]
-fn publish_activates_and_inserts_the_generation() {
+fn publish_upserts_and_activates_the_source() {
     let rig = rig();
     rig.store
         .publish_generation(
             &source(LicenseStatus::ApprovedIndex),
-            &[
-                chunk(
-                    0,
-                    Some(("use_router", "function")),
-                    "The use_router hook configures routing.",
-                ),
-                chunk(1, None, "Middleware runs before routing decisions."),
-            ],
+            &[chunk(0, None, "A body to publish.")],
         )
         .unwrap();
 
@@ -91,6 +83,25 @@ fn publish_activates_and_inserts_the_generation() {
     assert_eq!(active, 1, "a successful publish flips the source active");
     assert!(fetched_at.ends_with('Z'), "fetched_at is RFC 3339 UTC");
     assert_eq!(commit_sha, "abc123");
+}
+
+/// A publish inserts the chunk rows and their symbol rows.
+#[test]
+fn publish_inserts_chunks_and_symbols() {
+    let rig = rig();
+    rig.store
+        .publish_generation(
+            &source(LicenseStatus::ApprovedIndex),
+            &[
+                chunk(
+                    0,
+                    Some(("use_router", "function")),
+                    "The use_router hook configures routing.",
+                ),
+                chunk(1, None, "Middleware runs before routing decisions."),
+            ],
+        )
+        .unwrap();
 
     let chunks: i64 = rig
         .conn
@@ -107,6 +118,22 @@ fn publish_activates_and_inserts_the_generation() {
         )
         .unwrap();
     assert_eq!(symbols, (1, "function".to_owned()));
+}
+
+/// The published generation is searchable right away.
+#[test]
+fn publish_is_searchable_right_away() {
+    let rig = rig();
+    rig.store
+        .publish_generation(
+            &source(LicenseStatus::ApprovedIndex),
+            &[chunk(
+                0,
+                Some(("use_router", "function")),
+                "The use_router hook configures routing.",
+            )],
+        )
+        .unwrap();
 
     let expr = build_match_query("use_router").into_owned();
     let hits = rig.store.search_fts(&expr, 10).unwrap();
