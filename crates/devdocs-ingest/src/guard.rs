@@ -150,6 +150,36 @@ impl GuardError {
                 .map_or_else(|| String::from("request"), ToString::to_string),
         }
     }
+
+    /// The cloneable reconstruction of a refusal: the redirect policy can
+    /// only emit the URL-level variants, and reqwest wraps them inside a
+    /// redirect-flavored transport error.
+    fn policy_reconstruction(&self) -> Option<GuardError> {
+        Some(match self {
+            Self::InvalidScheme { url, scheme } => Self::InvalidScheme {
+                url: url.clone(),
+                scheme: scheme.clone(),
+            },
+            Self::Userinfo { url } => Self::Userinfo { url: url.clone() },
+            Self::BlockedPort { url, port } => Self::BlockedPort {
+                url: url.clone(),
+                port: *port,
+            },
+            Self::BlockedAddress { url, address } => Self::BlockedAddress {
+                url: url.clone(),
+                address: *address,
+            },
+            Self::NoAllowedAddress { host, url } => Self::NoAllowedAddress {
+                host: host.clone(),
+                url: url.clone(),
+            },
+            Self::RedirectLimit { url, limit } => Self::RedirectLimit {
+                url: url.clone(),
+                limit: *limit,
+            },
+            _ => return None,
+        })
+    }
 }
 
 /// The URL-level guard checks, shared by [`FetchGuard::check`] and the
@@ -165,9 +195,16 @@ impl GuardPolicy {
     /// The synchronous URL checks: HTTPS only, no userinfo, HTTP(S) ports
     /// only, and IP-literal hosts against the blocklist. Hostname hosts
     /// validate at resolution and connect time.
+    ///
+    /// With the loopback test-double exception on, a local HTTP double
+    /// (loopback host, http scheme, ephemeral port) is admitted; every
+    /// other host keeps the full checks.
     // The docs/13 binding sketch fixes the shape as `check(&Url)`.
     #[allow(clippy::trivially_copy_pass_by_ref)]
     pub(crate) fn check(&self, url: &Url) -> Result<(), GuardError> {
+        if self.allow_loopback_for_tests && is_local_double(url) {
+            return Ok(());
+        }
         if url.scheme() != "https" {
             return Err(GuardError::InvalidScheme {
                 url: url.to_string(),
@@ -399,21 +436,37 @@ impl FetchGuard {
 }
 
 /// Maps a transport error onto the guard taxonomy: timeouts and redirect
-/// failures carry their own variants.
+/// failures carry their own variants. A redirect failure whose source chain
+/// carries a guard refusal unwraps to it, so the CLI detail names the real
+/// reason (for example a redirect into a blocked address).
 fn map_transport(error: reqwest::Error) -> GuardError {
     if error.is_timeout() {
         GuardError::Timeout
     } else if error.is_redirect() {
-        // The custom policy's errors surface wrapped as redirect errors.
-        GuardError::RedirectLimit {
+        unwrap_policy_error(&error).unwrap_or_else(|| GuardError::RedirectLimit {
             url: error
                 .url()
                 .map_or_else(|| String::from("<unknown>"), ToString::to_string),
             limit: 0,
-        }
+        })
     } else {
         GuardError::Transport(error)
     }
+}
+
+/// Searches the error source chain for the [`GuardError`] a redirect policy
+/// pass emitted, and rebuilds the cloneable refusal variants.
+fn unwrap_policy_error(error: &reqwest::Error) -> Option<GuardError> {
+    let mut source = std::error::Error::source(error);
+    while let Some(current) = source {
+        if let Some(guard) = current.downcast_ref::<GuardError>()
+            && let Some(rebuilt) = guard.policy_reconstruction()
+        {
+            return Some(rebuilt);
+        }
+        source = current.source();
+    }
+    None
 }
 
 /// The IP blocklist (docs/implementation/09 invariant 4): private, loopback,
@@ -435,6 +488,25 @@ fn is_loopback_form(ip: &IpAddr) -> bool {
         IpAddr::V6(v6) => {
             v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
         }
+    }
+}
+
+/// Whether the URL targets a local HTTP test double: a loopback host over
+/// http or https, any port. Only reachable with the loopback exception on.
+fn is_local_double(url: &Url) -> bool {
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return false;
+    }
+    match url.host_str() {
+        Some("localhost") => true,
+        Some(host) => {
+            let bare = host
+                .strip_prefix('[')
+                .and_then(|rest| rest.strip_suffix(']'))
+                .unwrap_or(host);
+            bare.parse::<IpAddr>().is_ok_and(|ip| is_loopback_form(&ip))
+        }
+        None => false,
     }
 }
 
