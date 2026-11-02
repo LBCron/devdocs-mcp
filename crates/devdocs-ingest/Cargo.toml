@@ -16,13 +16,19 @@ default = []
 exact-tokens = ["dep:tiktoken-rs", "text-splitter/tiktoken-rs"]
 
 [dependencies]
+bytes.workspace = true
 devdocs-model.workspace = true
 devdocs-store.workspace = true
+reqwest.workspace = true
 text-splitter.workspace = true
 tiktoken-rs = { workspace = true, optional = true }
 thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
+wiremock.workspace = true
 
 [lints]
 workspace = true

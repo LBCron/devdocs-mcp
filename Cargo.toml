@@ -25,6 +25,7 @@ devdocs-testkit = { path = "crates/devdocs-testkit" }
 # runtime
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "fs", "net", "time", "signal", "sync"] }
 reqwest = { version = "0.13.5", features = ["gzip"] }
+bytes = "1.10"
 # storage
 rusqlite = { version = "0.41.0", features = ["bundled"] }
 # cli + serialization
