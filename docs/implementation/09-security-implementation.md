@@ -3,7 +3,7 @@ type: guide
 title: Security Implementation
 description: The mapping from the research threat model to concrete controls in code, the fetch-guard invariants and tests, injection-filter operations, storage controls, and the security checklist.
 tags: [devdocs, security, ssrf, injection, licensing]
-timestamp: 2026-11-01T00:00:00Z
+timestamp: 2026-11-03T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -45,6 +45,8 @@ The guard is the only network code. Enforced properties, each with a property te
 8. Fail closed: any guard error aborts the whole source ingest, not just the failing request.
 
 The pinned resolver returns one address per host lookup. DNS rebinding fails because the connect-time IP is the checked IP.
+
+The blocklist has no config escape. The one exception is in test code: the guard constructor behind the wiremock doubles admits local HTTP test doubles (loopback host, http or https scheme, any port) so offline tests can exercise the live request path on `127.0.0.1`. Production paths never enable it, and a unit test pins the default off.
 
 ## Git subprocess safety
 

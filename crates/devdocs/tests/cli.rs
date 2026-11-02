@@ -466,3 +466,203 @@ fn config_show_snapshot() {
         ".index.path" => "[DB_PATH]",
     });
 }
+
+/// The index and page bodies the fixture replay serves.
+const INDEX: &str = concat!(
+    "# Acme\n\n> Acme widgets documentation.\n\n",
+    "## Guides\n\n",
+    "- [Intro](https://docs.acme.test/intro.md): Start here\n",
+    "- [Printable](https://docs.acme.test/intro.html): The HTML twin\n"
+);
+
+const INTRO: &str = concat!(
+    "# Intro\n\n",
+    "The Acme SDK ships a client for every runtime.\n\n",
+    "## Install\n\n",
+    "Run the installer and export the key.\n"
+);
+
+/// Writes the fixture directory and returns its path.
+fn write_fixture(env: &Env) -> PathBuf {
+    let dir = env.root.join("fixture");
+    std::fs::create_dir_all(&dir).expect("fixture dir");
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": INDEX },
+        { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": INTRO },
+    ]);
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string(&responses).expect("manifest serializes"),
+    )
+    .expect("manifest written");
+    dir
+}
+
+/// Writes the config file, with or without the acme registry entry.
+fn write_config(env: &Env, with_source: bool) -> PathBuf {
+    let body = if with_source {
+        concat!(
+            "[sources.acme]\n",
+            "kind = \"llms_txt\"\n",
+            "url = \"https://docs.acme.test/llms.txt\"\n",
+            "license = \"MIT\"\n",
+            "status = \"approved_index\"\n"
+        )
+    } else {
+        ""
+    };
+    let path = env.root.join("devdocs.toml");
+    std::fs::write(&path, body).expect("config written");
+    path
+}
+
+/// `add --fixture` runs the whole vertical slice offline: the store then
+/// lists the source, and the chunks carry their hashes and breadcrumbs.
+#[test]
+fn add_with_a_fixture_ingests_offline() {
+    let env = Env::new();
+    let fixture = write_fixture(&env);
+    let config = write_config(&env, true);
+    let db = env.root.join("docs.db");
+
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "add",
+            "https://docs.acme.test/llms.txt",
+            "--fixture",
+            fixture.to_str().expect("fixture path"),
+            "--version",
+            "1.0",
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+            "--db",
+            db.to_str().expect("db path"),
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let added: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    assert_eq!(added["library"], "acme");
+    assert_eq!(added["version"], "1.0");
+    assert_eq!(added["pages"], 1, "the HTML twin is skipped: {added}");
+    assert!(added["chunks"].as_u64().expect("chunks") > 0);
+
+    // `devdocs list --json` names the source and version.
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "list",
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+            "--db",
+            db.to_str().expect("db path"),
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let list: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    assert_eq!(list["results"].as_array().expect("results").len(), 1);
+    assert_eq!(list["results"][0]["library"], "acme");
+    assert_eq!(list["results"][0]["version"], "1.0");
+    assert_eq!(list["results"][0]["kind"], "llms_txt");
+    assert_eq!(list["results"][0]["license_status"], "approved_index");
+    assert_eq!(list["results"][0]["active"], true);
+
+    // Store-level assertion: chunks, hashes, breadcrumbs.
+    let chunks = devdocs_testkit::read_chunks(&db).expect("chunks read");
+    assert!(chunks.len() > 1, "index intro page yields several chunks");
+    assert!(chunks.iter().all(|chunk| chunk.library == "acme"));
+    for chunk in &chunks {
+        assert_eq!(chunk.content_hash.len(), 32);
+        // The stored text starts with the contextual header.
+        assert!(
+            chunk.text.starts_with("[acme 1.0 › "),
+            "text: {}",
+            chunk.text
+        );
+        // The breadcrumb is a JSON array of strings rooted at the page H1.
+        let path: Vec<String> = serde_json::from_str(&chunk.section_path).expect("breadcrumb json");
+        assert_eq!(path.first().map(String::as_str), Some("Intro"));
+        // The header is excluded from the hash: strip it and re-derive.
+        let body = chunk
+            .text
+            .split_once("\n\n")
+            .map_or(chunk.text.as_str(), |(_, body)| body);
+        assert_eq!(
+            chunk.content_hash,
+            devdocs_store::content_hash(body).to_vec()
+        );
+    }
+    // The install section of the intro page carries its breadcrumb.
+    assert!(
+        chunks
+            .iter()
+            .any(|chunk| chunk.text.contains("installer") && chunk.section_path.contains("Install"))
+    );
+}
+
+/// A source with no `[sources]` entry refuses with `FETCH_BLOCKED` before
+/// anything moves: exit 3, no database file, no bytes.
+#[test]
+fn add_without_a_registry_entry_refuses_fetch_blocked() {
+    let env = Env::new();
+    let fixture = write_fixture(&env);
+    let config = write_config(&env, false);
+    let db = env.root.join("docs.db");
+    assert!(!db.exists());
+
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "add",
+            "https://docs.acme.test/llms.txt",
+            "--fixture",
+            fixture.to_str().expect("fixture path"),
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+            "--db",
+            db.to_str().expect("db path"),
+        ],
+    );
+    assert_eq!(code, 3, "stdout: {stdout} stderr: {stderr}");
+    assert!(stderr.contains("FETCH_BLOCKED"), "stderr: {stderr}");
+    assert!(stdout.trim().is_empty(), "stdout stays clean: {stdout}");
+    assert!(!db.exists(), "a refused add must not create the database");
+}
+
+/// `db migrate` runs the startup migration and is idempotent.
+#[test]
+fn db_migrate_runs_and_is_idempotent() {
+    let env = Env::new();
+    let db = env.root.join("migrate.db");
+
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &["db", "migrate", "--db", db.to_str().expect("db path")],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let result: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    assert_eq!(result["schema_version"], 1);
+
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &["db", "migrate", "--db", db.to_str().expect("db path")],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let result: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    assert_eq!(result["schema_version"], 1);
+}
+
+/// `list` on an empty store prints the empty envelope under `--json`.
+#[test]
+fn list_on_an_empty_store_prints_the_empty_envelope() {
+    let env = Env::new();
+    let (code, stdout, stderr) = output(env.cmd(), &["list", "--json"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let list: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    assert_eq!(list["results"].as_array().expect("results").len(), 0);
+    assert_eq!(list["truncated"], false);
+    assert!(list["served_at"].is_string());
+}

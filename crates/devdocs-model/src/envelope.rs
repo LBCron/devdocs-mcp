@@ -101,6 +101,15 @@ pub struct SourceSummary {
     pub active: bool,
 }
 
+/// The RFC 3339 UTC timestamp envelopes carry as `served_at`; the fallback
+/// keeps the envelope contract when the clock is unavailable.
+#[must_use]
+pub fn now_rfc3339() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
+}
+
 /// Build the empty result envelope that placeholder commands print.
 #[must_use]
 pub fn empty_envelope() -> ResultEnvelope {
@@ -108,8 +117,6 @@ pub fn empty_envelope() -> ResultEnvelope {
         results: Vec::new(),
         truncated: false,
         next_cursor: None,
-        served_at: OffsetDateTime::now_utc()
-            .format(&Rfc3339)
-            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned()),
+        served_at: now_rfc3339(),
     }
 }

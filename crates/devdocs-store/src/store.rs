@@ -86,6 +86,15 @@ impl Store {
         let mut guard = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
         crate::migrate::migrate_with_options(&mut guard, options)
     }
+
+    /// The current schema version (`user_version`).
+    pub fn user_version(&self) -> Result<u32, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .map_err(StoreError::Sql)?;
+        Ok(u32::try_from(version).unwrap_or(0))
+    }
 }
 
 /// Sets the five connection pragmas and verifies the WAL switch by readback.

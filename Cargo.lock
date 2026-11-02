@@ -1020,14 +1020,19 @@ dependencies = [
  "assert_cmd",
  "clap",
  "ctrlc",
+ "devdocs-ingest",
  "devdocs-model",
  "devdocs-store",
+ "devdocs-testkit",
  "insta",
  "predicates",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
+ "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

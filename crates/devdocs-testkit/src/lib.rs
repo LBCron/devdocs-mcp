@@ -56,3 +56,53 @@ pub fn seed_chunk(
     )?;
     Ok(conn.last_insert_rowid())
 }
+
+/// One chunk row read back from a store file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredChunk {
+    /// The source the chunk belongs to.
+    pub source_id: i64,
+    /// The library and version of that source.
+    pub library: String,
+    /// The version of that source.
+    pub version: String,
+    /// The raw sha256 bytes of the chunk body.
+    pub content_hash: Vec<u8>,
+    /// The breadcrumb JSON array.
+    pub section_path: String,
+    /// The stored text with the contextual header.
+    pub text: String,
+    /// The stored token count.
+    pub token_count: i64,
+    /// The chunk position inside the source.
+    pub ordinal: i64,
+}
+
+/// Reads every chunk row of every active source, joined with its source
+/// row, ordered by library, version, and ordinal.
+///
+/// The store-level assertions in the CLI tests read through this helper so
+/// no test touches rusqlite directly.
+pub fn read_chunks(path: &Path) -> Result<Vec<StoredChunk>, rusqlite::Error> {
+    let conn = Connection::open(path)?;
+    let mut statement = conn.prepare(
+        "SELECT c.source_id, s.library, s.version, c.content_hash, c.section_path, c.text, \
+                c.token_count, c.ordinal \
+         FROM chunks c JOIN sources s ON s.source_id = c.source_id \
+         WHERE s.active = 1 \
+         ORDER BY s.library, s.version, c.ordinal",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(StoredChunk {
+            source_id: row.get(0)?,
+            library: row.get(1)?,
+            version: row.get(2)?,
+            content_hash: row.get(3)?,
+            section_path: row.get(4)?,
+            text: row.get(5)?,
+            token_count: row.get(6)?,
+            ordinal: row.get(7)?,
+        })
+    })?;
+    rows.collect()
+}

@@ -82,6 +82,10 @@ pub enum Command {
         /// The source kind override.
         #[arg(long)]
         kind: Option<String>,
+        /// Replay recorded responses from this directory instead of using
+        /// the network (docs/implementation/13 §M3 step 5).
+        #[arg(long, value_name = "DIR")]
+        fixture: Option<PathBuf>,
     },
     /// Refresh stale approved sources.
     Sync {
@@ -200,7 +204,12 @@ pub enum SkillOp {
 #[derive(Debug, Subcommand)]
 pub enum DbOp {
     /// Run pending schema migrations.
-    Migrate,
+    Migrate {
+        /// Admit destructive (drop) migrations for this run
+        /// (docs/implementation/06 §Migrations).
+        #[arg(long)]
+        force: bool,
+    },
     /// Reclaim space in the database file.
     Vacuum,
     /// Print database statistics.
@@ -257,9 +266,45 @@ pub enum EvalOp {
 pub fn run(cli: &Cli) -> Result<(), Error> {
     match &cli.command {
         Command::Config { op } => run_config(cli, op),
-        Command::Add { .. }
-        | Command::Sync { .. }
-        | Command::List
+        Command::Add {
+            source,
+            version,
+            kind: _,
+            fixture,
+        } => {
+            let config = Config::load(&overrides(cli))?;
+            let result =
+                crate::commands::run_add(&config, source, version.as_deref(), fixture.as_deref())?;
+            if cli.json {
+                print_line(&result)
+            } else {
+                write_stdout_line(&summarize_add(&result))
+            }
+        }
+        Command::List => {
+            let config = Config::load(&overrides(cli))?;
+            let envelope = crate::commands::run_list(&config)?;
+            if cli.json {
+                print_line(&envelope)
+            } else {
+                for item in &envelope.results {
+                    let state = if item.active { "active" } else { "inactive" };
+                    write_stdout_line(&format!(
+                        "{} {} ({} · {} · {})",
+                        item.library, item.version, item.kind, item.license_status, state
+                    ))?;
+                }
+                Ok(())
+            }
+        }
+        Command::Db {
+            op: DbOp::Migrate { force },
+        } => {
+            let config = Config::load(&overrides(cli))?;
+            let result = crate::commands::run_db_migrate(&config, *force)?;
+            print_line(&result)
+        }
+        Command::Sync { .. }
         | Command::Search { .. }
         | Command::Symbol { .. }
         | Command::Open { .. }
@@ -271,6 +316,27 @@ pub fn run(cli: &Cli) -> Result<(), Error> {
         | Command::Db { .. }
         | Command::Eval { .. } => print_placeholder(),
     }
+}
+
+/// The human-readable one-line summary `add` prints without `--json`.
+fn summarize_add(result: &serde_json::Value) -> String {
+    let library = result
+        .get("library")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("?");
+    let version = result
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("?");
+    let chunks = result
+        .get("chunks")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let pages = result
+        .get("pages")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    format!("indexed {library} {version}: {pages} pages, {chunks} chunks")
 }
 
 /// Print the empty result envelope: the deliberate M1 placeholder that the
