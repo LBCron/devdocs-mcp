@@ -13,7 +13,7 @@ use rusqlite::OpenFlags;
 
 use crate::error::StoreError;
 use crate::fschecks;
-use crate::migrate::{self, AppliedMigration};
+use crate::migrate::AppliedMigration;
 
 /// Options for [`Store::open_with`].
 #[derive(Debug, Clone, Copy, Default)]
@@ -73,8 +73,18 @@ impl Store {
 
     /// Applies every pending migration to the store's connection.
     pub fn migrate(&self) -> Result<Vec<AppliedMigration>, StoreError> {
+        self.migrate_with_options(&crate::migrate::MigrateOptions::default())
+    }
+
+    /// Applies every pending migration with explicit options
+    /// (docs/implementation/06 §Migrations: `--force` gates destructive
+    /// migrations).
+    pub fn migrate_with_options(
+        &self,
+        options: &crate::migrate::MigrateOptions,
+    ) -> Result<Vec<AppliedMigration>, StoreError> {
         let mut guard = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
-        migrate::migrate(&mut guard)
+        crate::migrate::migrate_with_options(&mut guard, options)
     }
 }
 
