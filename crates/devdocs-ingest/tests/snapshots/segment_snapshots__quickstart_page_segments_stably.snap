@@ -1,0 +1,47 @@
+---
+source: crates/devdocs-ingest/tests/segment_snapshots.rs
+expression: chunks
+---
+[
+  {
+    "body": "The Acme Widgets SDK ships first-class clients for TypeScript, Python, and Go.\nInstall it with your package manager of choice and export the API key before\nthe first call.",
+    "content_hash": "0fa18b1c597ec24ada057f7642c2ca4b8a9207d520e45913e36982001420ebc9",
+    "header": "[acme 2.1.0 › Acme Quickstart]",
+    "page_range": [
+      19,
+      190
+    ],
+    "section_path": [
+      "Acme Quickstart"
+    ],
+    "token_count": 51
+  },
+  {
+    "body": "Run the installer for your runtime and pin the minor version so upgrades stay\npredictable in continuous integration.\n\n```bash\nnpm install @acme/widgets@^2.1\nexport ACME_API_KEY=\"sk-test-not-a-real-key\"\n```\n\nThe installer writes a lockfile entry and prints the resolved version. A\nproject that already pins `@acme/widgets` keeps its resolution.",
+    "content_hash": "9440305ccfd34e6e4cb445519c18ceaaa86630001834506b23427fdfa28cff9f",
+    "header": "[acme 2.1.0 › Acme Quickstart › Installation]",
+    "page_range": [
+      209,
+      552
+    ],
+    "section_path": [
+      "Acme Quickstart",
+      "Installation"
+    ],
+    "token_count": 98
+  },
+  {
+    "body": "Create a client, then list the widgets visible to the key. The client reads\n`ACME_API_KEY` from the environment, so no credentials land in source files.\n\n```ts\nimport { Acme } from \"@acme/widgets\";\n\nconst acme = new Acme();\nconst widgets = await acme.widgets.list();\nconsole.log(widgets.length);\n```\n\nThe list call paginates by cursor. Pass `pageSize` to bound each response; the\ndefault page holds twenty rows and the client follows `nextCursor` for you.\n\nA longer paragraph follows so the packer must close a chunk near the target\nsize and start a fresh one. The Acme platform documents four widget kinds:\nplain widgets, grouped widgets, widget collections, and widget aliases. Each\nkind carries its own quota and its own retention window, and the platform\napplies the strictest quota of the kinds a project mixes. Quota errors name\nthe kind that tripped, the window that applies, and the earliest instant the\nwindow resets, so a backoff loop can schedule its retry without a second\nround trip. The retention window interacts with export: a widget deleted\ninside its window can still be exported by an admin, while a widget deleted\nafter the window is gone from every export surface including the audit log\nmirror.",
+    "content_hash": "139c05398d74e8929482dc7c7d6d08fbc2506df587dea5a98d0f4241207c63cb",
+    "header": "[acme 2.1.0 › Acme Quickstart › First call]",
+    "page_range": [
+      569,
+      1785
+    ],
+    "section_path": [
+      "Acme Quickstart",
+      "First call"
+    ],
+    "token_count": 316
+  }
+]

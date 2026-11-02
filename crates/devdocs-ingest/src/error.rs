@@ -30,4 +30,10 @@ pub enum IngestError {
     /// A fetch-guard refusal or failure (docs/implementation/09).
     #[error("fetch guard: {0}")]
     Guard(#[from] GuardError),
+    /// The tokenizer could not load or the limits are inconsistent.
+    #[error("tokenizer: {message}")]
+    Tokenizer {
+        /// What failed.
+        message: String,
+    },
 }
