@@ -3,7 +3,7 @@ type: guide
 title: CI/CD and Release
 description: The GitHub Actions workflows (CI, release, publish, audits, and the security workflows: CodeQL, Scorecard, dependency review, zizmor), the release build matrix, the crates.io publish path with trusted publishing, and the versioning policy. Action versions digest-pinned 2026-10-30.
 tags: [devdocs, ci, github-actions, release, crates-io, security]
-timestamp: 2026-11-02T01:00:00Z
+timestamp: 2026-11-02T02:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -75,7 +75,7 @@ Notes:
 
 ## release.yml (binaries)
 
-The release builds use native runners for macOS and Windows and `cargo-zigbuild` for Linux, including musl and arm64. `cross-rs` has not tagged a release since 2023, so it is not used. Cargo-dist exists but moves slowly. The hand-rolled matrix is easier to audit for this project. A workflow-level concurrency group (`release`, no cancellation) serializes tag pushes so the 7-leg matrix never runs twice concurrently.
+The release builds use native runners for macOS and Windows and `cargo-zigbuild` for Linux, including musl and arm64. Both build steps pin `RUSTUP_TOOLCHAIN` to the channel from rust-toolchain.toml: without the pin, cargo re-syncs the toml's components at build time and rustup dies with `detected conflict: bin/cargo-fmt` on the legs whose matrix target is the host triple. `cross-rs` has not tagged a release since 2023, so it is not used. Cargo-dist exists but moves slowly. The hand-rolled matrix is easier to audit for this project. A workflow-level concurrency group (`release`, no cancellation) serializes tag pushes so the 7-leg matrix never runs twice concurrently.
 
 ```yaml
 permissions:

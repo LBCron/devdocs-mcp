@@ -101,10 +101,19 @@ jobs:
       - name: Build (zigbuild)
         if: matrix.zig
         shell: bash
+        env:
+          # Pin the toolchain so cargo skips the rust-toolchain.toml sync:
+          # that sync re-downloads the toml's components and dies with
+          # "detected conflict: bin/cargo-fmt" on the legs whose matrix
+          # target is the host triple. The build needs rustc, cargo, and
+          # the target std only.
+          RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.channel }}
         run: cargo zigbuild -p devdocs --release --locked --target ${{ matrix.target }}
       - name: Build (native)
         if: ${{ !matrix.zig }}
         shell: bash
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.toolchain.outputs.channel }}
         run: cargo build -p devdocs --release --locked --target ${{ matrix.target }}
       - name: Smoke test
         if: matrix.smoke

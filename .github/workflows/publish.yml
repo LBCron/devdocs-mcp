@@ -106,11 +106,12 @@ jobs:
           GITHUB_TOKEN: ${{ steps.release-token.outputs.token }}
       # The release gate is the ruleset's checks, not a human merge (docs 11;
       # reversal recorded in docs 01): queue the release PR to merge itself
-      # once those checks pass. The action's `pr` output is empty when there
-      # was nothing to release, so this skips on no-op runs. The output is a
-      # JSON PR object (html_url, number, ...), not a URL string.
+      # once those checks pass. The action's `pr` output is a JSON PR object
+      # (html_url, number, ...) when a PR was opened or updated, and the
+      # literal "null" (jq's .[0] of an empty array) when there was nothing
+      # to release — so this skips on both.
       - name: Enable auto-merge on the release PR
-        if: steps.release-plz.outputs.pr != ''
+        if: steps.release-plz.outputs.pr != '' && steps.release-plz.outputs.pr != 'null'
         shell: bash
         env:
           GH_TOKEN: ${{ steps.release-token.outputs.token }}
