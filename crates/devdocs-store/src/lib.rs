@@ -8,6 +8,7 @@
 mod error;
 mod fschecks;
 mod hash;
+mod list;
 mod migrate;
 mod publish;
 mod query;
