@@ -68,16 +68,37 @@ pub struct Example {
 }
 
 /// The result envelope printed on stdout (docs/08 top-level fields).
+///
+/// The item type varies per command: search/open/symbol serve
+/// [`ResultItem`]s, `list` serves [`SourceSummary`]s. The top-level shape is
+/// the contract and stays identical.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ResultEnvelope {
+pub struct ResultEnvelope<T = ResultItem> {
     /// The results, in fusion order.
-    pub results: Vec<ResultItem>,
+    pub results: Vec<T>,
     /// Whether the budget cut the result list short.
     pub truncated: bool,
     /// The cursor for the next page, when results were truncated.
     pub next_cursor: Option<String>,
     /// The RFC 3339 time the envelope was served at.
     pub served_at: String,
+}
+
+/// One `devdocs list` item: the discovery surface names every indexed
+/// source and version (docs/implementation/08 §CLI contract).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceSummary {
+    /// The library name, for example `next.js`.
+    pub library: String,
+    /// The exact version, for example `16.2.9`.
+    pub version: String,
+    /// The origin adapter that produced the content, for example
+    /// `llms_txt`.
+    pub kind: String,
+    /// The license approval stage of the source.
+    pub license_status: String,
+    /// Whether the source is active in search.
+    pub active: bool,
 }
 
 /// Build the empty result envelope that placeholder commands print.
