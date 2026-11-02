@@ -3,7 +3,7 @@ type: guide
 title: Data Model
 description: The complete SQLite schema for devdocs, the FTS5 configuration, the migration system, and the hashing policy. Targets SQLite 3.54 bundled in rusqlite 0.41.
 tags: [devdocs, sqlite, fts5, schema, migrations]
-timestamp: 2026-10-31T00:00:00Z
+timestamp: 2026-11-02T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -146,7 +146,7 @@ The scan is in-process Rust over the blobs (hamming distance on bytes). sqlite-v
 
 ## Migrations
 
-- Files live in `migrations/` and embed with `include_str!` into `devdocs-store`.
+- Files live in `crates/devdocs-store/migrations/` (inside the crate, so `cargo publish` packages them) and embed with `include_str!` into `devdocs-store`.
 - Names: `NNNN_description.sql`, numbered from `0001`.
 - The runner reads `PRAGMA user_version` and applies pending files in order inside one transaction each, then sets `user_version` to the applied number.
 - Rules:

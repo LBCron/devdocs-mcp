@@ -21,7 +21,7 @@ const MIGRATIONS: &[EmbeddedMigration] = &[EmbeddedMigration {
     name: "0001_init",
     sql: include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../migrations/0001_init.sql"
+        "/migrations/0001_init.sql"
     )),
 }];
 

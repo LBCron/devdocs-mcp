@@ -18,7 +18,10 @@ devdocs-mcp = { version = "0.2.0", path = "crates/devdocs-mcp" }
 devdocs-model = { version = "0.2.0", path = "crates/devdocs-model" }
 devdocs-retrieve = { version = "0.2.0", path = "crates/devdocs-retrieve" }
 devdocs-store = { version = "0.2.0", path = "crates/devdocs-store" }
-devdocs-testkit = { version = "0.2.0", path = "crates/devdocs-testkit" }
+# Path-only: never published (publish = false), and a `version` here would
+# keep the dev-dependency in the published manifest, where it cannot resolve
+# (docs/implementation/11-ci-cd-release.md, publish path).
+devdocs-testkit = { path = "crates/devdocs-testkit" }
 # runtime
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "fs", "net", "time", "signal", "sync"] }
 reqwest = { version = "0.13.5", features = ["gzip"] }

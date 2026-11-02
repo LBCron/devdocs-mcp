@@ -31,10 +31,15 @@ ignore = [
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# The devdocs-testkit workspace dep is path-only (publish = false; a version
+# here would keep the dev-dependency in the published manifest, where it
+# cannot resolve). This keeps the wildcard lint for version specs while
+# allowing path-only dev-dependencies like testkit.
+allow-wildcard-paths = true
 highlight = "all"
 
-# Workspace crates are declared in [workspace.dependencies] with path + version,
-# so they are not wildcard dependencies and need no skip entries.
+# Workspace crates are declared in [workspace.dependencies] with path + version
+# (testkit: path-only, see above), so no skip entries exist.
 
 [sources]
 unknown-registry = "deny"

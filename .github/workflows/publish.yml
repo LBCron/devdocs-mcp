@@ -116,7 +116,14 @@ jobs:
           GH_TOKEN: ${{ steps.release-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
           PR_URL: ${{ fromJSON(steps.release-plz.outputs.pr).html_url }}
-        run: gh pr merge --auto --squash --delete-branch "${PR_URL}"
+        run: |
+          # gh pr merge --auto fails with "Pull request is in clean status"
+          # when every ruleset requirement is already satisfied — there is
+          # nothing left to wait for, so merge directly instead.
+          if ! gh pr merge --auto --squash --delete-branch "${PR_URL}"; then
+            echo "auto-merge not queueable; the PR is already mergeable — merging directly"
+            gh pr merge --squash --delete-branch "${PR_URL}"
+          fi
 
   release-plz-release:
     # Publishes crates and creates the version tag once the release PR is
