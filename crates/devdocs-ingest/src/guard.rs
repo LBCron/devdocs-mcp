@@ -329,7 +329,7 @@ impl FetchGuard {
         let pinned = self.resolve_pinned(url).await?;
 
         let port = url.port_or_known_default().unwrap_or(443);
-        let mut builder = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .user_agent(&self.user_agent)
             .redirect(self.redirect_policy())
             .dns_resolver(PinnedResolver {
@@ -341,10 +341,6 @@ impl FetchGuard {
                 url.host_str().unwrap_or_default(),
                 &[SocketAddr::new(pinned, port)],
             );
-        if self.policy.allow_loopback_for_tests {
-            // Test doubles speak plain HTTP on a loopback port.
-            builder = builder.danger_accept_invalid_certs(true);
-        }
         let client = builder.build().map_err(GuardError::Transport)?;
 
         let response = client
