@@ -558,11 +558,11 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "context-chunker"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "context-file"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "cookie"
@@ -850,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "devdocs"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -867,7 +867,7 @@ dependencies = [
 
 [[package]]
 name = "devdocs-eval"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -878,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "devdocs-ingest"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "devdocs-model",
  "devdocs-store",
@@ -889,7 +889,7 @@ dependencies = [
 
 [[package]]
 name = "devdocs-mcp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "devdocs-model",
  "devdocs-retrieve",
@@ -900,7 +900,7 @@ dependencies = [
 
 [[package]]
 name = "devdocs-model"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "dirs 7.0.0",
  "insta",
@@ -915,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "devdocs-retrieve"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "devdocs-model",
  "devdocs-store",
@@ -926,7 +926,7 @@ dependencies = [
 
 [[package]]
 name = "devdocs-store"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "blake3",
  "devdocs-model",
@@ -946,7 +946,7 @@ dependencies = [
 
 [[package]]
 name = "devdocs-testkit"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "devdocs-model",
  "devdocs-store",
