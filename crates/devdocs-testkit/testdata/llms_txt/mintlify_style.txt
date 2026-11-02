@@ -1,0 +1,13 @@
+# Acme Widgets
+
+> Documentation for the Acme Widgets API and SDKs. The index follows the Mintlify-style shape: one H2 group per docs area, one `.md` link per page.
+
+## Getting Started
+
+- [Introduction](https://docs.acme.dev/introduction.md): What Acme Widgets does and who it is for
+- [Quickstart](https://docs.acme.dev/quickstart.md): Install the SDK and make a first API call
+
+## API Reference
+
+- [Authentication](https://docs.acme.dev/api-reference/authentication.md): API keys and scopes
+- [Pagination](https://docs.acme.dev/api-reference/pagination.md): Cursor pagination over list endpoints

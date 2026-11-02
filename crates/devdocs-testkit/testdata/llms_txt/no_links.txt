@@ -1,0 +1,7 @@
+# Empty Index
+
+> A valid llms.txt index that carries no link lines at all.
+
+## Groups
+
+This section documents structure without any links, so the zero-links quality gate must fire.

@@ -4,6 +4,8 @@
 //! panic allowance apply to this library root like any other, and the
 //! calling test files unwrap into their own local allowance.
 
+pub mod fixtures;
+
 use std::path::Path;
 
 use rusqlite::Connection;

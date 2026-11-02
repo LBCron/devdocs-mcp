@@ -982,6 +982,7 @@ dependencies = [
  "bytes",
  "devdocs-model",
  "devdocs-store",
+ "devdocs-testkit",
  "proptest",
  "reqwest 0.13.5",
  "text-splitter",
