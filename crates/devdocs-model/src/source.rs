@@ -147,6 +147,15 @@ impl LicenseStatus {
         self.rank() >= Self::ApprovedIndex.rank()
     }
 
+    /// Whether the license gate lets the source be fetched at all.
+    ///
+    /// The ingest planner refuses sources below the fetch stage
+    /// (docs/implementation/09 §License gate enforcement points).
+    #[must_use]
+    pub const fn allows_fetch(self) -> bool {
+        self.rank() >= Self::ApprovedFetch.rank()
+    }
+
     /// Whether the state machine admits the transition `self → next`
     /// (docs/implementation/07 §License gate transition table).
     ///

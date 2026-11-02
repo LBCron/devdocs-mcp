@@ -30,10 +30,39 @@ pub enum IngestError {
     /// A fetch-guard refusal or failure (docs/implementation/09).
     #[error("fetch guard: {0}")]
     Guard(#[from] GuardError),
+    /// The license gate or another model-layer policy refused the run.
+    #[error("{0}")]
+    License(#[from] devdocs_model::Error),
     /// The tokenizer could not load or the limits are inconsistent.
     #[error("tokenizer: {message}")]
     Tokenizer {
         /// What failed.
         message: String,
+    },
+    /// The fixture manifest was unreadable or invalid.
+    #[error("fixture {path}: {message}")]
+    Fixture {
+        /// The manifest path.
+        path: String,
+        /// What failed.
+        message: String,
+    },
+    /// The store refused or failed the publish.
+    #[error("store: {0}")]
+    Store(#[from] devdocs_store::StoreError),
+    /// The ingest run exceeded the 600 s total wall-time cap.
+    #[error("the ingest run exceeded the {seconds}s total cap")]
+    TotalTimeout {
+        /// The configured cap in seconds.
+        seconds: u64,
+    },
+    /// A blocking task failed to join.
+    #[error("blocking task failed: {0}")]
+    Join(String),
+    /// The index carried links but none was an ingestable markdown page.
+    #[error("no ingestable markdown pages linked from {index}")]
+    NoIngestablePages {
+        /// The index URL.
+        index: String,
     },
 }
