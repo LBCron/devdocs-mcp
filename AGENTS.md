@@ -118,7 +118,7 @@ Apply to every commit you make, always — read this before committing anything:
 
   <optional body: what changed and why, wrapped ~ 72 chars>
 
-  Co-authored-by: <harness-name> (<model-name>) <noreply@z.ai>
+  Co-authored-by: <harness-name> (<model-name>) <email>
   ```
 
 - `<type>(<scope>)` is the Conventional Commits shape enforced by the commit-msg hook (§Environment). Omit the scope when the change spans multiple crates.
