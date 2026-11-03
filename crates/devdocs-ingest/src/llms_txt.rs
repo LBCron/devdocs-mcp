@@ -165,7 +165,7 @@ where
                 let title = rest.trim();
                 if title.is_empty() {
                     // llms.txt v2 requires the H1 to carry the project name
-                    // (docs/implementation/07-ingest-pipeline.md §Index parse).
+                    // (docs/implementation/07-ingest-pipeline.md §llms.txt adapter (v2)).
                     return Err(IngestError::LlmsTxtInvalid {
                         url: url.to_owned(),
                         reason: String::from("the H1 title is empty"),
@@ -386,7 +386,8 @@ mod tests {
     }
 
     /// An H1 that carries no title fails as invalid: llms.txt v2 requires
-    /// the H1 to name the project (docs/implementation/07 §Index parse).
+    /// the H1 to name the project (docs/implementation/07 §llms.txt adapter
+    /// (v2)).
     #[test]
     fn empty_h1_fails_invalid() {
         for text in ["# \n\n- [a](https://x/a.md)", "#   \n- [a](https://x/a.md)"] {

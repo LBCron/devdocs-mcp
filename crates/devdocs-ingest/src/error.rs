@@ -35,7 +35,7 @@ pub enum IngestError {
     License(#[from] devdocs_model::Error),
     /// The caller-supplied library does not match the grant's registry
     /// name; approved content must publish under the registry identity
-    /// (docs/implementation/07 §`IngestJob::run`).
+    /// (docs/implementation/07 §License gate).
     #[error("LICENSE_MISMATCH: library `{actual}` does not match the registry entry `{expected}`")]
     LicenseNameMismatch {
         /// The registry name carried by the license grant.

@@ -54,7 +54,7 @@ pub struct Provenance {
 
 The spec is llmstxt.org v2 (verified 2026-10-28. Updated August 2026). Parse rules:
 
-1. Fetch `/llms.txt` at the docs root. Parse the H1 (library title), the blockquote (summary), and the H2 sections of links.
+1. Fetch `/llms.txt` at the docs root. Parse the H1 (library title), the blockquote (summary), and the H2 sections of links. The H1 must carry a title: an empty one fails the parse as `LLMS_TXT_INVALID`.
 2. Each link line is `- [title](url): description`. The optional parenthesized info carries per-page hints. V2 link relations (`rel="alternate" type="text/markdown"`, `rel="describedby"`) mark markdown twins. Prefer a `.md` twin over its HTML page.
 3. If `/llms-full.txt` exists, fetch it and treat it as one pre-built export. The research bundle treats llms-full as the bulk feed (research: interfaces.md §6). It is an unofficial convention, so detection is a probe, not an assumption.
 4. v2 subpath scoping: a more specific `llms.txt` deeper in the tree applies to that subtree. The plan walks links breadth-first and uses the most specific index found per path.
@@ -101,7 +101,7 @@ Implementation: reqwest 0.13 with `dns_resolver(Arc<dyn Resolve>)`. The custom r
 
 ## License gate
 
-The gate runs before any fetch, embed, or serve decision for a source (research: security-licensing.md §3). The registry lives in the config `[sources]` table. Deny by default: a source with no entry is `pending_review` and cannot fetch.
+The gate runs before any fetch, embed, or serve decision for a source (research: security-licensing.md §3). The registry lives in the config `[sources]` table. Deny by default: a source with no entry is `pending_review` and cannot fetch. The library name a run publishes under is the registry entry: `IngestJob::run` refuses a library argument that does not match the grant's `[sources.<name>]` key.
 
 State machine:
 

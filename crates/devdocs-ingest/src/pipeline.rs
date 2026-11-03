@@ -100,7 +100,7 @@ impl<'a> IngestJob<'a> {
         // The published library identity is the registry entry: a caller
         // that passes another name would publish approved content under an
         // arbitrary name, so the run refuses instead (docs/implementation/07
-        // §Pipeline stages).
+        // §License gate).
         if library != grant.name {
             return Err(IngestError::LicenseNameMismatch {
                 expected: grant.name.clone(),
@@ -341,10 +341,13 @@ async fn segment_page(
 /// link that serves HTML is skipped rather than stored as markup
 /// (docs/implementation/07 §Media split). A leading HTML comment or a code
 /// fence never matches. A leading UTF-8 BOM is stripped first, the way the
-/// index parser strips it (docs/implementation/07 §Index parse).
+/// index parser strips it (docs/implementation/07 §llms.txt adapter (v2)).
 fn is_html_body(body: &str) -> bool {
     let trimmed = body.trim_start();
-    let trimmed = trimmed.strip_prefix('\u{feff}').unwrap_or(trimmed);
+    let trimmed = trimmed
+        .strip_prefix('\u{feff}')
+        .unwrap_or(trimmed)
+        .trim_start();
     let head: String = trimmed.chars().take(64).collect();
     let head = head.to_ascii_lowercase();
     head.starts_with("<!doctype html") || head.starts_with("<html")
@@ -371,12 +374,14 @@ mod tests {
         assert!(is_html_body("<HTML><body>x"));
     }
 
-    /// A leading UTF-8 BOM does not hide an HTML body from the check
+    /// A leading UTF-8 BOM does not hide an HTML body from the check, in
+    /// either position around leading whitespace
     /// (docs/implementation/07 §Media split).
     #[test]
     fn html_body_strips_a_leading_bom() {
         assert!(is_html_body("\u{feff}<!doctype html><html><body>x"));
         assert!(is_html_body(" \u{feff}<html>"));
+        assert!(is_html_body("\u{feff} <html>"));
     }
 
     /// A markdown body never matches, BOM or not.
