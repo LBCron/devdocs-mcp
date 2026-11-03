@@ -2,7 +2,12 @@
 //! fence safety, and the header/hash contract.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use super::{Segmenter, boundary_inside_fence, contextual_header};
+use super::{Segmenter, boundary_inside_fence, contextual_header, fence_intervals};
+
+/// The fence probe over a text's precomputed intervals.
+fn probe(text: &str, at: usize) -> bool {
+    boundary_inside_fence(&fence_intervals(text), at)
+}
 
 /// A segmenter with a small target so packing and splitting exercise on
 /// short inputs.
@@ -197,14 +202,14 @@ fn packing_counts_separator_bytes() {
 fn fence_boundary_probe() {
     let text = "before\n```json\n{\"a\": 1}\n```\nafter\n";
     // "before" and its end: outside.
-    assert!(!boundary_inside_fence(text, 0));
-    assert!(!boundary_inside_fence(text, 6));
+    assert!(!probe(text, 0));
+    assert!(!probe(text, 6));
     // Inside the fence content: inside.
     let open_line = text.find("{\"a\": 1}").unwrap();
-    assert!(boundary_inside_fence(text, open_line));
+    assert!(probe(text, open_line));
     // Just past the closing fence line: outside.
     let close_end = text.find("```\nafter").unwrap() + 4;
-    assert!(!boundary_inside_fence(text, close_end));
+    assert!(!probe(text, close_end));
 }
 
 /// The content hash covers the body without the header, and the stored
@@ -226,10 +231,10 @@ fn fence_probe_matches_the_opening_marker() {
     let text = "a\n~~~\n```json\n{}\n~~~\nb\n";
     // The backtick line inside the tilde fence does not close it.
     let json_line = text.find("```json").unwrap();
-    assert!(boundary_inside_fence(text, json_line + 1));
+    assert!(probe(text, json_line + 1));
     // Past the closing ~~~: outside.
     let after = text.find("b\n").unwrap();
-    assert!(!boundary_inside_fence(text, after));
+    assert!(!probe(text, after));
 }
 
 /// A line carrying the marker run plus trailing text never closes a
@@ -238,9 +243,94 @@ fn fence_probe_matches_the_opening_marker() {
 fn fence_probe_close_needs_a_marker_only_line() {
     let text = "a\n```\n```example\nb\n```\nc\n";
     let inside = text.find("b\n").unwrap();
-    assert!(boundary_inside_fence(text, inside));
+    assert!(probe(text, inside));
     let after = text.find("c\n").unwrap();
-    assert!(!boundary_inside_fence(text, after));
+    assert!(!probe(text, after));
+}
+
+use proptest::strategy::Strategy as _;
+
+/// One generated line of a fence-focused page: plain content, or a marker
+/// line that varies the marker character, run length, indent, and
+/// trailing text so every open/close rule of the probe gets exercised.
+fn fence_line() -> impl proptest::strategy::Strategy<Value = String> {
+    proptest::prop_oneof![
+        // Plain content.
+        4 => "[a-z ]{1,12}",
+        // A marker line: indent, marker run, and trailing text vary.
+        2 => " {0,3}[`~]{3,5} ?[a-z]{0,4}",
+        // Trailing spaces behind a marker-only line.
+        1 => "[`~]{3,4} {1,3}",
+    ]
+}
+
+/// The per-boundary rescan the interval probe replaced (issue #64), kept
+/// as the equivalence reference: the same verdicts the merge loop used
+/// before the one-pass intervals landed.
+fn rescan_probe(text: &str, at: usize) -> bool {
+    let mut offset = 0usize;
+    let mut open: Option<(char, usize)> = None;
+    for line in text.split('\n') {
+        let line_start = offset;
+        let line_end = line_start + line.len();
+        if at <= line_start {
+            return open.is_some();
+        }
+        if at < line_end {
+            let trimmed = line.trim_start();
+            let Some((marker, _run)) = crate::llms_txt::fence_marker(trimmed) else {
+                return open.is_some();
+            };
+            let Some(open) = open else {
+                let indent = line.len() - trimmed.len();
+                return at >= line_start + indent;
+            };
+            if crate::llms_txt::fence_closes(open, line.trim()) {
+                let indent = line.len() - trimmed.len();
+                return at < line_start + indent + super::marker_run(marker, trimmed);
+            }
+            return true;
+        }
+        let trimmed = line.trim();
+        match open {
+            Some(open_fence) => {
+                if crate::llms_txt::fence_closes(open_fence, trimmed) {
+                    open = None;
+                }
+            }
+            None => {
+                if let Some((marker, run)) = crate::llms_txt::fence_marker(trimmed) {
+                    open = Some((marker, run));
+                }
+            }
+        }
+        offset = line_end + 1;
+    }
+    open.is_some()
+}
+
+/// One generated fence-focused page: the generated lines joined by newlines.
+fn fence_page() -> impl proptest::strategy::Strategy<Value = String> {
+    proptest::collection::vec(fence_line(), 1..24).prop_map(|lines| lines.join("\n"))
+}
+
+// The one-pass interval probe (#64) agrees with the per-boundary rescan
+// it replaced, byte for byte, on every offset of a generated page.
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+    #[test]
+    fn interval_probe_matches_the_rescan_probe(page in fence_page()) {
+        let fences = fence_intervals(&page);
+        for at in 0..=page.len() {
+            proptest::prop_assert_eq!(
+                boundary_inside_fence(&fences, at),
+                rescan_probe(&page, at),
+                "offset {} disagrees on {:?}",
+                at,
+                page
+            );
+        }
+    }
 }
 
 /// The segmenter debug shape names its limits.
@@ -294,10 +384,10 @@ fn fence_probe_handles_marker_lines_and_unclosed_fences() {
     // Inside the closing marker line: within the three characters is
     // inside, past them is outside.
     let close_line = text.find("```\nafter").unwrap();
-    assert!(boundary_inside_fence(text, close_line + 1));
-    assert!(!boundary_inside_fence(text, close_line + 3));
+    assert!(probe(text, close_line + 1));
+    assert!(!probe(text, close_line + 3));
     // A boundary past the last line keeps the running state.
-    assert!(!boundary_inside_fence(text, text.len() + 10));
+    assert!(!probe(text, text.len() + 10));
     let unclosed = "before\n```\nbody\n";
-    assert!(boundary_inside_fence(unclosed, unclosed.len() + 10));
+    assert!(probe(unclosed, unclosed.len() + 10));
 }

@@ -338,11 +338,18 @@ fn inline_text<'a>(node: &'a comrak::nodes::AstNode<'a>) -> String {
 /// Merges candidate spans until no boundary falls inside a fenced code
 /// block; logs one warning per merge (docs/07 §Segmentation algorithm
 /// step 4). Span ends and `section_text` are both page-absolute.
+///
+/// The fence state is computed once per section in a single forward pass
+/// ([`fence_intervals`], issue #64): each merge iteration checks the
+/// boundary against the precomputed intervals instead of rescanning the
+/// section text from its first line, which made the merge quadratic in
+/// the section size.
 fn merge_until_fence_safe(mut spans: Vec<Range<usize>>, section_text: &str) -> Vec<Range<usize>> {
+    let fences = fence_intervals(section_text);
     loop {
         let mut violation: Option<usize> = None;
         for (index, window) in spans.windows(2).enumerate() {
-            if boundary_inside_fence(section_text, window[0].end) {
+            if boundary_inside_fence(&fences, window[0].end) {
                 violation = Some(index);
                 break;
             }
@@ -406,62 +413,69 @@ fn push_block<'a>(
     }
 }
 
-/// Whether the byte offset `at` (relative to `text`) sits inside an open
-/// fenced code block. Best-effort regression net for the splitter's
-/// atomicity guarantee, with `CommonMark` fence semantics: the probe tracks
-/// the opening marker (character and run length), and only a marker-only
-/// line of the same character with at least that run closes the fence —
-/// the same rule the index scanner uses
-/// ([`crate::llms_txt::fence_marker`]). A boundary at a line start takes
-/// the fence state entering the line; a boundary past a closing fence
-/// marker is outside.
-fn boundary_inside_fence(text: &str, at: usize) -> bool {
-    let mut offset = 0usize;
+/// The byte ranges of `text` that sit inside an open fenced code block,
+/// computed in one forward pass over the lines (issue #64). The intervals
+/// carry the same `CommonMark` fence semantics as the index scanner
+/// ([`crate::llms_txt::fence_marker`]): the opening marker's character and
+/// run length, and only a marker-only line of the same character with at
+/// least that run closes the fence.
+///
+/// The verdicts match the per-boundary rescan this replaces, byte for byte:
+/// a boundary at a line start takes the fence state entering the line, so
+/// the start of an unindented opening fence line stays outside the
+/// interval, and a boundary past the closing marker run is outside. Ends
+/// are exclusive, except an unclosed fence never ends (`usize::MAX`): the
+/// probe's running state stays open to the end of the text and beyond, so
+/// every offset from the opening marker on reads inside.
+fn fence_intervals(text: &str) -> Vec<Range<usize>> {
+    let mut intervals: Vec<Range<usize>> = Vec::new();
     let mut open: Option<(char, usize)> = None;
+    let mut open_start = 0usize;
+    let mut offset = 0usize;
     for line in text.split('\n') {
         let line_start = offset;
-        let line_end = line_start + line.len();
-        if at <= line_start {
-            return open.is_some();
-        }
-        if at < line_end {
-            let trimmed = line.trim_start();
-            let Some((marker, _run)) = crate::llms_txt::fence_marker(trimmed) else {
-                return open.is_some();
-            };
-            let Some(open) = open else {
-                // Outside, on a fence line: the bytes before the marker sit
-                // outside, from the marker on is inside the fence.
-                let indent = line.len() - trimmed.len();
-                let marker_start = line_start + indent;
-                return at >= marker_start;
-            };
-            if crate::llms_txt::fence_closes(open, line.trim()) {
-                // A closing fence: past the marker run is outside.
-                let indent = line.len() - trimmed.len();
-                let marker_end = line_start + indent + marker_run(marker, trimmed);
-                return at < marker_end;
-            }
-            // Any other line inside an open fence is fence content.
-            return true;
-        }
-        // Cross the line: apply the same open/close rule the scanner uses.
         let trimmed = line.trim();
         match open {
             Some(open_fence) => {
                 if crate::llms_txt::fence_closes(open_fence, trimmed) {
+                    let left_trimmed = line.trim_start();
+                    let indent = line.len() - left_trimmed.len();
+                    let marker_end = line_start + indent + marker_run(open_fence.0, left_trimmed);
+                    intervals.push(open_start..marker_end);
                     open = None;
                 }
             }
             None => {
                 if let Some((marker, run)) = crate::llms_txt::fence_marker(trimmed) {
+                    let left_trimmed = line.trim_start();
+                    let indent = line.len() - left_trimmed.len();
+                    let marker_start = line_start + indent;
+                    // A boundary on the line start takes the state entering
+                    // the line (outside), so an unindented marker line opens
+                    // the interval one byte past its start.
+                    open_start = if indent == 0 {
+                        marker_start + 1
+                    } else {
+                        marker_start
+                    };
                     open = Some((marker, run));
                 }
             }
         }
-        offset = line_end + 1;
+        offset = line_start + line.len() + 1;
     }
-    open.is_some()
+    if open.is_some() {
+        intervals.push(open_start..usize::MAX);
+    }
+    intervals
+}
+
+/// Whether the byte offset `at` sits inside one of the fence intervals
+/// computed by [`fence_intervals`]. The intervals are sorted and disjoint,
+/// so one binary search answers the probe.
+fn boundary_inside_fence(fences: &[Range<usize>], at: usize) -> bool {
+    let past = fences.partition_point(|fence| fence.start <= at);
+    past > 0 && at < fences[past - 1].end
 }
 
 /// The marker run length of a line already known to start with the marker.
