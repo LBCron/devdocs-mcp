@@ -323,6 +323,13 @@ fn search_drops_sources_whose_license_turned_terminal() {
         rig.store.search_fts(&term, 10).unwrap().is_empty(),
         "a revoked source must drop out at query time"
     );
+    assert!(
+        rig.store
+            .search_fts_library(&term, "next.js", 10)
+            .unwrap()
+            .is_empty(),
+        "the library-scoped query applies the same drop"
+    );
 }
 
 /// The fetched-at format survives a round trip through storage.
