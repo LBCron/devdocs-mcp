@@ -967,4 +967,39 @@ mod tests {
         }
         assert!(rebuilt.is_refusal());
     }
+
+    /// A resolver refusal that traveled inside a real reqwest transport
+    /// error rebuilds to the typed refusal: the client is built the same
+    /// way `get` builds its own, and `localhost` resolves to loopback
+    /// through the hosts file, so the refusal fires inside the connector
+    /// before any TCP connect. If reqwest ever drops the sentinel from its
+    /// error chain, this reports `Transport` and fails.
+    #[test]
+    fn map_transport_rebuilds_a_resolver_refusal_from_a_real_transport_error() {
+        use super::{PinnedResolver, map_transport};
+
+        let error = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                reqwest::Client::builder()
+                    .dns_resolver(PinnedResolver {
+                        allow_loopback_for_tests: false,
+                    })
+                    .build()
+                    .unwrap()
+                    .get(url("https://localhost/llms.txt"))
+                    .send()
+                    .await
+                    .expect_err("loopback is refused with the exception off")
+            });
+        match map_transport(error) {
+            GuardError::NoAllowedAddress { host, url } => {
+                assert_eq!(host, "localhost");
+                assert!(url.contains("localhost"), "{url}");
+            }
+            other => panic!("expected NoAllowedAddress, got {other}"),
+        }
+    }
 }

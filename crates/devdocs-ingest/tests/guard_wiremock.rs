@@ -164,7 +164,16 @@ async fn get_serves_an_ipv6_literal_url() {
     // Wiremock binds 127.0.0.1 by default; bind a second server on the
     // IPv6 loopback so the fetch path exercises a bracketed IPv6 host
     // end to end (the resolver must strip the brackets before lookup).
-    let listener = std::net::TcpListener::bind("[::1]:0").unwrap();
+    let listener = match std::net::TcpListener::bind("[::1]:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => {
+            // Some hosts and containers disable the IPv6 loopback. Skip
+            // loudly so the coverage gap stays visible.
+            eprintln!("skipping: this host has no IPv6 loopback address");
+            return;
+        }
+        Err(error) => panic!("bind IPv6 loopback: {error}"),
+    };
     let server = MockServer::builder().listener(listener).start().await;
     mount_ok(&server, "/llms.txt", "ipv6 body").await;
 

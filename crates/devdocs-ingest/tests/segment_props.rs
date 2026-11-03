@@ -114,6 +114,18 @@ fn generated_pages_satisfy_the_segmentation_properties() {
     proptest!(Config::with_cases(256), |(page in page_strategy())| {
         let chunks = segment(&page);
 
+        // 0. Nothing before the first chunk: the prefix may hold only blank
+        // lines and heading lines — a dropped first block of the first
+        // section fails here, where the gap checks cannot see it.
+        if let Some(first) = chunks.first() {
+            let prefix = &page[..first.page_range.start];
+            prop_assert!(
+                prefix.lines().all(|line| line.trim().is_empty()
+                    || line.trim_start().starts_with('#')),
+                "content before the first chunk: {prefix:?}"
+            );
+        }
+
         // 1. No content lost inside a section: consecutive chunks with the
         // same breadcrumb either overlap or leave only inter-block
         // whitespace between them. Across a section boundary the only
