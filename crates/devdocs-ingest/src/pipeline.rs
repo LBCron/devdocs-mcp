@@ -124,47 +124,22 @@ impl<'a> IngestJob<'a> {
         // pre-redirect URL would join every link to the wrong base.
         let (index_body, index_base) = self.fetch(index_url).await?;
         let index = parse_llms_txt(&index_body, index_url.as_str())?;
-
         let segmenter = Segmenter::new()?;
-        let mut new_chunks: Vec<NewChunk> = Vec::new();
-        let mut pages = 0usize;
-        let mut skipped = 0usize;
+        let mut run = RunState::default();
+        let ctx = LinkContext {
+            index_url,
+            index_base: &index_base,
+            library,
+            version,
+        };
         for link in index.links() {
-            let page_url =
-                index_base
-                    .join(link.url())
-                    .map_err(|e| IngestError::LlmsTxtInvalid {
-                        url: index_url.to_string(),
-                        reason: format!("link {:?} does not resolve: {e}", link.url()),
-                    })?;
-            if !is_markdown_page(&page_url) {
-                tracing::warn!("skipping non-markdown link {}", page_url);
-                skipped += 1;
-                continue;
-            }
-            let (body, _) = self.fetch(&page_url).await?;
-            let page_segmenter = segmenter.clone();
-            let library = library.to_owned();
-            let version = version.to_owned();
-            let prepared = tokio::task::spawn_blocking(move || {
-                page_segmenter.segment(&library, &version, &body)
-            })
-            .await
-            .map_err(|join| IngestError::Join(join.to_string()))?;
-            for chunk in prepared {
-                new_chunks.push(NewChunk {
-                    section_path: chunk.section_path,
-                    symbol: None,
-                    text: chunk.text,
-                    token_count: chunk.token_count,
-                    content_hash: chunk.content_hash,
-                    ordinal: u32::try_from(new_chunks.len()).unwrap_or(u32::MAX),
-                });
-            }
-            pages += 1;
+            self.ingest_link(&ctx, link, &segmenter, &mut run).await?;
         }
 
-        if pages == 0 {
+        // A run that segments to zero chunks — no markdown links at all, or
+        // only heading-only pages — must not publish an empty generation
+        // over the active one (docs/implementation/07 §Atomic publish).
+        if run.new_chunks.is_empty() {
             return Err(IngestError::NoIngestablePages {
                 index: index_url.to_string(),
             });
@@ -183,10 +158,52 @@ impl<'a> IngestJob<'a> {
         };
         Ok(Prepared {
             record,
-            new_chunks,
-            pages,
-            skipped,
+            new_chunks: run.new_chunks,
+            pages: run.pages,
+            skipped: run.skipped,
         })
+    }
+
+    /// Ingests one index link: resolve, skip non-markdown URLs and HTML
+    /// bodies, segment, and buffer the chunks into `run`.
+    async fn ingest_link(
+        &self,
+        ctx: &LinkContext<'_>,
+        link: &crate::llms_txt::LlmsLink,
+        segmenter: &Segmenter,
+        run: &mut RunState,
+    ) -> Result<(), IngestError> {
+        let page_url =
+            ctx.index_base
+                .join(link.url())
+                .map_err(|e| IngestError::LlmsTxtInvalid {
+                    url: ctx.index_url.to_string(),
+                    reason: format!("link {:?} does not resolve: {e}", link.url()),
+                })?;
+        if !is_markdown_page(&page_url) {
+            tracing::warn!("skipping non-markdown link {}", page_url);
+            run.skipped += 1;
+            return Ok(());
+        }
+        let (body, _) = self.fetch(&page_url).await?;
+        if is_html_body(&body) {
+            tracing::warn!("markdown link {} returned an HTML body; skipping", page_url);
+            run.skipped += 1;
+            return Ok(());
+        }
+        let chunks = segment_page(segmenter, ctx.library, ctx.version, body).await?;
+        for chunk in chunks {
+            run.new_chunks.push(NewChunk {
+                section_path: chunk.section_path,
+                symbol: None,
+                text: chunk.text,
+                token_count: chunk.token_count,
+                content_hash: chunk.content_hash,
+                ordinal: u32::try_from(run.new_chunks.len()).unwrap_or(u32::MAX),
+            });
+        }
+        run.pages += 1;
+        Ok(())
     }
 
     /// Publishes the prepared run outside the total-cap timeout and reports
@@ -274,6 +291,50 @@ struct Prepared {
     new_chunks: Vec<NewChunk>,
     pages: usize,
     skipped: usize,
+}
+
+/// The running totals one fetch-and-segment phase accumulates.
+#[derive(Default)]
+struct RunState {
+    new_chunks: Vec<NewChunk>,
+    pages: usize,
+    skipped: usize,
+}
+
+/// What one index link needs: the index URL for errors, the redirect-aware
+/// base for joining, and the run's library/version identity.
+struct LinkContext<'a> {
+    index_url: &'a Url,
+    index_base: &'a Url,
+    library: &'a str,
+    version: &'a str,
+}
+
+/// Segments one page body off the async path. The blocking thread owns the
+/// page segmenter clone, so the async loop never waits on parsing.
+async fn segment_page(
+    segmenter: &Segmenter,
+    library: &str,
+    version: &str,
+    body: String,
+) -> Result<Vec<crate::segment::PreparedChunk>, IngestError> {
+    let page_segmenter = segmenter.clone();
+    let library = library.to_owned();
+    let version = version.to_owned();
+    tokio::task::spawn_blocking(move || page_segmenter.segment(&library, &version, &body))
+        .await
+        .map_err(|join| IngestError::Join(join.to_string()))
+}
+
+/// Whether a response body is an HTML document: the trimmed start opens a
+/// doctype or an `html` tag. The slice ingests markdown only, so a markdown
+/// link that serves HTML is skipped rather than stored as markup
+/// (docs/implementation/07 §Media split). A leading HTML comment or a code
+/// fence never matches.
+fn is_html_body(body: &str) -> bool {
+    let head: String = body.trim_start().chars().take(64).collect();
+    let head = head.to_ascii_lowercase();
+    head.starts_with("<!doctype html") || head.starts_with("<html")
 }
 
 /// Whether the URL path names a markdown page (the M3a slice ingests

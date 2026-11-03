@@ -299,3 +299,109 @@ async fn fixture_replay_enforces_the_byte_cap() {
         other => panic!("expected Guard(BodyTooLarge), got {other}"),
     }
 }
+
+/// A markdown link that serves an HTML document is skipped, not segmented:
+/// its markup never reaches the chunks (docs/implementation/07 §Media
+/// split).
+#[tokio::test]
+async fn ingest_skips_a_markdown_link_that_serves_html() {
+    let dir = tempfile::tempdir().unwrap();
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": INDEX },
+        { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": "<!DOCTYPE html><html><body><p>not markdown</p></body></html>" },
+        { "url": "https://docs.acme.test/advanced.md", "status": 200, "headers": {}, "body": ADVANCED },
+    ]);
+    std::fs::write(
+        dir.path().join("manifest.json"),
+        serde_json::to_string(&responses).unwrap(),
+    )
+    .unwrap();
+    let fixture = FixtureSet::load(dir.path()).unwrap();
+    let config = config();
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let db = tempfile::tempdir().unwrap();
+    let store = Arc::new(devdocs_testkit::open_migrated(&db.path().join("docs.db")).unwrap());
+
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let outcome = job
+        .run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.pages, 1, "only the markdown body is ingested");
+    assert_eq!(
+        outcome.skipped_pages, 2,
+        "the HTML twin and the HTML body are both skipped"
+    );
+    let hits = store
+        .search_fts(&devdocs_store::build_match_query("not markdown"), 10)
+        .unwrap();
+    assert!(hits.is_empty(), "HTML markup must not be searchable");
+}
+
+/// A run whose only content page carries no content blocks segments to zero
+/// chunks and fails closed: the active generation stays untouched
+/// (docs/implementation/07 §Atomic publish).
+#[tokio::test]
+async fn ingest_rejects_a_run_that_segments_to_zero_chunks() {
+    let dir = tempfile::tempdir().unwrap();
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": INDEX },
+        { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": "# Intro\n\n## Install\n\n### Notes\n" },
+        { "url": "https://docs.acme.test/advanced.md", "status": 200, "headers": {}, "body": ADVANCED },
+    ]);
+    std::fs::write(
+        dir.path().join("manifest.json"),
+        serde_json::to_string(&responses).unwrap(),
+    )
+    .unwrap();
+    let fixture = FixtureSet::load(dir.path()).unwrap();
+    let config = config();
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let db = tempfile::tempdir().unwrap();
+    let db_path = db.path().join("docs.db");
+    let store = Arc::new(devdocs_testkit::open_migrated(&db_path).unwrap());
+
+    // Publish a good generation first, then a run whose pages carry no
+    // content blocks: the zero-chunk refusal must keep the old generation
+    // active.
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    let good = IngestJob::new(&config, &guard, Some(&fixture))
+        .run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap();
+    assert!(good.chunks > 0);
+
+    let heading_only = "# Intro\n\n## Install\n\n### Notes\n";
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": INDEX },
+        { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": heading_only },
+        { "url": "https://docs.acme.test/advanced.md", "status": 200, "headers": {}, "body": heading_only },
+    ]);
+    std::fs::write(
+        dir.path().join("manifest.json"),
+        serde_json::to_string(&responses).unwrap(),
+    )
+    .unwrap();
+    let fixture = FixtureSet::load(dir.path()).unwrap();
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let error = job
+        .run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, devdocs_ingest::IngestError::NoIngestablePages { .. }),
+        "expected NoIngestablePages, got {error}"
+    );
+
+    let hits = store
+        .search_fts(&devdocs_store::build_match_query("cursors"), 10)
+        .unwrap();
+    assert!(!hits.is_empty(), "the previous generation stays searchable");
+    let sources = store.list_sources().unwrap();
+    assert_eq!(sources.len(), 1);
+    assert!(sources[0].active, "the old generation stays active");
+}
