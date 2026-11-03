@@ -168,9 +168,8 @@ jobs:
 
   commits:
     # The lefthook commit-msg hook runs only on developer machines; squash
-    # merges land the PR title as the commit that release-plz parses for
-    # version bumps. A non-conventional title would silently produce no
-    # release PR, so the CI gate enforces the same rule.
+    # merges land the PR title as the permanent commit subject. The CI gate
+    # enforces the same Conventional Commits rule.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15

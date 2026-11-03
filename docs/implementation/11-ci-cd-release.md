@@ -1,9 +1,9 @@
 ---
 type: guide
 title: CI/CD and Release
-description: The GitHub Actions workflows (CI, release, publish, audits, and the security workflows: CodeQL, Scorecard, dependency review, zizmor), the release build matrix, the crates.io publish path with trusted publishing, and the versioning policy. Action versions digest-pinned 2026-10-30.
+description: The GitHub Actions workflows (CI, release, publish, audits, and the security workflows: CodeQL, Scorecard, dependency review, zizmor), the release build matrix, the crates.io publish path with trusted publishing and its `crates` environment policy, and the versioning policy. Action versions digest-pinned 2026-10-30.
 tags: [devdocs, ci, github-actions, release, crates-io, security]
-timestamp: 2026-11-02T02:00:00Z
+timestamp: 2026-11-04T14:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -18,7 +18,7 @@ Eight workflows:
 | --- | --- | --- |
 | `ci.yml` | Rust workspace/build/config paths on push to `main` and pull requests; manual dispatch | fmt, lint, tests (3 OS), doc tests, msrv, features, deny, coverage, docs |
 | `release.yml` | push of `v*.*.*` tags | binary build matrix, build provenance attestation, GitHub release |
-| `publish.yml` | workspace source/manifest or release-plz config paths on push to `main`; manual dispatch | release-plz release PR + crates.io publish + version tag |
+| `publish.yml` | publication of a GitHub release; manual dispatch with an existing release tag | crates.io publish for the released version: no PR, no version bump, no tag |
 | `audit.yml` | daily + weekly schedules, manual dispatch | cargo-deny + cargo-audit daily, cargo-machete weekly |
 | `codeql.yml` | Rust/Cargo or Actions paths on push/PR, weekly schedule, manual dispatch | CodeQL SAST over Rust and workflow definitions |
 | `scorecard.yml` | security/dependency configuration paths on push to `main`, branch-protection rule changes, weekly schedule, manual dispatch | OSSF Scorecard supply-chain posture, published to the OpenSSF API |
@@ -58,9 +58,8 @@ jobs:
   gate:       # aggregate check: needs every job above; require only "gate"
               # in branch protection (matrix legs publish per-OS check names)
   commits:    # PR-only: validates the PR title against the Conventional
-              # Commits rule enforced by the lefthook commit-msg hook —
-              # squash merges land the title as the commit release-plz parses,
-              # and a non-conventional title would silently produce no release PR
+              # Commits rule enforced by the lefthook commit-msg hook, so
+              # squash merges keep a parseable commit history
 ```
 
 Notes:
@@ -131,7 +130,7 @@ jobs:
     needs: build
     timeout-minutes: 10
     permissions:
-      contents: write
+      contents: read   # gh release uses the App token, not the job token
     steps:
       - download-artifact (merge-multiple) into dist/   # no checkout: the job
         only consumes artifacts; the release step takes GH_REPO explicitly
@@ -152,25 +151,39 @@ Notes:
 
 ## Publish to crates.io
 
-release-plz (CLI 0.4.2; action v0.5.147, verified 2026-10-29) owns versioning and changelogs. Trusted publishing removes the long-lived crates.io API token. The GitHub App token handles GitHub operations and triggers the follow-on CI and binary release workflows. Documentation-only and GitHub workflow-only pushes do not start this workflow. The CLI crate carries no `devdocs-testkit` dev-dependency. testkit is `publish = false`, so any dev-dependency naming it must be path-only: cargo publish keeps version-carrying dev-dependencies in the published manifest, where testkit can never resolve, and cargo-deny's `allow-wildcard-paths` setting (deny.toml) is what permits the path-only form without disabling the wildcard lint for version specs. A crate needing testkit declares it path-only in its own `[dev-dependencies]`, not through the workspace table (whose entry carries no version). For other pushes to `main` (and on manual dispatch, which both jobs gate to `refs/heads/main` so a stray dispatch from a feature branch can never publish), it runs two jobs:
+release-plz (CLI 0.4.2, action v0.5.147, verified 2026-10-29) publishes the workspace crates. Trusted publishing removes the long-lived crates.io API token. `publish.yml` starts only from a published GitHub release. A manual dispatch is the recovery path and must name an existing release tag. The workflow never starts from a push, never opens a release PR, never bumps a version, and never creates a tag. The 2026-11-04 reversal in [01](01-tech-stack-decision.md) records the loop that made this rule necessary.
 
-- `release-plz-pr` — runs `release-pr` (the command input is explicit: without it the action runs both commands), opening or updating the release PR with `contents: write` and `pull-requests: write`. It uses a GitHub App installation token so CI starts on the generated PR without manual approval. This job has its own concurrency group; the release job must not (see below).
-- `release-plz-release` — runs `release` after the release PR is merged: publishes the workspace crates and creates the version tag; no-ops when there is nothing to release. Permissions: `contents: write`, `pull-requests: read` (to detect the release PR), `id-token: write`. It uses a GitHub App installation token so the tag push starts `release.yml`. The `id-token: write` permission is separate; it lets release-plz exchange a GitHub OIDC token with crates.io. Both jobs fail with setup instructions when the App Client ID or private key is missing, and check both values' shapes first: a client secret pasted where the Client ID belongs, or a `.pem` stored without its PEM markers, fails there with a pointed error instead of the token step's opaque `A JSON web token could not be decoded` 401.
+`publish.yml` runs one job, `publish-crates`. The job refuses to publish unless all of these conditions hold:
 
-Two deliberate deviations from "add a concurrency group everywhere": the release job has **no** concurrency group — with `cancel-in-progress: false` a newly queued run still replaces a pending one, which can silently skip a release; a superseded run is mostly self-healing (the newer run publishes the same or newer versions), so upstream's guidance (never risk skipping a release) wins. And trusted publishing is release-plz's built-in OIDC exchange (`id-token: write` is all it needs) — no `rust-lang/crates-io-auth-action` step and no `CARGO_REGISTRY_TOKEN`.
+- The ref is a well-formed `vMAJOR.MINOR.PATCH` tag.
+- A non-draft GitHub release exists for the tag. A dispatch cannot publish a bare tag.
+- The tag equals `v` plus the `[workspace.package] version` in `Cargo.toml`.
+- The tag commit is reachable from `origin/main`.
+- No crate at the manifest version already exists on crates.io (the registry never reuses a version number; the check is advisory against races — a concurrent publish between the check and release-plz still fails at crates.io).
 
-`release.yml` owns the GitHub release object and its notes (it has the artifacts). `release-plz.toml` sets `git_release_enable = false` so release-plz only publishes crates and pushes the tag, and disables per-package tags: release-plz's multi-package default is `{package}-v{version}`, which `release.yml`'s `v*.*.*` trigger would never match — the binaries, attestations, and GitHub release would silently never run. Instead, the `devdocs` crate alone pushes `v{{ version }}` (package-section override); it is released last in dependency order, so the single tag is created only after every other crate has published, and release-plz skips tag creation when the tag already exists. Two automated writers on one release would race, and two different note sources would fight: `gh release create --generate-notes` derives notes from GitHub's commit data on the release.yml side, while release-plz owns the changelog file — so the ownership is single and decided, not emergent (the re-run path re-uploads assets and never rewrites the body).
+The job runs in the `crates` environment with `contents: read`, `pull-requests: read`, and `id-token: write`. The `devdocs-testkit` crate stays `publish = false`, so release-plz skips it. The CLI crate carries no `devdocs-testkit` dev-dependency. testkit is `publish = false`, so any dev-dependency naming it must be path-only. Cargo publish keeps version-carrying dev-dependencies in the published manifest, where testkit can never resolve. The `allow-wildcard-paths` setting in deny.toml permits the path-only form without disabling the wildcard lint for version specs. A crate that needs testkit declares it path-only in its own `[dev-dependencies]`, not through the workspace table.
+
+The release flow:
+
+1. A human bumps `[workspace.package] version` and the internal dependency versions in `Cargo.toml`, then commits and tags that commit `vX.Y.Z`.
+2. The tag push starts `release.yml`. It builds the binary matrix, then creates the GitHub release with the release App token.
+3. The `release: published` event starts `publish.yml`.
+4. `publish-crates` verifies the release and publishes the crates in dependency order with trusted publishing.
+
+The App token is necessary in `release.yml`. A release created with a job's `GITHUB_TOKEN` does not start another workflow, so `publish.yml` would never run. `publish.yml` uses the read-only `github.token` and needs no write access. `release-plz.toml` disables git tags and git releases for every package, so release-plz has no path to create a tag, a release, or a PR.
+
+A concurrency group (`publish-crates`, no cancellation) serializes publishes. Trusted publishing is release-plz's built-in OIDC exchange, so `id-token: write` is all it needs. No `rust-lang/crates-io-auth-action` step and no `CARGO_REGISTRY_TOKEN` are used.
 
 One-time setup:
 
-1. On crates.io, open each crate's Settings and add a Trusted Publisher: this repository, the workflow filename `publish.yml`, **and the environment `crates`**. A brand-new crate needs one manual first publish before it can use trusted publishing.
-2. Create a GitHub App for this repository. Leave its webhook inactive. Grant repository permissions `Contents: read/write` and `Pull requests: read/write`. Install it on this repository only. Create a private key.
-3. Add the App **Client ID** as the repository variable `RELEASE_APP_CLIENT_ID` — copy it from the app's About section; client IDs look like `Iv1.xxxxxxxxxxxxxxxx` or start with `Iv23`, and the 40-character hex client secret is not it. Add the private key as the repository secret `RELEASE_APP_PRIVATE_KEY` from the whole downloaded `.pem` file — `gh secret set RELEASE_APP_PRIVATE_KEY < path/to/app.private-key.pem` keeps the newlines where a web-UI paste can lose them. The workflow checks both values' shapes before minting a token, then creates a short-lived installation token for each job, scoped to this repository.
-4. Create the `crates` GitHub environment (repo Settings → Environments) restricted to the `main` branch; the release-plz-release job declares it. The environment claim in the Trusted Publisher entry means OIDC tokens minted by any other job in the repo — including the release.yml build legs, which hold `id-token: write` for attestations and execute dependency build scripts — are rejected by crates.io.
+1. On crates.io, open each crate's Settings and add a Trusted Publisher: this repository, the workflow filename `publish.yml`, and the environment `crates`. A brand-new crate needs one manual first publish before it can use trusted publishing.
+2. Create a GitHub App for this repository. Leave its webhook inactive. Grant repository permission `Contents: read/write`. Install it on this repository only. Create a private key.
+3. Add the App **Client ID** as the repository variable `RELEASE_APP_CLIENT_ID`. Copy it from the app's About section. Client IDs look like `Iv1.xxxxxxxxxxxxxxxx` or start with `Iv23`, and the 40-character hex client secret is not the Client ID. Add the private key as the repository secret `RELEASE_APP_PRIVATE_KEY` from the whole downloaded `.pem` file. The command `gh secret set RELEASE_APP_PRIVATE_KEY < path/to/app.private-key.pem` keeps the newlines where a web-UI paste can lose them. `release.yml` checks that both values exist, then creates a short-lived installation token scoped to this repository. `publish.yml` does not use the App.
+4. Create the `crates` GitHub environment (repo Settings → Environments) with a `main` branch policy and a `v*` tag policy. The release event runs on a tag ref, so a main-only policy rejects `publish-crates`. The job declares the environment. The environment claim in the Trusted Publisher entry means crates.io rejects OIDC tokens that any other job in the repo mints. That includes the `release.yml` build legs, which hold `id-token: write` for attestations and execute dependency build scripts.
 
-If the first token mint fails with 401 `A JSON web token could not be decoded`, the two values do not belong to the same app or one of them is misshapen: re-copy the Client ID from the app's About section and re-set the secret from the app's current `.pem` — rotating a key in the app settings does not update the repository secret. A 404 on the same step means the JWT was fine but the app is not installed on this repository.
+If the first token mint fails with 401 `A JSON web token could not be decoded`, the two values do not belong to the same app or one of them is misshapen. Re-copy the Client ID from the app's About section. Re-set the secret from the app's current `.pem` file. Rotating a key in the app settings does not update the repository secret. A 404 on the same step means the JWT was valid but the app is not installed on this repository.
 
-Flow: push to `main` → release-plz opens a release PR (changelog + version bumps, CI runs on the PR automatically) → the PR job enables auto-merge on it, so the merge happens by itself once the repo ruleset's requirements pass → the merge push runs `release-plz release`, which publishes crates in dependency order and creates the version tag → the tag push triggers `release.yml` for the binaries and the GitHub release. The release gate is the ruleset's checks, not a human merge (reversal recorded in [01](01-tech-stack-decision.md)); the repository setting `Allow auto-merge` must stay enabled for the flow to work.
+The previous design ran `release-pr` on every push to `main`. It enabled auto-merge on the generated PR and published on the merge. Each merge added a `chore: release vX.Y.Z` commit. release-plz parsed that commit as a new change and opened the next release PR. Auto-merge made the chain continuous. The push trigger is gone, the auto-merge step is gone, and the repository `Allow auto-merge` setting is disabled (2026-11-04).
 
 ## Scheduled audits
 
@@ -191,6 +204,7 @@ Four workflows form the supply-chain/SAST layer. They are **advisory, not gating
 - The CLI exit codes, JSON shapes, and error codes in [08](08-retrieval-interfaces.md) are public contract. Any change is a breaking change and needs a changelog note.
 - The DB schema has its own compatibility rule: a binary must be able to open a DB written by the same minor series. Schema breaking changes bump the minor and run a migration.
 - Workspace crates version together (release-plz single-version mode). They move as one product until any crate is consumed externally.
+- crates.io never reuses a version number. Versions 0.1.0 through 0.3.8 are already published and stay on the registry after the 2026-11-04 reset. The first release after the reset must use a version above 0.3.8. Use 0.3.9 for a patch or 0.4.0 for the first deliberate minor.
 
 ## Local release rehearsal
 
@@ -203,6 +217,13 @@ cargo build --release
 ./target/release/devdocs search "test" --json   # against a scratch DEVDOCS_HOME
 ```
 
-Then merge the release PR (or `git tag vX.Y.Z && git push origin vX.Y.Z` for a tag without a crates.io publish).
+Then bump `[workspace.package] version` and the internal dependency versions, commit, and push the tag:
+
+```sh
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+`release.yml` creates the GitHub release from the tag. `publish.yml` then publishes the crates. A tag push always does both.
 
 The first real release doubles as a rehearsal for the paths `just ci` cannot reach: the zig install on the ubuntu runner image, the `cargo-zigbuild@0.24.0` × `ziglang==0.17.0` pairing (no upstream compatibility matrix exists — record the verified pairing in the workflow comment once confirmed), the cold-cache release build (deliberately no rust-cache in release.yml), and the release.yml tag→release chain. Treat its first run as supervised.

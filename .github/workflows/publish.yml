@@ -1,155 +1,40 @@
 name: publish
 
+# Trigger: a published GitHub release, or a manual recovery run that names an
+# existing release tag. Never a push. A push-triggered release PR that
+# auto-merged its own `chore: release` commit once looped forever; the
+# reversal is recorded in docs/implementation/01-tech-stack-decision.md
+# (2026-11-04) and docs/implementation/11-ci-cd-release.md.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "crates/**"
-      - "release-plz.toml"
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish, for example v0.1.0"
+        required: true
+        type: string
 
 # Workspace crates are versioned together (release-plz single-version mode,
 # realized via Cargo workspace version inheritance; see release-plz.toml).
 # devdocs-testkit stays `publish = false` and is skipped by release-plz.
-# Setup (one-time): crates.io Trusted Publisher + the release GitHub App —
-# see docs/implementation/11-ci-cd-release.md "Publish to crates.io".
+# Setup (one-time): crates.io Trusted Publisher, a `v*` tag policy on the
+# `crates` environment, and the release GitHub App used by release.yml — see
+# docs/implementation/11-ci-cd-release.md "Publish to crates.io".
 permissions:
   contents: read
 
-jobs:
-  release-plz-pr:
-    # Opens or updates the release PR. The GitHub App token lets its PR event
-    # start CI without the approval required for GITHUB_TOKEN-created PRs.
-    #
-    # main-only: a manual dispatch from a feature branch must never evaluate
-    # (let alone publish) non-main state; push events to main satisfy this.
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-      pull-requests: write
-    concurrency:
-      group: release-plz-pr-${{ github.ref }}
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - id: toolchain
-        name: Resolve pinned toolchain from rust-toolchain.toml
-        shell: bash
-        run: |
-          # Match TOML basic (") and literal (') strings, with optional
-          # surrounding whitespace; the BRE backreference keeps the quotes
-          # paired (ERE backreferences are not POSIX-defined).
-          channel="$(sed -n "s/^[[:space:]]*channel[[:space:]]*=[[:space:]]*\([\"']\)\([^\"']*\)\1.*/\2/p" rust-toolchain.toml | head -n 1)"
-          if [ -z "${channel}" ]; then
-            echo "::error::Could not read channel from rust-toolchain.toml" >&2
-            exit 1
-          fi
-          echo "channel=${channel}" >> "${GITHUB_OUTPUT}"
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-      - name: Check release App credentials
-        shell: bash
-        env:
-          CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
-          PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-        run: |
-          if [ -z "${CLIENT_ID}" ]; then
-            echo "::error::RELEASE_APP_CLIENT_ID is not set. Add the GitHub App Client ID as a repository variable — see docs/implementation/11-ci-cd-release.md 'Publish to crates.io'."
-            exit 1
-          fi
-          if [ -z "${PRIVATE_KEY}" ]; then
-            echo "::error::RELEASE_APP_PRIVATE_KEY is not set. Add the GitHub App private key as a repository secret — see docs/implementation/11-ci-cd-release.md 'Publish to crates.io'."
-            exit 1
-          fi
-          # Fail here, with a pointed message, instead of at the token step
-          # whose only symptom is the opaque 401 "A JSON web token could not
-          # be decoded". The allowed shapes and the storage commands live in
-          # docs/implementation/11-ci-cd-release.md "Publish to crates.io".
-          if [[ ! "${CLIENT_ID}" =~ ^Iv1\.[0-9a-f]{16}$ ]] \
-            && [[ ! "${CLIENT_ID}" =~ ^Iv23[0-9A-Za-z]{14,20}$ ]] \
-            && [[ ! "${CLIENT_ID}" =~ ^[0-9a-f]{20}$ ]]; then
-            echo "::error::RELEASE_APP_CLIENT_ID does not look like a GitHub App Client ID. Client IDs look like 'Iv1.xxxxxxxxxxxxxxxx' or start with 'Iv23'; a 40-character hex value is usually the app's OAuth client secret. Copy the Client ID from the app's About section — see docs/implementation/11-ci-cd-release.md 'Publish to crates.io'."
-            exit 1
-          fi
-          if ! printf '%s' "${PRIVATE_KEY}" | grep -q -- '-----BEGIN' \
-            || ! printf '%s' "${PRIVATE_KEY}" | grep -q -- 'PRIVATE KEY-----'; then
-            echo "::error::RELEASE_APP_PRIVATE_KEY does not look like a PEM private key (the '-----BEGIN ... PRIVATE KEY-----' markers are missing). Store the whole .pem file downloaded from the app settings: gh secret set RELEASE_APP_PRIVATE_KEY < path/to/app.private-key.pem"
-            exit 1
-          fi
-      - name: Create release App token
-        id: release-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          # Follow the repo instead of a literal: a rename or fork keeps
-          # publishing working (and the token stays scoped to this repo).
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-          permission-pull-requests: write
-      # Without `command: release-pr` the action runs BOTH release-pr and
-      # release; this job must only open/update the release PR.
-      - id: release-plz
-        uses: release-plz/action@f67a7e724bdad4a0f6875f186060a0ca2770d76c # v0.5.147
-        with:
-          command: release-pr
-        env:
-          GITHUB_TOKEN: ${{ steps.release-token.outputs.token }}
-      # The release gate is the ruleset's checks, not a human merge (docs 11;
-      # reversal recorded in docs 01): queue the release PR to merge itself
-      # once those checks pass. The action's `pr` output is a JSON PR object
-      # (html_url, number, ...) when a PR was opened or updated; a no-op run
-      # yields "" or "{}" (the action's wrapper) or "null" (jq's .[0] of an
-      # empty array on older releases) — skip on all three.
-      - name: Enable auto-merge on the release PR
-        if: >-
-          steps.release-plz.outputs.pr != ''
-          && steps.release-plz.outputs.pr != '{}'
-          && steps.release-plz.outputs.pr != 'null'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ steps.release-token.outputs.token }}
-          GH_REPO: ${{ github.repository }}
-          PR_URL: ${{ fromJSON(steps.release-plz.outputs.pr).html_url }}
-        run: |
-          # Belt and braces over the step condition: any future no-op output
-          # shape must no-op here, not fail with an empty PR URL.
-          if [ -z "${PR_URL}" ]; then
-            echo "no release PR in the pr output; nothing to merge"
-            exit 0
-          fi
-          # gh pr merge --auto fails with "Pull request is in clean status"
-          # when every ruleset requirement is already satisfied — there is
-          # nothing left to wait for, so merge directly instead.
-          if ! gh pr merge --auto --squash --delete-branch "${PR_URL}"; then
-            echo "auto-merge not queueable; the PR is already mergeable — merging directly"
-            gh pr merge --squash --delete-branch "${PR_URL}"
-          fi
+# One publish at a time: two releases in quick succession must not race the
+# dependency-ordered crates.io publish. Never cancel an in-flight publish.
+concurrency:
+  group: publish-crates
+  cancel-in-progress: false
 
-  release-plz-release:
-    # Publishes crates and creates the version tag once the release PR is
-    # merged; no-ops otherwise. The GitHub App token lets the version-tag push
-    # start release.yml for the binaries; GITHUB_TOKEN does not start workflows
-    # for push events. release.yml owns the GitHub release and its notes
-    # (release-plz.toml sets
-    # git_release_enable = false).
-    #
-    # No concurrency group, deliberately (upstream guidance): with
-    # cancel-in-progress: false a new queued run still replaces a pending
-    # one, which can silently skip a release. A superseded run is mostly
-    # self-healing — the newer run publishes the same or newer versions —
-    # and a skipped release is worse than a doubled one.
-    # main-only: a manual dispatch from a feature branch must never publish.
-    if: github.ref == 'refs/heads/main'
+jobs:
+  publish-crates:
+    # Drafts never fire the release event, so no event guard is needed. A
+    # manual dispatch is the recovery path for an existing release whose
+    # publish job failed, and the step below requires that release to exist.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Environment gate for trusted publishing: the crates.io Trusted
@@ -159,14 +44,56 @@ jobs:
     # reviewers are configured in the repo's environment settings.
     environment: crates
     permissions:
-      contents: write
+      contents: read
       pull-requests: read
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Qualified ref: actions/checkout prefers a same-named branch
+          # (refs/remotes/origin/<ref>) over the tag for an unqualified ref,
+          # which would publish the branch tip instead of the tagged commit.
+          ref: "refs/tags/${{ github.event.release.tag_name || inputs.tag }}"
           fetch-depth: 0
           persist-credentials: false
+      - name: Verify the ref is a published release on main
+        shell: bash
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '${TAG}' is not a semver tag (expected vMAJOR.MINOR.PATCH[-PRERELEASE][+BUILD])"
+            exit 1
+          fi
+          # A dispatch names an arbitrary string. Require an existing,
+          # non-draft release, so this workflow can only publish a release.
+          if [[ "$(gh release view "${TAG}" --json isDraft --jq .isDraft)" == "true" ]]; then
+            echo "::error::Release '${TAG}' is a draft. Publish the release, then rerun."
+            exit 1
+          fi
+          # Branch protection gates main pushes, not tag pushes. A release
+          # from an unmerged commit must not reach crates.io.
+          git merge-base --is-ancestor HEAD origin/main
+      - id: version
+        name: Verify the tag matches the workspace version
+        shell: bash
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
+          if [ -z "${version}" ]; then
+            echo "::error::Could not read [workspace.package] version from Cargo.toml"
+            exit 1
+          fi
+          if [ "v${version}" != "${TAG}" ]; then
+            echo "::error::Release tag ${TAG} does not match workspace version v${version} in Cargo.toml. Bump Cargo.toml, commit, tag that commit, and publish the release."
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
       - id: toolchain
         name: Resolve pinned toolchain from rust-toolchain.toml
         shell: bash
@@ -183,52 +110,54 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
-      - name: Check release App credentials
+      # The registry never reuses a version number (docs/implementation/
+      # 11-ci-cd-release.md, "Versioning policy"). A tag whose version is
+      # already published passes every check above and only fails at the
+      # crates.io upload, after the full release build. Advisory against
+      # races: a concurrent publish between this check and release-plz
+      # still fails at crates.io.
+      - name: Verify no crate version already exists on crates.io
         shell: bash
         env:
-          CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
-          PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if [ -z "${CLIENT_ID}" ]; then
-            echo "::error::RELEASE_APP_CLIENT_ID is not set. Add the GitHub App Client ID as a repository variable — see docs/implementation/11-ci-cd-release.md 'Publish to crates.io'."
+          set -euo pipefail
+          if [ -z "${VERSION}" ]; then
+            echo "::error::The version-match step did not produce a version output"
             exit 1
           fi
-          if [ -z "${PRIVATE_KEY}" ]; then
-            echo "::error::RELEASE_APP_PRIVATE_KEY is not set. Add the GitHub App private key as a repository secret — see docs/implementation/11-ci-cd-release.md 'Publish to crates.io'."
-            exit 1
-          fi
-          # Fail here, with a pointed message, instead of at the token step
-          # whose only symptom is the opaque 401 "A JSON web token could not
-          # be decoded". The allowed shapes and the storage commands live in
-          # docs/implementation/11-ci-cd-release.md "Publish to crates.io".
-          if [[ ! "${CLIENT_ID}" =~ ^Iv1\.[0-9a-f]{16}$ ]] \
-            && [[ ! "${CLIENT_ID}" =~ ^Iv23[0-9A-Za-z]{14,20}$ ]] \
-            && [[ ! "${CLIENT_ID}" =~ ^[0-9a-f]{20}$ ]]; then
-            echo "::error::RELEASE_APP_CLIENT_ID does not look like a GitHub App Client ID. Client IDs look like 'Iv1.xxxxxxxxxxxxxxxx' or start with 'Iv23'; a 40-character hex value is usually the app's OAuth client secret. Copy the Client ID from the app's About section — see docs/implementation/11-ci-cd-release.md 'Publish to crates.io'."
-            exit 1
-          fi
-          if ! printf '%s' "${PRIVATE_KEY}" | grep -q -- '-----BEGIN' \
-            || ! printf '%s' "${PRIVATE_KEY}" | grep -q -- 'PRIVATE KEY-----'; then
-            echo "::error::RELEASE_APP_PRIVATE_KEY does not look like a PEM private key (the '-----BEGIN ... PRIVATE KEY-----' markers are missing). Store the whole .pem file downloaded from the app settings: gh secret set RELEASE_APP_PRIVATE_KEY < path/to/app.private-key.pem"
-            exit 1
-          fi
-      - name: Create release App token
-        id: release-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          # Follow the repo instead of a literal: a rename or fork keeps
-          # publishing working (and the token stays scoped to this repo).
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-          permission-pull-requests: read
+          # crates.io rejects requests without a User-Agent header.
+          ua="devdocs-mcp-release-guard (https://github.com/${GITHUB_REPOSITORY})"
+          # Capture the crate list before the loop: with pipefail a failed
+          # cargo metadata run aborts the step instead of skipping the check.
+          # cargo metadata serializes `publish = false` as an empty list, so
+          # publishable crates are selected by null or a non-empty list.
+          crates="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.publish == null or (.publish | length) > 0) | .name')"
+          while IFS= read -r crate; do
+            [ -n "${crate}" ] || continue
+            status="$(curl -sS -o /tmp/crate-versions.json -w '%{http_code}' \
+              -A "${ua}" "https://crates.io/api/v1/crates/${crate}")"
+            if [ "${status}" = "404" ]; then
+              echo "${crate}@${VERSION} is not on crates.io yet: first publish, allowed"
+              continue
+            fi
+            if [ "${status}" != "200" ]; then
+              echo "::error::crates.io returned HTTP ${status} for ${crate}; cannot verify version availability. Retry later."
+              exit 1
+            fi
+            if jq -e --arg v "${VERSION}" '.versions[] | select(.num == $v) | .num' \
+              /tmp/crate-versions.json >/dev/null; then
+              echo "::error::${crate}@${VERSION} already exists on crates.io. The registry never reuses a version number. Bump [workspace.package] version above the newest published version (docs/implementation/11-ci-cd-release.md, 'Versioning policy'), commit, and tag that commit."
+              exit 1
+            fi
+          done <<< "${crates}"
       # Trusted publishing: release-plz exchanges the job's OIDC token with
       # crates.io itself (id-token: write above); no CARGO_REGISTRY_TOKEN and
-      # no crates-io-auth-action step.
+      # no crates-io-auth-action step. The `release` command only publishes
+      # versions that Cargo.toml already carries; it never bumps, tags, or
+      # opens a PR, so the read-only `github.token` is enough.
       - uses: release-plz/action@f67a7e724bdad4a0f6875f186060a0ca2770d76c # v0.5.147
         with:
           command: release
         env:
-          GITHUB_TOKEN: ${{ steps.release-token.outputs.token }}
+          GITHUB_TOKEN: ${{ github.token }}

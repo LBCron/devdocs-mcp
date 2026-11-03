@@ -57,6 +57,22 @@ jobs:
             echo "::error::Tag '${GITHUB_REF_NAME}' is not a semver tag (expected vMAJOR.MINOR.PATCH[-PRERELEASE][+BUILD])"
             exit 1
           fi
+      - name: Verify the tag matches the workspace version
+        shell: bash
+        # A tag that disagrees with the manifest would build and attest
+        # binaries whose `--version` does not match the release name, and
+        # publish.yml would refuse to publish it.
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
+          if [ -z "${version}" ]; then
+            echo "::error::Could not read [workspace.package] version from Cargo.toml"
+            exit 1
+          fi
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match workspace version v${version} in Cargo.toml. Bump Cargo.toml, commit, and tag that commit."
+            exit 1
+          fi
       - id: toolchain
         name: Resolve pinned toolchain from rust-toolchain.toml
         shell: bash
@@ -164,9 +180,30 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # The release object is created with the App token below, not with the
+    # job's GITHUB_TOKEN, so the job token stays read-only.
     permissions:
-      contents: write
+      contents: read
     steps:
+      - name: Check release App credentials
+        shell: bash
+        env:
+          CLIENT_ID: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          if [ -z "${CLIENT_ID}" ] || [ -z "${PRIVATE_KEY}" ]; then
+            echo "::error::RELEASE_APP_CLIENT_ID / RELEASE_APP_PRIVATE_KEY are not set. The release object must be created with the App token: a release created with GITHUB_TOKEN does not start publish.yml. See docs/implementation/11-ci-cd-release.md 'Publish to crates.io'."
+            exit 1
+          fi
+      - name: Create release App token
+        id: release-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
       # No checkout: this job only consumes downloaded artifacts, and the
       # release step gets its repo from GH_REPO (see below).
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -182,7 +219,10 @@ jobs:
       - name: Create GitHub release
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          # App token, not github.token: a release created with a job's
+          # GITHUB_TOKEN does not start another workflow, and publish.yml
+          # starts from `release: published`.
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
           # No checkout in this job, so gh cannot infer the repo from a git
           # remote and must be told explicitly.
           GH_REPO: ${{ github.repository }}

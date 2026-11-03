@@ -1,24 +1,20 @@
 # release-plz configuration: https://release-plz.dev/docs/configuration
 #
+# Publish-only mode. publish.yml runs `release-plz release` from a published
+# GitHub release and never runs `release-pr`. release-plz must therefore never
+# create a tag, a git release, or a PR: a release PR that auto-merges its own
+# `chore: release` commit is the loop recorded in
+# docs/implementation/01-tech-stack-decision.md (2026-11-04 reversal) and
+# docs/implementation/11-ci-cd-release.md.
+#
 # Versioning mode: workspace crates version together via Cargo workspace
 # version inheritance (`version.workspace = true` against the root Cargo.toml);
 # no per-crate release-plz config is needed for that.
 
 [workspace]
 # release.yml owns the GitHub release object and its notes (it has the
-# artifacts); release-plz only publishes crates and pushes the version tag.
-# Two automated writers on one release would race and the changelog body
-# would be replaced by auto-generated notes.
+# artifacts); release-plz only publishes crates.
 git_release_enable = false
-# No per-package tags: release-plz's multi-package default is
-# `{package}-v{version}`, which release.yml's `v*.*.*` trigger never matches.
+# The tag comes from the human release step and already exists when this runs.
+# A tag created here would start release.yml a second time.
 git_tag_enable = false
-
-# The binary crate pushes the single `v*.*.*` tag that fires release.yml.
-# It is released last in dependency order, so the tag is created only after
-# every other crate has published. Tag creation is skipped when the tag
-# already exists, so re-runs are safe.
-[[package]]
-name = "devdocs"
-git_tag_enable = true
-git_tag_name = "v{{ version }}"

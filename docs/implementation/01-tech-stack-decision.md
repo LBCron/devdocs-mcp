@@ -3,7 +3,7 @@ type: decision record
 title: Tech Stack Decision
 description: The technology decision for devdocs, the score matrix behind it, the rejected alternatives, and the conditions that would reverse it. All versions verified 2026-10-28.
 tags: [devdocs, tech-stack, rust, decision]
-timestamp: 2026-10-31T09:51:00Z
+timestamp: 2026-11-04T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -110,6 +110,7 @@ The scaffold exposed conflicts between this decision record and the committed re
 - **2026-10-31 — License: single MIT.** The first draft planned `MIT OR Apache-2.0` with two license files. The scaffold committed one MIT `LICENSE` and the dual-license path was never used. The workspace `license` field and the docs now state `MIT`. Revisit only if a downstream embedding requirement demands it.
 - **2026-10-31 — MSRV 1.90.** The first draft planned 1.85. Dependency MSRVs forced the floor up: rusqlite 0.41 needs 1.89 and text-splitter 0.33 needs 1.90. The workspace `rust-version`, the docs, and `just msrv` name 1.90.
 - **2026-10-31 — Release gate: auto-merge, not a human merge.** The publish workflow planned a human merge of the release PR as the release gate. The owner chose zero-touch releases: the `release-plz-pr` job enables auto-merge on every release PR it opens, the merge fires when the repository ruleset's requirements pass, and crates.io publishing uses trusted publishing so no registry token is stored. The trade is explicit: a broken commit that reaches `main` auto-publishes on the next release cycle instead of waiting for a human.
+- **2026-11-04 — Release gate: a published GitHub release, not an auto-merged release PR.** The 2026-10-31 entry made the `release-plz-pr` job enable auto-merge on its own release PR. Each merge added a `chore: release vX.Y.Z` commit. release-plz read that commit as a new change and opened the next release PR. Auto-merge made the chain continuous. The owner reversed the decision. `publish.yml` now starts only from a published GitHub release or a manual dispatch that names an existing release tag. release-plz runs the `release` command only. No workflow merges a PR. A human bumps the version, commits, and pushes the tag. The 0.1.0 reset and the deleted 0.2.x and 0.3.x tags and releases remove the output of the loop.
 
 ## Out of scope by decision
 
