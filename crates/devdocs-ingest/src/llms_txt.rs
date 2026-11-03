@@ -162,7 +162,16 @@ where
                         reason: format!("expected the H1 title, found: {line:?}"),
                     });
                 };
-                return Ok(rest.trim().to_owned());
+                let title = rest.trim();
+                if title.is_empty() {
+                    // llms.txt v2 requires the H1 to carry the project name
+                    // (docs/implementation/07-ingest-pipeline.md §Index parse).
+                    return Err(IngestError::LlmsTxtInvalid {
+                        url: url.to_owned(),
+                        reason: String::from("the H1 title is empty"),
+                    });
+                }
+                return Ok(title.to_owned());
             }
             Some(_) => {}
             None => {
@@ -373,6 +382,21 @@ mod tests {
                 matches!(error, IngestError::LlmsTxtInvalid { .. }),
                 "{text}"
             );
+        }
+    }
+
+    /// An H1 that carries no title fails as invalid: llms.txt v2 requires
+    /// the H1 to name the project (docs/implementation/07 §Index parse).
+    #[test]
+    fn empty_h1_fails_invalid() {
+        for text in ["# \n\n- [a](https://x/a.md)", "#   \n- [a](https://x/a.md)"] {
+            let error = parse_llms_txt(text, "https://x/llms.txt").unwrap_err();
+            match error {
+                IngestError::LlmsTxtInvalid { reason, .. } => {
+                    assert_eq!(reason, "the H1 title is empty");
+                }
+                other => panic!("expected LlmsTxtInvalid, got {other}"),
+            }
         }
     }
 
