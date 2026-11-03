@@ -90,6 +90,7 @@ mod tests {
         let hits = fts_rung(&store, "rout", Scope::All, 32)
             .map_err(|e| match e {
                 RetrieveError::Store(e) => e,
+                other => panic!("unexpected retrieval error: {other}"),
             })
             .unwrap();
         // The prefix star on "rout" matches "routing".
@@ -120,6 +121,7 @@ mod tests {
         let hits = fts_rung(&store, "", Scope::All, 32)
             .map_err(|e| match e {
                 RetrieveError::Store(e) => e,
+                other => panic!("unexpected retrieval error: {other}"),
             })
             .unwrap();
         assert_eq!(hits, Vec::new());
