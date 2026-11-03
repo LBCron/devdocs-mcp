@@ -255,8 +255,9 @@ use proptest::strategy::Strategy as _;
 /// trailing text so every open/close rule of the probe gets exercised.
 fn fence_line() -> impl proptest::strategy::Strategy<Value = String> {
     proptest::prop_oneof![
-        // Plain content.
-        4 => "[a-z ]{1,12}",
+        // Plain content; é keeps byte offsets and char counts apart, so
+        // the probe equivalence covers multibyte content too.
+        4 => "[a-zé ]{1,12}",
         // A marker line: indent, marker run, and trailing text vary.
         2 => " {0,3}[`~]{3,5} ?[a-z]{0,4}",
         // Trailing spaces behind a marker-only line.
