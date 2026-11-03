@@ -8,7 +8,7 @@
 use std::fmt::Write as _;
 
 use proptest::prelude::*;
-use proptest::test_runner::Config;
+use proptest::test_runner::{Config, TestCaseResult};
 
 use devdocs_ingest::PreparedChunk;
 use devdocs_ingest::segment::Segmenter;
@@ -109,55 +109,63 @@ fn segment(page: &str) -> Vec<PreparedChunk> {
         .segment("lib", "1.0", page)
 }
 
+/// The no-lost-content checks: nothing before the first chunk, only
+/// whitespace inside a section gap, only heading lines across a section
+/// boundary, and the tail covered by the last chunk.
+fn assert_no_content_lost(page: &str, chunks: &[PreparedChunk]) -> TestCaseResult {
+    // Nothing before the first chunk: the prefix may hold only blank lines
+    // and heading lines — a dropped first block of the first section fails
+    // here, where the gap checks cannot see it.
+    if let Some(first) = chunks.first() {
+        let prefix = &page[..first.page_range.start];
+        prop_assert!(
+            prefix
+                .lines()
+                .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#')),
+            "content before the first chunk: {prefix:?}"
+        );
+    }
+
+    // No content lost inside a section: consecutive chunks with the same
+    // breadcrumb either overlap or leave only inter-block whitespace
+    // between them. Across a section boundary the only allowed hole is the
+    // next heading line plus whitespace — so a dropped first block of a
+    // section fails here too.
+    for pair in chunks.windows(2) {
+        let (prev, next) = (&pair[0], &pair[1]);
+        if next.page_range.start > prev.page_range.end {
+            let gap = &page[prev.page_range.end..next.page_range.start];
+            if prev.section_path == next.section_path {
+                prop_assert!(
+                    gap.chars().all(char::is_whitespace),
+                    "non-whitespace gap {gap:?} inside a section: page {page:?}"
+                );
+            } else {
+                prop_assert!(
+                    gap.lines()
+                        .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#')),
+                    "cross-section gap carries non-heading content {gap:?}: page {page:?}"
+                );
+            }
+        }
+    }
+    if let Some(last) = chunks.last() {
+        // The last chunk reaches the end of the page content.
+        prop_assert!(
+            last.page_range.end >= page.trim_end().len(),
+            "page tail uncovered: covered {}, page len {}",
+            last.page_range.end,
+            page.trim_end().len()
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn generated_pages_satisfy_the_segmentation_properties() {
     proptest!(Config::with_cases(256), |(page in page_strategy())| {
         let chunks = segment(&page);
-
-        // 0. Nothing before the first chunk: the prefix may hold only blank
-        // lines and heading lines — a dropped first block of the first
-        // section fails here, where the gap checks cannot see it.
-        if let Some(first) = chunks.first() {
-            let prefix = &page[..first.page_range.start];
-            prop_assert!(
-                prefix.lines().all(|line| line.trim().is_empty()
-                    || line.trim_start().starts_with('#')),
-                "content before the first chunk: {prefix:?}"
-            );
-        }
-
-        // 1. No content lost inside a section: consecutive chunks with the
-        // same breadcrumb either overlap or leave only inter-block
-        // whitespace between them. Across a section boundary the only
-        // allowed hole is the next heading line plus whitespace — so a
-        // dropped first block of a section fails here too.
-        for pair in chunks.windows(2) {
-            let (prev, next) = (&pair[0], &pair[1]);
-            if next.page_range.start > prev.page_range.end {
-                let gap = &page[prev.page_range.end..next.page_range.start];
-                if prev.section_path == next.section_path {
-                    prop_assert!(
-                        gap.chars().all(char::is_whitespace),
-                        "non-whitespace gap {gap:?} inside a section: page {page:?}"
-                    );
-                } else {
-                    prop_assert!(
-                        gap.lines().all(|line| line.trim().is_empty()
-                            || line.trim_start().starts_with('#')),
-                        "cross-section gap carries non-heading content {gap:?}: page {page:?}"
-                    );
-                }
-            }
-        }
-        if let Some(last) = chunks.last() {
-            // The last chunk reaches the end of the page content.
-            prop_assert!(
-                last.page_range.end >= page.trim_end().len(),
-                "page tail uncovered: covered {}, page len {}",
-                last.page_range.end,
-                page.trim_end().len()
-            );
-        }
+        assert_no_content_lost(&page, &chunks)?;
 
         // 2. No chunk starts or ends inside a fence: fence markers are
         // balanced within every chunk.

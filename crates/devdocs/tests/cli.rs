@@ -548,7 +548,12 @@ fn add_with_a_fixture_ingests_offline() {
     assert_eq!(added["pages"], 1, "the HTML twin is skipped: {added}");
     assert!(added["chunks"].as_u64().expect("chunks") > 0);
 
-    // `devdocs list --json` names the source and version.
+    assert_list_names_acme(&env, &config, &db);
+    assert_chunks_recorded(&db);
+}
+
+/// `list --json` names exactly the acme source, active at the index stage.
+fn assert_list_names_acme(env: &Env, config: &std::path::Path, db: &std::path::Path) {
     let (code, stdout, stderr) = output(
         env.cmd(),
         &[
@@ -568,9 +573,12 @@ fn add_with_a_fixture_ingests_offline() {
     assert_eq!(list["results"][0]["kind"], "llms_txt");
     assert_eq!(list["results"][0]["license_status"], "approved_index");
     assert_eq!(list["results"][0]["active"], true);
+}
 
-    // Store-level assertion: chunks, hashes, breadcrumbs.
-    let chunks = devdocs_testkit::read_chunks(&db).expect("chunks read");
+/// The store-level assertions for the published intro page: chunks, hashes,
+/// breadcrumbs, and the contextual header.
+fn assert_chunks_recorded(db: &std::path::Path) {
+    let chunks = devdocs_testkit::read_chunks(db).expect("chunks read");
     assert!(chunks.len() > 1, "index intro page yields several chunks");
     assert!(chunks.iter().all(|chunk| chunk.library == "acme"));
     for chunk in &chunks {
@@ -674,21 +682,8 @@ fn add_refuses_a_revoked_source_and_withdraws_it() {
     let db = env.root.join("withdraw.db");
 
     // First run publishes the source.
-    let (code, stdout, stderr) = output(
-        env.cmd(),
-        &[
-            "add",
-            "https://docs.acme.test/llms.txt",
-            "--fixture",
-            fixture.to_str().expect("fixture path"),
-            "--json",
-            "--config",
-            config.to_str().expect("config path"),
-            "--db",
-            db.to_str().expect("db path"),
-        ],
-    );
-    assert_eq!(code, 0, "stdout: {stdout} stderr: {stderr}");
+    let (code, _stdout, stderr) = run_acme_add(&env, &fixture, &config, &db);
+    assert_eq!(code, 0, "stderr: {stderr}");
 
     // The registry status flips to revoked; the second run refuses.
     std::fs::write(
@@ -702,21 +697,8 @@ fn add_refuses_a_revoked_source_and_withdraws_it() {
         ),
     )
     .expect("config rewritten");
-    let (code, stdout, stderr) = output(
-        env.cmd(),
-        &[
-            "add",
-            "https://docs.acme.test/llms.txt",
-            "--fixture",
-            fixture.to_str().expect("fixture path"),
-            "--json",
-            "--config",
-            config.to_str().expect("config path"),
-            "--db",
-            db.to_str().expect("db path"),
-        ],
-    );
-    assert_eq!(code, 3, "stdout: {stdout} stderr: {stderr}");
+    let (code, _stdout, stderr) = run_acme_add(&env, &fixture, &config, &db);
+    assert_eq!(code, 3, "stderr: {stderr}");
     assert!(stderr.contains("FETCH_BLOCKED"), "stderr: {stderr}");
 
     // The withdrawal landed: the source is inactive with the recorded
@@ -770,6 +752,16 @@ fn add_args<'a>(
         db.to_str().expect("db path"),
     ]);
     args
+}
+
+/// Runs the standard acme `add --fixture --json` and returns the output.
+fn run_acme_add(
+    env: &Env,
+    fixture: &std::path::Path,
+    config: &std::path::Path,
+    db: &std::path::Path,
+) -> (i32, String, String) {
+    output(env.cmd(), &add_args(fixture, config, db, true))
 }
 
 /// The human (non-`--json`) output paths: `add` prints the indexed summary
