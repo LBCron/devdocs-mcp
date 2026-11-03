@@ -76,6 +76,10 @@ fn withdraw_on_terminal_refusal(config: &Config, index_url: &Url) {
         return;
     };
     let Ok(store) = open_store(config, false) else {
+        tracing::warn!(
+            status = status.as_str(),
+            "cannot withdraw the source on the gate refusal: the store failed to open"
+        );
         return;
     };
     match store.withdraw_source_by_origin_url(index_url.as_str(), status) {
