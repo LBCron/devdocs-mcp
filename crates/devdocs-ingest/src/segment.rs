@@ -24,6 +24,84 @@ const TARGET_TOKENS: usize = 400;
 /// The segmentation overlap.
 const OVERLAP_TOKENS: usize = 80;
 
+/// The fence languages the ingest knows. The tree-sitter grammar set of the
+/// M5 symbol pass owns the full map; this list is the languages those
+/// grammars cover plus the formats docs pages commonly fence. A fence whose
+/// first info-string token is named but absent here is counted as an
+/// unknown fence language — reported, never dropped.
+pub(crate) const KNOWN_FENCE_LANGUAGES: &[&str] = &[
+    "rust",
+    "go",
+    "golang",
+    "python",
+    "py",
+    "javascript",
+    "js",
+    "jsx",
+    "typescript",
+    "ts",
+    "tsx",
+    "bash",
+    "sh",
+    "shell",
+    "zsh",
+    "console",
+    "json",
+    "yaml",
+    "yml",
+    "toml",
+    "html",
+    "css",
+    "markdown",
+    "md",
+    "text",
+    "txt",
+    "diff",
+    "c",
+    "cpp",
+    "java",
+    "sql",
+    "xml",
+    "http",
+    "ini",
+];
+
+/// The per-page counters one segmentation pass produces
+/// (docs/implementation/07 §Normalization pipeline, the ingest events).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SegmentStats {
+    /// Blocks skipped for carrying no content (a collapsed or zero-token
+    /// range).
+    pub skipped_blocks: usize,
+    /// Fenced code blocks whose info string names a language outside
+    /// [`KNOWN_FENCE_LANGUAGES`].
+    pub unknown_fence_languages: usize,
+}
+
+/// The fence language of an info string: the first token, lower-cased. An
+/// empty info string names no language.
+fn fence_language(info: &str) -> Option<&str> {
+    let token = info.split_whitespace().next()?;
+    let token = token.strip_prefix("language-").unwrap_or(token);
+    let token = token.strip_prefix("lang-").unwrap_or(token);
+    Some(token)
+}
+
+/// Whether a fence info string names no language or a known one. An unnamed
+/// fence names no language, so it never counts as unknown.
+fn fence_language_known_or_unnamed(info: &str) -> bool {
+    fence_language(info).is_none_or(|lang| {
+        KNOWN_FENCE_LANGUAGES
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(lang))
+    })
+}
+
+/// Whether a fence info string names a language outside the known set.
+pub(crate) fn fence_language_unknown(info: &str) -> bool {
+    !fence_language_known_or_unnamed(info)
+}
+
 /// How chunk sizes are measured (docs/implementation/07: the chars-per-4
 /// heuristic by default, tiktoken o200k under the `exact-tokens` feature).
 #[derive(Clone)]
@@ -128,9 +206,22 @@ impl Segmenter {
     /// Segments one page body into chunks with contextual headers.
     #[must_use]
     pub fn segment(&self, library: &str, version: &str, page_body: &str) -> Vec<PreparedChunk> {
+        self.segment_with_stats(library, version, page_body).0
+    }
+
+    /// Segments one page body and reports the per-page event counters the
+    /// run accumulates into the ingest events.
+    #[must_use]
+    pub fn segment_with_stats(
+        &self,
+        library: &str,
+        version: &str,
+        page_body: &str,
+    ) -> (Vec<PreparedChunk>, SegmentStats) {
+        let (sections, mut stats) = Self::sections(page_body);
         let mut chunks = Vec::new();
-        for section in Self::sections(page_body) {
-            for span in self.pack_section(&section) {
+        for section in &sections {
+            for span in self.pack_section(section, &mut stats) {
                 let body = &page_body[span.start..span.end];
                 let header = contextual_header(library, version, &section.breadcrumb);
                 let text = format!("{header}\n\n{body}");
@@ -146,12 +237,13 @@ impl Segmenter {
                 });
             }
         }
-        chunks
+        (chunks, stats)
     }
 
     /// Walks the comrak tree and returns the sections: breadcrumb plus the
-    /// absolute byte ranges of their blocks inside `page_body`.
-    fn sections(page_body: &str) -> Vec<Section<'_>> {
+    /// absolute byte ranges of their blocks inside `page_body`. Counts the
+    /// unknown fence languages on the way.
+    fn sections(page_body: &str) -> (Vec<Section<'_>>, SegmentStats) {
         let arena = Arena::new();
         let root = parse_document(&arena, page_body, &Options::default());
 
@@ -174,6 +266,7 @@ impl Segmenter {
 
         let mut sections: Vec<Section> = Vec::new();
         let mut breadcrumb: Vec<(u8, String)> = Vec::new();
+        let mut stats = SegmentStats::default();
 
         for node in root.children() {
             match &node.data().value {
@@ -186,17 +279,27 @@ impl Segmenter {
                         page_body,
                     );
                 }
-                _ => push_block(&mut sections, node, page_body, &offset),
+                NodeValue::CodeBlock(blocked) if blocked.fenced => {
+                    if fence_language_unknown(&blocked.info) {
+                        stats.unknown_fence_languages += 1;
+                        tracing::debug!(
+                            language = %blocked.info.trim(),
+                            "fenced code block carries an unknown language"
+                        );
+                    }
+                    push_block(&mut sections, node, page_body, &offset, &mut stats);
+                }
+                _ => push_block(&mut sections, node, page_body, &offset, &mut stats),
             }
         }
         sections.retain(|section| !section.blocks.is_empty());
-        sections
+        (sections, stats)
     }
 
     /// Packs one section's blocks into chunk spans (byte-exact slices of
     /// the page) and merges until no boundary sits inside a fenced code
     /// block.
-    fn pack_section(&self, section: &Section<'_>) -> Vec<Range<usize>> {
+    fn pack_section(&self, section: &Section<'_>, stats: &mut SegmentStats) -> Vec<Range<usize>> {
         let mut spans: Vec<Range<usize>> = Vec::new();
         let mut current: Option<(Range<usize>, usize)> = None; // span, tokens
 
@@ -244,6 +347,10 @@ impl Segmenter {
                     }
                     None => current = Some((range, tokens)),
                 }
+            } else {
+                // A zero-token block carries no content: skip it and count
+                // the skip (the ingest events report skipped blocks).
+                stats.skipped_blocks += 1;
             }
         }
         if let Some((span, _)) = current.take() {
@@ -381,17 +488,20 @@ fn push_heading<'a>(
 }
 
 /// Records one content block node into the section it belongs to, opening
-/// the heading-less leading section when the page starts with content.
+/// the heading-less leading section when the page starts with content. A
+/// collapsed range is skipped and counted.
 fn push_block<'a>(
     sections: &mut Vec<Section<'a>>,
     node: &comrak::nodes::AstNode,
     page_body: &'a str,
     offset: &impl Fn(usize, usize) -> usize,
+    stats: &mut SegmentStats,
 ) {
     let fenced = matches!(&node.data().value, NodeValue::CodeBlock(boxed) if boxed.fenced);
     let (start, end) = block_range(node, offset);
     let end = end.min(page_body.len());
     if start >= end {
+        stats.skipped_blocks += 1;
         return;
     }
     if sections.is_empty() {

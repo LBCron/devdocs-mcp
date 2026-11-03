@@ -19,6 +19,7 @@ use time::OffsetDateTime;
 use url::Url;
 
 use crate::error::IngestError;
+use crate::events::IngestEvents;
 use crate::fixture::FixtureSet;
 use crate::guard::FetchGuard;
 use crate::llms_txt::parse_llms_txt;
@@ -46,6 +47,9 @@ pub struct IngestOutcome {
     pub skipped_pages: usize,
     /// Chunks published for the source.
     pub chunks: usize,
+    /// The ingest event report: what the run skipped, dropped, and detoured
+    /// (docs/implementation/07 §Normalization pipeline).
+    pub events: IngestEvents,
 }
 
 /// One ingest run: the resolved config, the guard, and the optional fixture
@@ -169,8 +173,7 @@ impl<'a> IngestJob<'a> {
         Ok(Prepared {
             record,
             new_chunks: run.new_chunks,
-            pages: run.pages,
-            skipped: run.skipped,
+            events: run.events,
         })
     }
 
@@ -192,16 +195,18 @@ impl<'a> IngestJob<'a> {
                 })?;
         if !is_markdown_page(&page_url) {
             tracing::warn!("skipping non-markdown link {}", page_url);
-            run.skipped += 1;
+            run.events.skipped_pages += 1;
             return Ok(());
         }
         let (body, _) = self.fetch(&page_url).await?;
         if is_html_body(&body) {
             tracing::warn!("markdown link {} returned an HTML body; skipping", page_url);
-            run.skipped += 1;
+            run.events.skipped_pages += 1;
             return Ok(());
         }
-        let chunks = segment_page(segmenter, ctx.library, ctx.version, body).await?;
+        let (chunks, stats) = segment_page(segmenter, ctx.library, ctx.version, body).await?;
+        run.events.skipped_blocks += stats.skipped_blocks;
+        run.events.unknown_fence_languages += stats.unknown_fence_languages;
         for chunk in chunks {
             run.new_chunks.push(NewChunk {
                 section_path: chunk.section_path,
@@ -212,7 +217,7 @@ impl<'a> IngestJob<'a> {
                 ordinal: u32::try_from(run.new_chunks.len()).unwrap_or(u32::MAX),
             });
         }
-        run.pages += 1;
+        run.events.pages += 1;
         Ok(())
     }
 
@@ -230,8 +235,7 @@ impl<'a> IngestJob<'a> {
         let Prepared {
             record,
             new_chunks,
-            pages,
-            skipped,
+            events,
         } = prepared;
         let chunks_len = new_chunks.len();
         let publish_result =
@@ -245,9 +249,10 @@ impl<'a> IngestJob<'a> {
             version: version.to_owned(),
             origin_url: index_url.to_string(),
             license_status: grant.status,
-            pages,
-            skipped_pages: skipped,
+            pages: events.pages,
+            skipped_pages: events.skipped_pages,
             chunks: chunks_len,
+            events,
         })
     }
 
@@ -299,16 +304,14 @@ impl<'a> IngestJob<'a> {
 struct Prepared {
     record: SourceRecord,
     new_chunks: Vec<NewChunk>,
-    pages: usize,
-    skipped: usize,
+    events: IngestEvents,
 }
 
 /// The running totals one fetch-and-segment phase accumulates.
 #[derive(Default)]
 struct RunState {
     new_chunks: Vec<NewChunk>,
-    pages: usize,
-    skipped: usize,
+    events: IngestEvents,
 }
 
 /// What one index link needs: the index URL for errors, the redirect-aware
@@ -321,19 +324,28 @@ struct LinkContext<'a> {
 }
 
 /// Segments one page body off the async path. The blocking thread owns the
-/// page segmenter clone, so the async loop never waits on parsing.
+/// page segmenter clone, so the async loop never waits on parsing. Returns
+/// the chunks plus the page's event counters.
 async fn segment_page(
     segmenter: &Segmenter,
     library: &str,
     version: &str,
     body: String,
-) -> Result<Vec<crate::segment::PreparedChunk>, IngestError> {
+) -> Result<
+    (
+        Vec<crate::segment::PreparedChunk>,
+        crate::segment::SegmentStats,
+    ),
+    IngestError,
+> {
     let page_segmenter = segmenter.clone();
     let library = library.to_owned();
     let version = version.to_owned();
-    tokio::task::spawn_blocking(move || page_segmenter.segment(&library, &version, &body))
-        .await
-        .map_err(|join| IngestError::Join(join.to_string()))
+    tokio::task::spawn_blocking(move || {
+        page_segmenter.segment_with_stats(&library, &version, &body)
+    })
+    .await
+    .map_err(|join| IngestError::Join(join.to_string()))
 }
 
 /// Whether a response body is an HTML document: the trimmed start opens a

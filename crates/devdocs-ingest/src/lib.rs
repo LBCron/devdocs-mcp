@@ -4,6 +4,7 @@
 //! (docs/implementation/09 §Fetch guard invariants).
 
 pub mod error;
+pub mod events;
 pub mod fixture;
 pub mod guard;
 pub mod license;
@@ -14,6 +15,7 @@ pub mod resolver;
 pub mod segment;
 
 pub use error::IngestError;
+pub use events::IngestEvents;
 pub use fixture::{FixtureSet, RecordedResponse};
 pub use guard::{FetchGuard, GuardError};
 pub use license::{LicenseGrant, gate_fetch, refused_status};

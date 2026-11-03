@@ -160,6 +160,14 @@ pub fn run_add(
         chunks = outcome.chunks,
         "ingest finished"
     );
+    // The event report goes to stderr as log lines; the default filter is
+    // `warn`, so the lines surface only under `--verbose`
+    // (docs/implementation/07 §Normalization pipeline).
+    outcome.events.log();
+    let events = serde_json::to_value(&outcome.events).map_err(|e| Error::Upstream {
+        code: UpstreamCode::UpstreamError,
+        detail: format!("cannot serialize the ingest events: {e}"),
+    })?;
     Ok(serde_json::json!({
         "library": outcome.library,
         "version": outcome.version,
@@ -168,6 +176,7 @@ pub fn run_add(
         "pages": outcome.pages,
         "skipped_pages": outcome.skipped_pages,
         "chunks": outcome.chunks,
+        "events": events,
     }))
 }
 
