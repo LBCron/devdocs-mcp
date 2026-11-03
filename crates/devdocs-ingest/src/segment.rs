@@ -241,15 +241,25 @@ impl Segmenter {
                 }
                 spans.extend(self.split_oversized(text, block.start));
             } else if tokens > 0 {
+                // The packed span slices the page from the first block's
+                // start to the last block's end, so the bytes between
+                // blocks join the chunk body and share the budget
+                // (docs/07 rule 3).
+                let separator_tokens = match &current {
+                    Some((span, _)) => self.sizer.size(&section.text[span.end..block.start]),
+                    None => 0,
+                };
                 match &current {
-                    Some((_, packed)) if packed + tokens > self.target_tokens => {
+                    Some((_, packed))
+                        if packed + separator_tokens + tokens > self.target_tokens =>
+                    {
                         if let Some((span, _)) = current.take() {
                             spans.push(span);
                         }
                         current = Some((range, tokens));
                     }
                     Some((span, packed)) => {
-                        let packed = *packed + tokens;
+                        let packed = *packed + separator_tokens + tokens;
                         current = Some((span.start..block.end, packed));
                     }
                     None => current = Some((range, tokens)),
@@ -261,9 +271,9 @@ impl Segmenter {
         }
 
         // Cross-check: no chunk boundary may fall inside a fenced code
-        // block; merge and warn when it does (docs/07 step 4).
-        let section_start = section.blocks.first().map_or(0, |block| block.start);
-        merge_until_fence_safe(spans, section_start, section.text)
+        // block; merge and warn when it does (docs/07 step 4). The probe
+        // offset is page-absolute, matching `section.text`.
+        merge_until_fence_safe(spans, section.text)
     }
 
     /// Splits an oversized block with the `MarkdownSplitter` and returns the
@@ -347,16 +357,12 @@ fn inline_text<'a>(node: &'a comrak::nodes::AstNode<'a>) -> String {
 
 /// Merges candidate spans until no boundary falls inside a fenced code
 /// block; logs one warning per merge (docs/07 §Segmentation algorithm
-/// step 4).
-fn merge_until_fence_safe(
-    mut spans: Vec<Range<usize>>,
-    section_start: usize,
-    section_text: &str,
-) -> Vec<Range<usize>> {
+/// step 4). Span ends and `section_text` are both page-absolute.
+fn merge_until_fence_safe(mut spans: Vec<Range<usize>>, section_text: &str) -> Vec<Range<usize>> {
     loop {
         let mut violation: Option<usize> = None;
         for (index, window) in spans.windows(2).enumerate() {
-            if boundary_inside_fence(section_text, window[0].end - section_start) {
+            if boundary_inside_fence(section_text, window[0].end) {
                 violation = Some(index);
                 break;
             }
@@ -574,6 +580,53 @@ mod tests {
                 })
                 .count();
             assert_eq!(markers % 2, 0, "unbalanced fences in {:?}", chunk.body);
+        }
+    }
+
+    /// The fence probe works on page-absolute offsets: a fence in an
+    /// earlier section must not flag a later section's boundary. The first
+    /// paragraph of section B is 29 bytes long, so a section-relative probe
+    /// for its end offset reads inside the earlier fence region.
+    #[test]
+    fn fence_probe_uses_page_offsets() {
+        let page = format!(
+            concat!(
+                "# Intro\n\nhi\n\n```json\n{{\"aaaaaaaaaaaaaaaaaaaa\": 1}}\n```\n\n# B\n\n",
+                "word word word word word word\n\n",
+                "{para2}\n"
+            ),
+            para2 = "word ".repeat(30).trim_end()
+        );
+        let chunks = small().segment("acme", "1.0", &page);
+        // The two paragraphs of section B cannot share one chunk (they
+        // overflow the target); a false fence hit on the boundary would
+        // merge them into one and log a bogus warning.
+        let b_chunks: Vec<_> = chunks
+            .iter()
+            .filter(|chunk| chunk.section_path == vec!["B"])
+            .collect();
+        assert_eq!(b_chunks.len(), 2, "B must yield two chunks: {chunks:?}");
+    }
+
+    /// The packing budget counts the bytes between blocks: separators join
+    /// the packed body, so a full chunk cannot overshoot the token target.
+    #[test]
+    fn packing_counts_separator_bytes() {
+        // 80 four-char words: each block costs one token, and each two-byte
+        // separator joins the packed body.
+        let page = format!("## S\n\n{}\n", "wwww\n\n".repeat(80));
+        let chunks = Segmenter::with_limits(40, 8)
+            .unwrap()
+            .segment("acme", "1.0", &page);
+        assert!(chunks.len() > 1, "the page must split: {chunks:?}");
+        let sizer = super::build_sizer().unwrap();
+        for chunk in &chunks {
+            let tokens = sizer.size(&chunk.body);
+            assert!(
+                tokens <= 40,
+                "packed chunk overshot the target: {tokens} tokens for {:?}",
+                chunk.body
+            );
         }
     }
 

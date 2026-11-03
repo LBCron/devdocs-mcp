@@ -3,7 +3,7 @@ type: guide
 title: Ingest Pipeline (L1 + L2)
 description: The source adapters, the fetch guard, the license gate, the normalization and segmentation pipeline, dedup, the injection filter, and the refresh policy for devdocs.
 tags: [devdocs, ingest, llms-txt, git, openapi, html, segmentation]
-timestamp: 2026-10-28T00:00:00Z
+timestamp: 2026-11-03T12:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -146,7 +146,7 @@ Goal: chunk shape with heading, breadcrumb, signature, example, and explanation 
 
 1. Parse the Markdown with comrak (0.59.0) and read `sourcepos` for every block node. comrak's code-block source positions are reliable at 0.59 (verified 2026-10-28, sourcepos fixes landed through 0.50).
 2. Walk the block tree. Build sections at heading boundaries (ATX headings). A section keeps its nested content and its breadcrumb path.
-3. Inside a section, group blocks into chunks with text-splitter (`MarkdownSplitter`, target 400 tokens, overlap 80 tokens — the research reference engine shape, research: retrieval-design.md §3.2). The splitter treats code blocks as atomic units, so it never splits them.
+3. Inside a section, pack blocks into chunks up to the 400-token target (separator bytes between packed blocks join the budget). A block between the target and 2× the target splits with text-splitter (`MarkdownSplitter`, overlap 80 tokens — the research reference engine shape, research: retrieval-design.md §3.2). The splitter treats code blocks as atomic units, so it never splits them; a fenced block is never handed to the splitter at all. Section boundaries and packed block boundaries carry no overlap: both sides of the boundary stay whole, so no content is cut.
 4. Cross-check with sourcepos: if a chunk boundary would fall inside a fenced block (the splitter guarantees it does not, but the check catches regressions), merge the two candidate chunks and log a warning.
 5. A single block larger than 2× the target becomes its own chunk, never truncated.
 6. Token counts use the chars-per-4 heuristic by default. With feature `exact-tokens`, tiktoken o200k. The count is stored per chunk. Budget enforcement uses stored counts and never recounts at query time.
