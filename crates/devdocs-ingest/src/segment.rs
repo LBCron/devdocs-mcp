@@ -176,37 +176,17 @@ impl Segmenter {
         let mut breadcrumb: Vec<(u8, String)> = Vec::new();
 
         for node in root.children() {
-            if let NodeValue::Heading(NodeHeading { level, .. }) = &node.data().value {
-                let level = *level;
-                let title = inline_text(node);
-                // Pop the stack to the heading's level, then push.
-                while breadcrumb.last().is_some_and(|(l, _)| *l >= level) {
-                    breadcrumb.pop();
+            match &node.data().value {
+                NodeValue::Heading(NodeHeading { level, .. }) => {
+                    push_heading(
+                        &mut sections,
+                        &mut breadcrumb,
+                        *level,
+                        &inline_text(node),
+                        page_body,
+                    );
                 }
-                breadcrumb.push((level, title.clone()));
-                sections.push(Section {
-                    text: page_body,
-                    breadcrumb: breadcrumb.iter().map(|(_, t)| t.clone()).collect(),
-                    blocks: Vec::new(),
-                });
-            } else {
-                let fenced =
-                    matches!(&node.data().value, NodeValue::CodeBlock(boxed) if boxed.fenced);
-                let (start, end) = block_range(node, &offset);
-                let end = end.min(page_body.len());
-                if start >= end {
-                    continue;
-                }
-                if sections.is_empty() {
-                    sections.push(Section {
-                        text: page_body,
-                        breadcrumb: Vec::new(),
-                        blocks: Vec::new(),
-                    });
-                }
-                if let Some(last) = sections.last_mut() {
-                    last.blocks.push(Block { start, end, fenced });
-                }
+                _ => push_block(&mut sections, node, page_body, &offset),
             }
         }
         sections.retain(|section| !section.blocks.is_empty());
@@ -377,6 +357,52 @@ fn merge_until_fence_safe(mut spans: Vec<Range<usize>>, section_text: &str) -> V
             }
             None => return spans,
         }
+    }
+}
+
+/// Records one heading node: pop the breadcrumb to the heading's level,
+/// push the title, and open a new empty section for its blocks.
+fn push_heading<'a>(
+    sections: &mut Vec<Section<'a>>,
+    breadcrumb: &mut Vec<(u8, String)>,
+    level: u8,
+    title: &str,
+    page_body: &'a str,
+) {
+    while breadcrumb.last().is_some_and(|(l, _)| *l >= level) {
+        breadcrumb.pop();
+    }
+    breadcrumb.push((level, title.to_owned()));
+    sections.push(Section {
+        text: page_body,
+        breadcrumb: breadcrumb.iter().map(|(_, t)| t.clone()).collect(),
+        blocks: Vec::new(),
+    });
+}
+
+/// Records one content block node into the section it belongs to, opening
+/// the heading-less leading section when the page starts with content.
+fn push_block<'a>(
+    sections: &mut Vec<Section<'a>>,
+    node: &comrak::nodes::AstNode,
+    page_body: &'a str,
+    offset: &impl Fn(usize, usize) -> usize,
+) {
+    let fenced = matches!(&node.data().value, NodeValue::CodeBlock(boxed) if boxed.fenced);
+    let (start, end) = block_range(node, offset);
+    let end = end.min(page_body.len());
+    if start >= end {
+        return;
+    }
+    if sections.is_empty() {
+        sections.push(Section {
+            text: page_body,
+            breadcrumb: Vec::new(),
+            blocks: Vec::new(),
+        });
+    }
+    if let Some(last) = sections.last_mut() {
+        last.blocks.push(Block { start, end, fenced });
     }
 }
 

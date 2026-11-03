@@ -74,55 +74,9 @@ pub fn parse_llms_txt(text: &str, url: &str) -> Result<LlmsTxtIndex, IngestError
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut lines = text.lines();
 
-    // The H1 is the only required section (llmstxt.org v2).
-    let title = loop {
-        match lines.next() {
-            Some(line) if !line.trim().is_empty() => {
-                let Some(rest) = line.trim_start().strip_prefix("# ") else {
-                    return Err(IngestError::LlmsTxtInvalid {
-                        url: url.to_owned(),
-                        reason: format!("expected the H1 title, found: {line:?}"),
-                    });
-                };
-                break rest.trim().to_owned();
-            }
-            Some(_) => {}
-            None => {
-                return Err(IngestError::LlmsTxtInvalid {
-                    url: url.to_owned(),
-                    reason: String::from("the index is empty"),
-                });
-            }
-        }
-    };
-
-    // The blockquote: consecutive `>` lines after the H1. Blank lines may
-    // sit between the H1 and the quote; a blank line ends the quote the
-    // way a markdown blank line ends a block. The line that ends the scan
-    // stays unconsumed for the section loop.
+    let title = parse_title(&mut lines, url)?;
     let mut lines = lines.peekable();
-    let mut summary_lines: Vec<&str> = Vec::new();
-    while let Some(line) = lines.peek() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            if summary_lines.is_empty() {
-                lines.next();
-                continue;
-            }
-            break;
-        }
-        if let Some(quoted) = trimmed.strip_prefix('>') {
-            summary_lines.push(quoted.strip_prefix(' ').unwrap_or(quoted));
-            lines.next();
-        } else {
-            break;
-        }
-    }
-    let summary = if summary_lines.is_empty() {
-        None
-    } else {
-        Some(summary_lines.join(" "))
-    };
+    let summary = parse_summary(&mut lines);
 
     // Sections and link lines. A fenced block closes only on a line of the
     // opening marker's character with at least its run length, per
@@ -185,6 +139,66 @@ pub fn parse_llms_txt(text: &str, url: &str) -> Result<LlmsTxtIndex, IngestError
         summary,
         sections,
     })
+}
+
+/// Consumes the lines up to and including the required H1
+/// (llmstxt.org v2). Blank lines before it are skipped.
+fn parse_title<'a, I>(lines: &mut I, url: &str) -> Result<String, IngestError>
+where
+    I: Iterator<Item = &'a str>,
+{
+    loop {
+        match lines.next() {
+            Some(line) if !line.trim().is_empty() => {
+                let Some(rest) = line.trim_start().strip_prefix("# ") else {
+                    return Err(IngestError::LlmsTxtInvalid {
+                        url: url.to_owned(),
+                        reason: format!("expected the H1 title, found: {line:?}"),
+                    });
+                };
+                return Ok(rest.trim().to_owned());
+            }
+            Some(_) => {}
+            None => {
+                return Err(IngestError::LlmsTxtInvalid {
+                    url: url.to_owned(),
+                    reason: String::from("the index is empty"),
+                });
+            }
+        }
+    }
+}
+
+/// Consumes the blockquote: consecutive `>` lines after the H1. Blank
+/// lines may sit between the H1 and the quote; a blank line ends the quote
+/// the way a markdown blank line ends a block. The line that ends the scan
+/// stays unconsumed for the section loop.
+fn parse_summary<'a, I>(lines: &mut std::iter::Peekable<I>) -> Option<String>
+where
+    I: Iterator<Item = &'a str>,
+{
+    let mut summary_lines: Vec<&str> = Vec::new();
+    while let Some(line) = lines.peek() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if summary_lines.is_empty() {
+                lines.next();
+                continue;
+            }
+            break;
+        }
+        if let Some(quoted) = trimmed.strip_prefix('>') {
+            summary_lines.push(quoted.strip_prefix(' ').unwrap_or(quoted));
+            lines.next();
+        } else {
+            break;
+        }
+    }
+    if summary_lines.is_empty() {
+        None
+    } else {
+        Some(summary_lines.join(" "))
+    }
 }
 
 /// The fence marker on a line: the marker character and its run length,
