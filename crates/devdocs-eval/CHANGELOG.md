@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4](https://github.com/iamwatchdogs/devdocs-mcp/compare/devdocs-eval-v0.3.3...devdocs-eval-v0.3.4) - 2026-11-03
+
+### Other
+
+- release v0.3.3 ([#53](https://github.com/iamwatchdogs/devdocs-mcp/pull/53))
+
 ## [0.3.3](https://github.com/iamwatchdogs/devdocs-mcp/compare/devdocs-eval-v0.3.2...devdocs-eval-v0.3.3) - 2026-11-03
 
 ### Other
