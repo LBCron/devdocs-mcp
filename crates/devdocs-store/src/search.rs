@@ -9,6 +9,12 @@ use rusqlite::params;
 use crate::error::StoreError;
 use crate::store::Store;
 
+/// The WHERE clause that drops sources with a terminal license refusal out
+/// of retrieval at query time (docs/implementation/09 §License gate
+/// enforcement points, point 3). One string, shared by every serving query.
+const TERMINAL_LICENSE_CLAUSE: &str =
+    "AND s.license_status NOT IN ('denied', 'expired', 'revoked')";
+
 /// One search or lookup result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hit {
@@ -94,7 +100,7 @@ impl Store {
     /// parameter, never interpolated.
     pub fn search_fts(&self, match_expr: &str, limit: u32) -> Result<Vec<Hit>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
-        let mut stmt = conn.prepare_cached(
+        let sql = format!(
             "SELECT c.chunk_id, c.source_id, s.library, s.version, c.section_path, c.symbol, \
              c.text, c.token_count, \
              snippet(chunks_fts, 1, '<mark>', '</mark>', '…', 16), \
@@ -103,10 +109,11 @@ impl Store {
              JOIN chunks c ON c.chunk_id = chunks_fts.rowid \
              JOIN sources s ON s.source_id = c.source_id \
              WHERE chunks_fts MATCH ?1 AND s.active = 1 \
-               AND s.license_status NOT IN ('denied', 'expired', 'revoked') \
+               {TERMINAL_LICENSE_CLAUSE} \
              ORDER BY bm25(chunks_fts, 5.0, 1.0) \
-             LIMIT ?2",
-        )?;
+             LIMIT ?2"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![match_expr, limit], |row| {
             let base = base_columns(row)?;
             Ok(Hit {
@@ -134,16 +141,17 @@ impl Store {
         src: devdocs_model::SourceId,
     ) -> Result<Vec<Hit>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
-        let mut stmt = conn.prepare_cached(
+        let sql = format!(
             "SELECT c.chunk_id, c.source_id, s.library, s.version, c.section_path, c.symbol, \
              c.text, c.token_count, sym.kind \
              FROM symbols sym \
              JOIN chunks c ON c.chunk_id = sym.chunk_id \
              JOIN sources s ON s.source_id = c.source_id \
              WHERE sym.symbol = ?1 AND c.source_id = ?2 AND s.active = 1 \
-               AND s.license_status NOT IN ('denied', 'expired', 'revoked') \
-             ORDER BY c.ordinal",
-        )?;
+               {TERMINAL_LICENSE_CLAUSE} \
+             ORDER BY c.ordinal"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![symbol, src.0], |row| {
             let base = base_columns(row)?;
             Ok(Hit {

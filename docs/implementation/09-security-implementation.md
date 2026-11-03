@@ -41,7 +41,7 @@ The guard is the only network code. Enforced properties, each with a property te
 4. The resolved IP passes the blocklist check at connect time: private, loopback, link-local, multicast, unspecified, documentation (`2001:db8::/32`, `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`), and cloud metadata ranges (`169.254.169.254/32` and equivalents). Beyond the listed set, the blocklist also refuses fail-closed: shared address space (`100.64/10`), the benchmarking range (`198.18.0.0/15`), `0/8`, and the reserved block (`240/4`).
 5. Redirects re-run checks 1 to 4 on every hop. Limit 3. A redirect hop whose host resolves to only refused addresses reports the same refusal (`FETCH_BLOCKED`) as a refused initial URL.
 6. Byte cap 20 MiB applies to decompressed bytes, enforced by a wrapping reader, not by trusting Content-Length.
-7. Timeout 15 s per request. The initial DNS lookup shares the same budget, so a stalled resolver surfaces as a per-request timeout, not as a total-cap trip. Total ingest job wall time caps at 600 s by config.
+7. Timeout 15 s per request. The initial DNS lookup shares the same budget, so a stalled resolver surfaces as a per-request timeout, not as a total-cap trip. Total ingest job wall time caps at 600 s by config; the cap bounds the fetch-and-segment work, and the publish runs after it and reports its own result, so a timed-out run never reports failure while a generation turns active.
 8. Fail closed: any guard error aborts the whole source ingest, not just the failing request.
 
 The pinned resolver returns one address per host lookup. DNS rebinding fails because the connect-time IP is the checked IP.

@@ -84,7 +84,7 @@ impl<'a> IngestJob<'a> {
     /// The total cap bounds the fetch-and-segment work only. The publish
     /// runs after the cap: once the transaction starts, the run reports the
     /// publish's own result, so the store state and the reported outcome
-    /// never diverge (docs/implementation/07 §Atomic publish).
+    /// never diverge (docs/implementation/09 invariant 7).
     ///
     /// # Errors
     /// [`IngestError`] when any stage fails; the store stays untouched on
