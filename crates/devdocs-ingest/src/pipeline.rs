@@ -18,6 +18,7 @@ use devdocs_store::{NewChunk, Store};
 use time::OffsetDateTime;
 use url::Url;
 
+use crate::chrome::PageDocument;
 use crate::error::IngestError;
 use crate::events::IngestEvents;
 use crate::fixture::FixtureSet;
@@ -143,11 +144,41 @@ impl<'a> IngestJob<'a> {
         let ctx = LinkContext {
             index_url,
             index_base: &index_base,
-            library,
-            version,
         };
+        let mut docs: Vec<PageDocument> = Vec::new();
         for link in index.links() {
-            self.ingest_link(&ctx, link, &segmenter, &mut run).await?;
+            self.ingest_link(&ctx, link, &mut docs, &mut run).await?;
+        }
+
+        // Chrome strip (docs/implementation/07 §Normalization pipeline
+        // stage 2), off the async path: comrak parsing is CPU work.
+        let (chrome_report, docs) = tokio::task::spawn_blocking(move || {
+            let report = crate::chrome::strip_chrome(&mut docs);
+            (report, docs)
+        })
+        .await
+        .map_err(|join| IngestError::Join(join.to_string()))?;
+        run.events.skipped_blocks += chrome_report.pattern_drops;
+        run.events.chrome_drops += chrome_report.frequency_drops;
+
+        // Segment every stripped document (docs/implementation/07
+        // §Segmentation algorithm), one spawn_blocking per page.
+        for doc in &docs {
+            let (chunks, stats) =
+                segment_page(&segmenter, library, version, doc.body.clone()).await?;
+            run.events.skipped_blocks += stats.skipped_blocks;
+            run.events.unknown_fence_languages += stats.unknown_fence_languages;
+            for chunk in chunks {
+                run.new_chunks.push(NewChunk {
+                    section_path: chunk.section_path,
+                    symbol: None,
+                    text: chunk.text,
+                    token_count: chunk.token_count,
+                    content_hash: chunk.content_hash,
+                    ordinal: u32::try_from(run.new_chunks.len()).unwrap_or(u32::MAX),
+                });
+            }
+            run.events.pages += 1;
         }
 
         // A run that segments to zero chunks — no markdown links at all, or
@@ -178,12 +209,13 @@ impl<'a> IngestJob<'a> {
     }
 
     /// Ingests one index link: resolve, skip non-markdown URLs and HTML
-    /// bodies, segment, and buffer the chunks into `run`.
+    /// bodies, and buffer the body into the corpus. Segmentation happens
+    /// after the chrome strip, over the whole buffered corpus.
     async fn ingest_link(
         &self,
         ctx: &LinkContext<'_>,
         link: &crate::llms_txt::LlmsLink,
-        segmenter: &Segmenter,
+        docs: &mut Vec<PageDocument>,
         run: &mut RunState,
     ) -> Result<(), IngestError> {
         let page_url =
@@ -204,20 +236,10 @@ impl<'a> IngestJob<'a> {
             run.events.skipped_pages += 1;
             return Ok(());
         }
-        let (chunks, stats) = segment_page(segmenter, ctx.library, ctx.version, body).await?;
-        run.events.skipped_blocks += stats.skipped_blocks;
-        run.events.unknown_fence_languages += stats.unknown_fence_languages;
-        for chunk in chunks {
-            run.new_chunks.push(NewChunk {
-                section_path: chunk.section_path,
-                symbol: None,
-                text: chunk.text,
-                token_count: chunk.token_count,
-                content_hash: chunk.content_hash,
-                ordinal: u32::try_from(run.new_chunks.len()).unwrap_or(u32::MAX),
-            });
-        }
-        run.events.pages += 1;
+        docs.push(PageDocument {
+            path: page_url.to_string(),
+            body,
+        });
         Ok(())
     }
 
@@ -314,13 +336,11 @@ struct RunState {
     events: IngestEvents,
 }
 
-/// What one index link needs: the index URL for errors, the redirect-aware
-/// base for joining, and the run's library/version identity.
+/// What one index link needs: the index URL for errors and the
+/// redirect-aware base for joining.
 struct LinkContext<'a> {
     index_url: &'a Url,
     index_base: &'a Url,
-    library: &'a str,
-    version: &'a str,
 }
 
 /// Segments one page body off the async path. The blocking thread owns the
