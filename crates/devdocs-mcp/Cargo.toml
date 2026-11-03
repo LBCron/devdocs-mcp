@@ -7,12 +7,6 @@ license.workspace = true
 repository.workspace = true
 description = "MCP server adapter for devdocs"
 
-[dependencies]
-devdocs-model.workspace = true
-devdocs-retrieve.workspace = true
-rmcp.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
 
 [lints]
 workspace = true
