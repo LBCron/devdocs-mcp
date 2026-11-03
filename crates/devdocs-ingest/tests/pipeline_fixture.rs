@@ -201,9 +201,101 @@ async fn ingest_fails_closed_on_a_missing_fixture_page() {
         "expected FixtureMiss, got {error}"
     );
 
-    // The store carries nothing: the failed run published no source.
+    // The store carries nothing: the failed run published no source and no
+    // chunks — not even from the pages that fetched fine.
     let hits = store
         .search_fts(&devdocs_store::build_match_query("cursors"), 10)
         .unwrap();
     assert!(hits.is_empty(), "a failed run must publish nothing");
+    assert!(
+        store.list_sources().unwrap().is_empty(),
+        "a failed run must publish no source row"
+    );
+    assert!(
+        devdocs_testkit::read_chunks(&db.path().join("docs.db"))
+            .unwrap()
+            .is_empty(),
+        "a failed run must publish no chunks"
+    );
+}
+
+#[tokio::test]
+async fn fixture_replay_rejects_a_recorded_error_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 403, "headers": {}, "body": INDEX },
+    ]);
+    std::fs::write(
+        dir.path().join("manifest.json"),
+        serde_json::to_string(&responses).unwrap(),
+    )
+    .unwrap();
+    let fixture = FixtureSet::load(dir.path()).unwrap();
+    let config = config();
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let error = job
+        .run(
+            Arc::new(
+                devdocs_testkit::open_migrated(
+                    &tempfile::tempdir().unwrap().path().join("docs.db"),
+                )
+                .unwrap(),
+            ),
+            &index_url,
+            "acme",
+            "1.0",
+        )
+        .await
+        .unwrap_err();
+    match error {
+        devdocs_ingest::IngestError::Guard(devdocs_ingest::GuardError::Http { status, .. }) => {
+            assert_eq!(status.as_u16(), 403);
+        }
+        other => panic!("expected Guard(Http(403)), got {other}"),
+    }
+}
+
+#[tokio::test]
+async fn fixture_replay_enforces_the_byte_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let big_body = "x".repeat(64 * 1024 + 1);
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": big_body },
+    ]);
+    std::fs::write(
+        dir.path().join("manifest.json"),
+        serde_json::to_string(&responses).unwrap(),
+    )
+    .unwrap();
+    let fixture = FixtureSet::load(dir.path()).unwrap();
+    let mut config = config();
+    config.fetch.max_bytes = 64 * 1024;
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let error = job
+        .run(
+            Arc::new(
+                devdocs_testkit::open_migrated(
+                    &tempfile::tempdir().unwrap().path().join("docs.db"),
+                )
+                .unwrap(),
+            ),
+            &index_url,
+            "acme",
+            "1.0",
+        )
+        .await
+        .unwrap_err();
+    match error {
+        devdocs_ingest::IngestError::Guard(devdocs_ingest::GuardError::BodyTooLarge {
+            limit,
+            ..
+        }) => assert_eq!(limit, 64 * 1024),
+        other => panic!("expected Guard(BodyTooLarge), got {other}"),
+    }
 }

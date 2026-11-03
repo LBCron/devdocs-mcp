@@ -116,18 +116,25 @@ fn generated_pages_satisfy_the_segmentation_properties() {
 
         // 1. No content lost inside a section: consecutive chunks with the
         // same breadcrumb either overlap or leave only inter-block
-        // whitespace between them; a section boundary (the next heading
-        // line) is the other allowed hole.
+        // whitespace between them. Across a section boundary the only
+        // allowed hole is the next heading line plus whitespace — so a
+        // dropped first block of a section fails here too.
         for pair in chunks.windows(2) {
             let (prev, next) = (&pair[0], &pair[1]);
-            if prev.section_path == next.section_path
-                && next.page_range.start > prev.page_range.end
-            {
+            if next.page_range.start > prev.page_range.end {
                 let gap = &page[prev.page_range.end..next.page_range.start];
-                prop_assert!(
-                    gap.chars().all(char::is_whitespace),
-                    "non-whitespace gap {gap:?} inside a section: page {page:?}"
-                );
+                if prev.section_path == next.section_path {
+                    prop_assert!(
+                        gap.chars().all(char::is_whitespace),
+                        "non-whitespace gap {gap:?} inside a section: page {page:?}"
+                    );
+                } else {
+                    prop_assert!(
+                        gap.lines().all(|line| line.trim().is_empty()
+                            || line.trim_start().starts_with('#')),
+                        "cross-section gap carries non-heading content {gap:?}: page {page:?}"
+                    );
+                }
             }
         }
         if let Some(last) = chunks.last() {

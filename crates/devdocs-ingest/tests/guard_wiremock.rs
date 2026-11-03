@@ -51,8 +51,9 @@ async fn get_serves_a_plain_response() {
 
     let url = format!("{}/llms.txt", server.uri());
     let url = url::Url::parse(&url).unwrap();
-    let body = test_guard(1024, 5_000, 3).get(&url).await.unwrap();
+    let (body, final_url) = test_guard(1024, 5_000, 3).get(&url).await.unwrap();
     assert_eq!(body.as_ref(), b"index body");
+    assert_eq!(final_url, url);
 }
 
 #[tokio::test]
@@ -63,8 +64,9 @@ async fn get_follows_a_two_hop_redirect_chain() {
     mount_ok(&server, "/c", "final").await;
 
     let url = url::Url::parse(&format!("{}/a", server.uri())).unwrap();
-    let body = test_guard(1024, 5_000, 3).get(&url).await.unwrap();
+    let (body, final_url) = test_guard(1024, 5_000, 3).get(&url).await.unwrap();
     assert_eq!(body.as_ref(), b"final");
+    assert_eq!(final_url.path(), "/c");
 }
 
 #[tokio::test]
@@ -168,6 +170,6 @@ async fn get_serves_an_ipv6_literal_url() {
 
     let url = url::Url::parse(&format!("{}/llms.txt", server.uri())).unwrap();
     assert!(url.host_str().unwrap_or_default().starts_with('['));
-    let body = test_guard(1024, 5_000, 3).get(&url).await.unwrap();
+    let (body, _) = test_guard(1024, 5_000, 3).get(&url).await.unwrap();
     assert_eq!(body.as_ref(), b"ipv6 body");
 }

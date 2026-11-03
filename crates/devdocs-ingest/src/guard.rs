@@ -324,11 +324,13 @@ impl FetchGuard {
         })
     }
 
-    /// Fetches `url` through every guard invariant and returns the body.
+    /// Fetches `url` through every guard invariant and returns the body
+    /// plus the URL the response actually came from — the last URL after
+    /// redirects, which relative links must join against.
     ///
     /// # Errors
     /// [`GuardError`] when any check refuses or the transport fails.
-    pub async fn get(&self, url: &Url) -> Result<bytes::Bytes, GuardError> {
+    pub async fn get(&self, url: &Url) -> Result<(bytes::Bytes, Url), GuardError> {
         self.check(url)?;
         let pinned = self.resolve_pinned(url).await?;
 
@@ -366,6 +368,7 @@ impl FetchGuard {
         // The byte cap applies to decompressed bytes: with the gzip feature
         // on, `chunk` yields the decompressed stream
         // (docs/implementation/09 invariant 6).
+        let final_url = response.url().clone();
         let mut body = Vec::new();
         let mut response = response;
         while let Some(chunk) = response.chunk().await.map_err(map_transport)? {
@@ -378,7 +381,7 @@ impl FetchGuard {
             }
             body.extend_from_slice(&chunk);
         }
-        Ok(bytes::Bytes::from(body))
+        Ok((bytes::Bytes::from(body), final_url))
     }
 
     /// The redirect policy: every hop re-runs the URL checks before the

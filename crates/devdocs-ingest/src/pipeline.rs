@@ -5,8 +5,10 @@
 //! (`.md` paths); non-markdown links are skipped with a warning and a
 //! count. Any guard error fails the whole run closed before publish. The
 //! total ingest wall time caps at 600 s (docs/implementation/09 invariant
-//! 7); a cancelled or timed-out run leaves the store untouched because the
-//! publish is one transaction.
+//! 7) and bounds the fetch-and-segment work only: the publish runs after
+//! the cap, so a timed-out run reports the publish's own result and the
+//! store state never diverges from the reported outcome. A run that never
+//! reaches publish leaves the store untouched.
 
 use std::time::Duration;
 
@@ -79,6 +81,11 @@ impl<'a> IngestJob<'a> {
     /// ([`crate::license::gate_fetch`]) before the store opened; the run
     /// re-checks nothing and trusts the grant it was handed.
     ///
+    /// The total cap bounds the fetch-and-segment work only. The publish
+    /// runs after the cap: once the transaction starts, the run reports the
+    /// publish's own result, so the store state and the reported outcome
+    /// never diverge (docs/implementation/07 §Atomic publish).
+    ///
     /// # Errors
     /// [`IngestError`] when any stage fails; the store stays untouched on
     /// any failure.
@@ -90,26 +97,32 @@ impl<'a> IngestJob<'a> {
         version: &str,
     ) -> Result<IngestOutcome, IngestError> {
         let grant = crate::license::gate_fetch(self.config, index_url)?;
-        tokio::time::timeout(
+        let prepared = tokio::time::timeout(
             TOTAL_INGEST_CAP,
-            self.run_inner(&store, index_url, library, version, grant),
+            self.prepare(index_url, library, version, &grant),
         )
         .await
         .map_err(|_| IngestError::TotalTimeout {
             seconds: TOTAL_INGEST_CAP.as_secs(),
-        })?
+        })??;
+        self.publish(store, index_url, library, version, &grant, prepared)
+            .await
     }
 
-    /// The pipeline body inside the total-cap timeout.
-    async fn run_inner(
+    /// The fetch-and-segment phase, inside the total-cap timeout: fetch and
+    /// parse the index, fetch every markdown page, segment, and buffer the
+    /// chunks. Publishes nothing.
+    async fn prepare(
         &self,
-        store: &std::sync::Arc<Store>,
         index_url: &Url,
         library: &str,
         version: &str,
-        grant: crate::license::LicenseGrant,
-    ) -> Result<IngestOutcome, IngestError> {
-        let index_body = self.fetch(index_url).await?;
+        grant: &crate::license::LicenseGrant,
+    ) -> Result<Prepared, IngestError> {
+        // Relative links resolve against the URL the index actually came
+        // from: a redirect can move it to another directory, and the
+        // pre-redirect URL would join every link to the wrong base.
+        let (index_body, index_base) = self.fetch(index_url).await?;
         let index = parse_llms_txt(&index_body, index_url.as_str())?;
 
         let segmenter = Segmenter::new()?;
@@ -117,18 +130,19 @@ impl<'a> IngestJob<'a> {
         let mut pages = 0usize;
         let mut skipped = 0usize;
         for link in index.links() {
-            let page_url = index_url
-                .join(link.url())
-                .map_err(|e| IngestError::LlmsTxtInvalid {
-                    url: index_url.to_string(),
-                    reason: format!("link {:?} does not resolve: {e}", link.url()),
-                })?;
+            let page_url =
+                index_base
+                    .join(link.url())
+                    .map_err(|e| IngestError::LlmsTxtInvalid {
+                        url: index_url.to_string(),
+                        reason: format!("link {:?} does not resolve: {e}", link.url()),
+                    })?;
             if !is_markdown_page(&page_url) {
                 tracing::warn!("skipping non-markdown link {}", page_url);
                 skipped += 1;
                 continue;
             }
-            let body = self.fetch(&page_url).await?;
+            let (body, _) = self.fetch(&page_url).await?;
             let page_segmenter = segmenter.clone();
             let library = library.to_owned();
             let version = version.to_owned();
@@ -163,17 +177,40 @@ impl<'a> IngestJob<'a> {
             kind: SourceKind::LlmsTxt,
             origin_url: index_url.clone(),
             commit_sha: None,
-            license: grant.license,
+            license: grant.license.clone(),
             license_status: grant.status,
             fetched_at: OffsetDateTime::now_utc(),
         };
-        let chunks_len = new_chunks.len();
-        let publish_store = std::sync::Arc::clone(store);
-        let publish_result = tokio::task::spawn_blocking(move || {
-            publish_store.publish_generation(&record, &new_chunks)
+        Ok(Prepared {
+            record,
+            new_chunks,
+            pages,
+            skipped,
         })
-        .await
-        .map_err(|join| IngestError::Join(join.to_string()))?;
+    }
+
+    /// Publishes the prepared run outside the total-cap timeout and reports
+    /// the publish's own result.
+    async fn publish(
+        &self,
+        store: std::sync::Arc<Store>,
+        index_url: &Url,
+        library: &str,
+        version: &str,
+        grant: &crate::license::LicenseGrant,
+        prepared: Prepared,
+    ) -> Result<IngestOutcome, IngestError> {
+        let Prepared {
+            record,
+            new_chunks,
+            pages,
+            skipped,
+        } = prepared;
+        let chunks_len = new_chunks.len();
+        let publish_result =
+            tokio::task::spawn_blocking(move || store.publish_generation(&record, &new_chunks))
+                .await
+                .map_err(|join| IngestError::Join(join.to_string()))?;
         publish_result?;
 
         Ok(IngestOutcome {
@@ -189,20 +226,54 @@ impl<'a> IngestJob<'a> {
 
     /// Fetches one URL: the guard policy always runs; the bytes come from
     /// the fixture replay when one is loaded, else from the network.
-    async fn fetch(&self, url: &Url) -> Result<String, IngestError> {
+    /// Returns the body and the URL the response actually came from — the
+    /// requested URL in replay (no redirects), the final URL on the wire.
+    async fn fetch(&self, url: &Url) -> Result<(String, Url), IngestError> {
         self.guard.check(url)?;
         if let Some(fixture) = self.fixture {
             let recorded = fixture.serve(url).ok_or_else(|| {
                 IngestError::Guard(crate::guard::GuardError::FixtureMiss(url.to_string()))
             })?;
-            return Ok(recorded.body.clone());
+            // Replay holds the network path to its own contracts: a
+            // recorded non-success status and an oversized body fail the
+            // same way the live fetch would (docs/04 §Fixtures).
+            let status = reqwest::StatusCode::from_u16(recorded.status).map_err(|_| {
+                IngestError::LlmsTxtInvalid {
+                    url: url.to_string(),
+                    reason: format!("fixture records status {}", recorded.status),
+                }
+            })?;
+            if !status.is_success() {
+                return Err(IngestError::Guard(crate::guard::GuardError::Http {
+                    url: url.to_string(),
+                    status,
+                }));
+            }
+            let limit = self.config.fetch.max_bytes;
+            if recorded.body.len() as u64 > limit {
+                return Err(IngestError::Guard(crate::guard::GuardError::BodyTooLarge {
+                    url: url.to_string(),
+                    limit,
+                }));
+            }
+            return Ok((recorded.body.clone(), url.clone()));
         }
-        let bytes = self.guard.get(url).await?;
-        String::from_utf8(bytes.to_vec()).map_err(|_| IngestError::LlmsTxtInvalid {
-            url: url.to_string(),
-            reason: String::from("the response is not valid UTF-8"),
-        })
+        let (bytes, final_url) = self.guard.get(url).await?;
+        String::from_utf8(bytes.to_vec())
+            .map(|body| (body, final_url))
+            .map_err(|_| IngestError::LlmsTxtInvalid {
+                url: url.to_string(),
+                reason: String::from("the response is not valid UTF-8"),
+            })
     }
+}
+
+/// Everything the fetch-and-segment phase produced, ready to publish.
+struct Prepared {
+    record: SourceRecord,
+    new_chunks: Vec<NewChunk>,
+    pages: usize,
+    skipped: usize,
 }
 
 /// Whether the URL path names a markdown page (the M3a slice ingests
