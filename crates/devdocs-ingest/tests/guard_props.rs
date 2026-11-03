@@ -12,7 +12,8 @@ use std::net::IpAddr;
 use proptest::prelude::*;
 use url::Url;
 
-use devdocs_ingest::guard::{FetchGuard, GuardError, ip_allowed};
+use devdocs_ingest::guard::{FetchGuard, GuardError};
+use devdocs_ingest::resolver::ip_allowed;
 use devdocs_model::config::FetchConfig;
 
 /// A guard with the documented defaults.
