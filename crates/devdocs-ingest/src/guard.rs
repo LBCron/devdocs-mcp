@@ -9,7 +9,7 @@
 //! response; any guard error fails the whole source ingest closed.
 
 use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use devdocs_model::config::FetchConfig;
 use thiserror::Error as ThisError;
@@ -295,24 +295,27 @@ impl FetchGuard {
     /// Resolves `host` once, validates every address against the blocklist,
     /// and pins the first allowed one. This is the one DNS lookup the guard
     /// does for the request; the connection opens only to the returned
-    /// address, and the connect-time re-check re-validates it.
-    async fn resolve_pinned(&self, url: &Url) -> Result<IpAddr, GuardError> {
+    /// address, and the connect-time re-check re-validates it. The lookup
+    /// spends from the `deadline` the caller passes, so the DNS stall and
+    /// the request share one per-request budget
+    /// (docs/implementation/09 invariant 7).
+    async fn resolve_pinned(&self, url: &Url, deadline: Instant) -> Result<IpAddr, GuardError> {
         let Some(host) = bare_host(url) else {
             return Err(GuardError::NoAllowedAddress {
                 host: String::from("<no host>"),
                 url: url.to_string(),
             });
         };
-        // The lookup shares the per-request budget: a stalled resolver must
-        // surface as `Timeout`, not as a 600 s total-cap trip
-        // (docs/implementation/09 invariant 7).
-        let addrs = tokio::time::timeout(self.timeout, tokio::net::lookup_host((host, 0)))
-            .await
-            .map_err(|_| GuardError::Timeout)?
-            .map_err(|e| GuardError::Dns {
-                host: host.to_owned(),
-                source: Box::new(e),
-            })?;
+        let addrs = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            tokio::net::lookup_host((host, 0)),
+        )
+        .await
+        .map_err(|_| GuardError::Timeout)?
+        .map_err(|e| GuardError::Dns {
+            host: host.to_owned(),
+            source: Box::new(e),
+        })?;
         for addr in addrs {
             if ip_allowed(&addr.ip(), self.policy.allow_loopback_for_tests) {
                 return Ok(addr.ip());
@@ -332,7 +335,11 @@ impl FetchGuard {
     /// [`GuardError`] when any check refuses or the transport fails.
     pub async fn get(&self, url: &Url) -> Result<(bytes::Bytes, Url), GuardError> {
         self.check(url)?;
-        let pinned = self.resolve_pinned(url).await?;
+        // One deadline spans the DNS lookup and the request: the lookup
+        // spends from it, and the request gets only the time left
+        // (docs/implementation/09 invariant 7).
+        let deadline = Instant::now() + self.timeout;
+        let pinned = self.resolve_pinned(url, deadline).await?;
 
         let port = url.port_or_known_default().unwrap_or(443);
         let builder = reqwest::Client::builder()
@@ -349,9 +356,15 @@ impl FetchGuard {
             );
         let client = builder.build().map_err(GuardError::Transport)?;
 
+        // The request spends only the budget left after the lookup; an
+        // exhausted budget refuses before any connection attempt.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(GuardError::Timeout);
+        }
         let response = client
             .get(url.clone())
-            .timeout(self.timeout)
+            .timeout(remaining)
             .send()
             .await
             .map_err(map_transport)?;
