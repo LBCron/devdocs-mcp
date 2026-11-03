@@ -247,4 +247,30 @@ mod tests {
             None
         );
     }
+
+    /// A registry entry without a URL is skipped, not an error.
+    #[test]
+    fn entry_without_a_url_is_skipped() {
+        let mut config = config_with(
+            "acme",
+            "https://docs.acme.test/llms.txt",
+            Some("approved_index"),
+        );
+        config.sources.insert(
+            String::from("ghost"),
+            devdocs_model::config::SourceConfig {
+                kind: None,
+                url: None,
+                license: None,
+                status: None,
+                refresh_days: None,
+            },
+        );
+        let grant = gate_fetch(&config, &url("https://docs.acme.test/llms.txt")).unwrap();
+        assert_eq!(grant.name, "acme");
+        assert_eq!(
+            super::refused_status(&config, &url("https://docs.acme.test/llms.txt")),
+            Some(LicenseStatus::ApprovedIndex)
+        );
+    }
 }

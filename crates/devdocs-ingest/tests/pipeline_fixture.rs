@@ -105,6 +105,9 @@ async fn ingest_runs_index_to_published_chunks_offline() {
     assert_eq!(grant.status, LicenseStatus::ApprovedIndex);
 
     let job = IngestJob::new(&config, &guard, Some(&fixture));
+    // The debug shape reports whether a replay set is loaded, and never
+    // the config contents.
+    assert!(format!("{job:?}").contains("fixture: true"), "{job:?}");
     let outcome = job
         .run(Arc::clone(&store), &index_url, &grant.name, "1.0")
         .await

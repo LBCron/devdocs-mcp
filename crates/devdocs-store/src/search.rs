@@ -11,7 +11,8 @@ use crate::store::Store;
 
 /// The WHERE clause that drops sources with a terminal license refusal out
 /// of retrieval at query time (docs/implementation/09 §License gate
-/// enforcement points, point 3). One string, shared by every serving query.
+/// enforcement points, point 3). One string, shared by every serving
+/// query through the `{license_clause}` placeholder in the SQL consts.
 const TERMINAL_LICENSE_CLAUSE: &str =
     "AND s.license_status NOT IN ('denied', 'expired', 'revoked')";
 
@@ -112,7 +113,9 @@ fn fts_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<Hit> {
 /// The unscoped search SQL: the chunk/source join with the documented
 /// bm25 weights, ordered and limited. The `{license_clause}` placeholder
 /// takes the shared terminal-license filter
-/// ([`TERMINAL_LICENSE_CLAUSE`]).
+/// ([`TERMINAL_LICENSE_CLAUSE`]) so sources whose license state turned
+/// terminal drop out at query time
+/// (docs/implementation/09 §License gate enforcement points, point 3).
 const FTS_SQL: &str = "SELECT c.chunk_id, c.source_id, s.library, s.version, c.section_path, \
      c.symbol, \
      c.text, c.token_count, \
@@ -129,7 +132,8 @@ const FTS_SQL: &str = "SELECT c.chunk_id, c.source_id, s.library, s.version, c.s
 /// The library-scoped search SQL: the same projection with the library
 /// predicate before the limit. The `{license_clause}` placeholder takes
 /// the shared terminal-license filter
-/// ([`TERMINAL_LICENSE_CLAUSE`]).
+/// ([`TERMINAL_LICENSE_CLAUSE`]) — the same drop the unscoped query
+/// applies.
 const FTS_LIBRARY_SQL: &str = "SELECT c.chunk_id, c.source_id, s.library, s.version, \
      c.section_path, \
      c.symbol, \
@@ -144,6 +148,19 @@ const FTS_LIBRARY_SQL: &str = "SELECT c.chunk_id, c.source_id, s.library, s.vers
      AND s.library = ?3 COLLATE NOCASE \
      ORDER BY bm25(chunks_fts, 5.0, 1.0) \
      LIMIT ?2";
+
+/// The exact-symbol lookup SQL: the symbol join with the same
+/// terminal-license clause, ordered by chunk position.
+const SYMBOL_SQL: &str = "SELECT c.chunk_id, c.source_id, s.library, s.version, \
+     c.section_path, \
+     c.symbol, \
+     c.text, c.token_count, sym.kind \
+     FROM symbols sym \
+     JOIN chunks c ON c.chunk_id = sym.chunk_id \
+     JOIN sources s ON s.source_id = c.source_id \
+     WHERE sym.symbol = ?1 AND c.source_id = ?2 AND s.active = 1 \
+     {license_clause} \
+     ORDER BY c.ordinal";
 
 impl Store {
     /// Full-text search over active sources with the documented bm25
@@ -189,16 +206,7 @@ impl Store {
         src: devdocs_model::SourceId,
     ) -> Result<Vec<Hit>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
-        let sql = format!(
-            "SELECT c.chunk_id, c.source_id, s.library, s.version, c.section_path, c.symbol, \
-             c.text, c.token_count, sym.kind \
-             FROM symbols sym \
-             JOIN chunks c ON c.chunk_id = sym.chunk_id \
-             JOIN sources s ON s.source_id = c.source_id \
-             WHERE sym.symbol = ?1 AND c.source_id = ?2 AND s.active = 1 \
-               {TERMINAL_LICENSE_CLAUSE} \
-             ORDER BY c.ordinal"
-        );
+        let sql = SYMBOL_SQL.replace("{license_clause}", TERMINAL_LICENSE_CLAUSE);
         let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![symbol, src.0], |row| {
             let base = base_columns(row)?;
