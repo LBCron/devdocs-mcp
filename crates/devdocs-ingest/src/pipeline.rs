@@ -340,9 +340,12 @@ async fn segment_page(
 /// doctype or an `html` tag. The slice ingests markdown only, so a markdown
 /// link that serves HTML is skipped rather than stored as markup
 /// (docs/implementation/07 §Media split). A leading HTML comment or a code
-/// fence never matches.
+/// fence never matches. A leading UTF-8 BOM is stripped first, the way the
+/// index parser strips it (docs/implementation/07 §Index parse).
 fn is_html_body(body: &str) -> bool {
-    let head: String = body.trim_start().chars().take(64).collect();
+    let trimmed = body.trim_start();
+    let trimmed = trimmed.strip_prefix('\u{feff}').unwrap_or(trimmed);
+    let head: String = trimmed.chars().take(64).collect();
     let head = head.to_ascii_lowercase();
     head.starts_with("<!doctype html") || head.starts_with("<html")
 }
@@ -354,4 +357,32 @@ fn is_markdown_page(url: &Url) -> bool {
         .split('/')
         .next_back()
         .is_some_and(|last| last.to_ascii_lowercase().ends_with(".md"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An HTML body is detected case-insensitively after leading
+    /// whitespace.
+    #[test]
+    fn html_body_matches_a_case_insensitive_prefix() {
+        assert!(is_html_body("\n  <!DOCTYPE html><html><body>x"));
+        assert!(is_html_body("<HTML><body>x"));
+    }
+
+    /// A leading UTF-8 BOM does not hide an HTML body from the check
+    /// (docs/implementation/07 §Media split).
+    #[test]
+    fn html_body_strips_a_leading_bom() {
+        assert!(is_html_body("\u{feff}<!doctype html><html><body>x"));
+        assert!(is_html_body(" \u{feff}<html>"));
+    }
+
+    /// A markdown body never matches, BOM or not.
+    #[test]
+    fn markdown_body_does_not_match() {
+        assert!(!is_html_body("# Title\n\nbody text"));
+        assert!(!is_html_body("\u{feff}# Titled"));
+    }
 }
