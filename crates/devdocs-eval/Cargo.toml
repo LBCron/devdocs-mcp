@@ -9,6 +9,7 @@ description = "Evaluation harness for devdocs retrieval quality"
 
 [dependencies]
 clap.workspace = true
+devdocs-model.workspace = true
 devdocs-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true

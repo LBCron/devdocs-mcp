@@ -111,13 +111,20 @@ impl Error {
     }
 
     /// The stable `UPPER_SNAKE` code for the JSON error envelope
-    /// (docs/implementation/08 §Error codes).
+    /// (docs/implementation/08 §Error codes). A cold miss — the library
+    /// or the requested version absent — is `PKG_NOT_INDEXED`; every other
+    /// valid-query miss is `NO_RESULT`.
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
             Self::Usage(_) => "USAGE",
             Self::ConfigInvalid { .. } => "CONFIG_INVALID",
-            Self::NoResult { .. } => "NO_RESULT",
+            Self::NoResult { reason } => match reason {
+                MissReason::NotIndexed | MissReason::VersionAbsent => "PKG_NOT_INDEXED",
+                MissReason::LicenseBlocked
+                | MissReason::QuarantinedOnly
+                | MissReason::LowConfidence => "NO_RESULT",
+            },
             Self::Upstream { code, .. } => match code {
                 UpstreamCode::FetchBlocked => "FETCH_BLOCKED",
                 UpstreamCode::UpstreamError => "UPSTREAM_ERROR",
@@ -242,7 +249,9 @@ mod tests {
         }
     }
 
-    /// Every variant maps to a distinct, stable `UPPER_SNAKE` code.
+    /// Every variant maps to a stable `UPPER_SNAKE` code; a cold miss —
+    /// the library or the requested version absent — is
+    /// `PKG_NOT_INDEXED` (docs/implementation/08 §Error codes).
     #[test]
     fn error_maps_to_stable_codes() {
         let codes = [
@@ -253,6 +262,12 @@ mod tests {
             },
             Error::NoResult {
                 reason: MissReason::NotIndexed,
+            },
+            Error::NoResult {
+                reason: MissReason::VersionAbsent,
+            },
+            Error::NoResult {
+                reason: MissReason::LowConfidence,
             },
             Error::Upstream {
                 code: UpstreamCode::FetchBlocked,
@@ -271,6 +286,8 @@ mod tests {
         let expected = [
             "USAGE",
             "CONFIG_INVALID",
+            "PKG_NOT_INDEXED",
+            "PKG_NOT_INDEXED",
             "NO_RESULT",
             "FETCH_BLOCKED",
             "UPSTREAM_ERROR",
@@ -280,17 +297,18 @@ mod tests {
         for (error, code) in codes.iter().zip(expected) {
             assert_eq!(error.code(), code);
         }
-        assert_eq!(codes.iter().map(Error::code).collect::<Vec<_>>().len(), 7);
+        assert_eq!(codes.iter().map(Error::code).collect::<Vec<_>>().len(), 9);
     }
 
-    /// The exit-2 envelope carries `miss_reason`; the others do not.
+    /// The exit-2 envelope carries `miss_reason`; the others do not. A
+    /// cold miss carries `PKG_NOT_INDEXED`.
     #[test]
     fn envelope_carries_miss_reason_only_for_no_result() {
         let miss = Error::NoResult {
             reason: MissReason::VersionAbsent,
         };
         let envelope: ErrorEnvelope = miss.to_envelope();
-        assert_eq!(envelope.error, "NO_RESULT");
+        assert_eq!(envelope.error, "PKG_NOT_INDEXED");
         assert_eq!(envelope.miss_reason, Some(MissReason::VersionAbsent));
         assert!(envelope.hint.is_some());
 
@@ -299,7 +317,8 @@ mod tests {
         assert_eq!(usage.detail.as_deref(), Some("bad flag"));
     }
 
-    /// The envelope round-trips as the single-line JSON shape from doc 05.
+    /// The envelope round-trips as the single-line JSON shape from doc 05;
+    /// a cold miss carries `PKG_NOT_INDEXED` and the add hint.
     #[test]
     fn envelope_serializes_to_one_line_json() {
         let json = Error::NoResult {
@@ -310,7 +329,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             json,
-            r#"{"error":"NO_RESULT","hint":"run: devdocs add <source> --version <V>","detail":null,"miss_reason":"not_indexed"}"#
+            r#"{"error":"PKG_NOT_INDEXED","hint":"run: devdocs add <source> --version <V>","detail":null,"miss_reason":"not_indexed"}"#
         );
     }
 
