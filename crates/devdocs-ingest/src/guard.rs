@@ -376,10 +376,14 @@ impl FetchGuard {
             .map_err(map_transport)?;
         self.verify_connect_time(&response, pinned, url)?;
 
+        // The status and size checks run on the response of the last hop, so
+        // the errors name that hop's URL; a direct fetch reports the request
+        // URL because `final_url` equals it.
+        let final_url = response.url().clone();
         let status = response.status();
         if !status.is_success() {
             return Err(GuardError::Http {
-                url: url.to_string(),
+                url: final_url.to_string(),
                 status,
             });
         }
@@ -387,14 +391,13 @@ impl FetchGuard {
         // The byte cap applies to decompressed bytes: with the gzip feature
         // on, `chunk` yields the decompressed stream
         // (docs/implementation/09 invariant 6).
-        let final_url = response.url().clone();
         let mut body = Vec::new();
         let mut response = response;
         while let Some(chunk) = response.chunk().await.map_err(map_transport)? {
             let total = body.len() as u64 + chunk.len() as u64;
             if total > self.max_bytes {
                 return Err(GuardError::BodyTooLarge {
-                    url: url.to_string(),
+                    url: final_url.to_string(),
                     limit: self.max_bytes,
                 });
             }

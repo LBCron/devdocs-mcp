@@ -160,6 +160,46 @@ async fn get_reports_an_http_error_status() {
 }
 
 #[tokio::test]
+async fn get_names_the_redirect_target_on_an_http_error() {
+    let server = MockServer::start().await;
+    mount_redirect(&server, "/a", "/gone").await;
+    Mock::given(path("/gone"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    let url = url::Url::parse(&format!("{}/a", server.uri())).unwrap();
+    let error = test_guard(1024, 5_000, 3).get(&url).await.unwrap_err();
+    match error {
+        GuardError::Http { url, status } => {
+            assert!(url.ends_with("/gone"), "{url}");
+            assert_eq!(status.as_u16(), 404);
+        }
+        other => panic!("expected Http, got {other}"),
+    }
+}
+
+#[tokio::test]
+async fn get_names_the_redirect_target_on_a_oversized_body() {
+    let server = MockServer::start().await;
+    mount_redirect(&server, "/a", "/big").await;
+    Mock::given(path("/big"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'x'; 256 * 1024]))
+        .mount(&server)
+        .await;
+
+    let url = url::Url::parse(&format!("{}/a", server.uri())).unwrap();
+    let error = test_guard(64 * 1024, 5_000, 3).get(&url).await.unwrap_err();
+    match error {
+        GuardError::BodyTooLarge { url, limit } => {
+            assert!(url.ends_with("/big"), "{url}");
+            assert_eq!(limit, 64 * 1024);
+        }
+        other => panic!("expected BodyTooLarge, got {other}"),
+    }
+}
+
+#[tokio::test]
 async fn get_reports_a_connection_failure_as_transport() {
     // Port 4 sits below the privileged range: an unprivileged parallel
     // test server cannot bind it on Unix, and nothing in the suite binds
