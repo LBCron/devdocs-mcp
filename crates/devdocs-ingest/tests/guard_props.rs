@@ -7,7 +7,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use proptest::prelude::*;
 use url::Url;
@@ -41,8 +41,73 @@ fn allowed_ip() -> impl Strategy<Value = IpAddr> {
 }
 
 /// Any IP address the blocklist refuses.
+///
+/// The addresses come from an explicit enumeration of the documented
+/// blocked ranges, not from `ip_allowed` itself: if `ip_allowed` starts
+/// admitting part of a range, the generated inputs keep covering it and
+/// the property fails loudly instead of silently losing coverage
+/// (docs/implementation/09 §Network guard).
+const BLOCKED_V4: &[(std::net::Ipv4Addr, u8)] = &[
+    (std::net::Ipv4Addr::UNSPECIFIED, 8),
+    (std::net::Ipv4Addr::new(10, 0, 0, 0), 8),
+    (std::net::Ipv4Addr::new(100, 64, 0, 0), 10),
+    (std::net::Ipv4Addr::new(127, 0, 0, 0), 8),
+    (std::net::Ipv4Addr::new(169, 254, 0, 0), 16),
+    (std::net::Ipv4Addr::new(172, 16, 0, 0), 12),
+    (std::net::Ipv4Addr::new(192, 0, 2, 0), 24),
+    (std::net::Ipv4Addr::new(192, 168, 0, 0), 16),
+    (std::net::Ipv4Addr::new(198, 18, 0, 0), 15),
+    (std::net::Ipv4Addr::new(198, 51, 100, 0), 24),
+    (std::net::Ipv4Addr::new(203, 0, 113, 0), 24),
+    (std::net::Ipv4Addr::new(224, 0, 0, 0), 4),
+    (std::net::Ipv4Addr::new(240, 0, 0, 0), 4),
+];
+
+/// The blocked v6 ranges, as `(base, host-bit count)` pairs.
+const BLOCKED_V6: &[(std::net::Ipv6Addr, u32)] = &[
+    (std::net::Ipv6Addr::UNSPECIFIED, 0),
+    (std::net::Ipv6Addr::LOCALHOST, 0),
+    (std::net::Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0), 121),
+    (std::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 118),
+    (std::net::Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 120),
+    (
+        std::net::Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 0),
+        96,
+    ),
+    (
+        std::net::Ipv6Addr::new(0x0064, 0xff9b, 0, 0, 0, 0, 0, 0),
+        32,
+    ),
+    (std::net::Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0, 0), 112),
+    (std::net::Ipv6Addr::new(0x0100, 0, 0, 0, 0, 0, 0, 0), 64),
+];
+
 fn blocked_ip() -> impl Strategy<Value = IpAddr> {
-    any_ip().prop_filter("must be blocked", |ip| !ip_allowed(ip, false))
+    let v4 = BLOCKED_V4.iter().map(|&(base, prefix)| {
+        any::<u32>()
+            .prop_map(move |x| {
+                let host = if prefix == 0 {
+                    0
+                } else {
+                    x & (u32::MAX >> prefix)
+                };
+                IpAddr::V4(Ipv4Addr::from(u32::from(base) | host))
+            })
+            .boxed()
+    });
+    let v6 = BLOCKED_V6.iter().map(|&(base, host_bits)| {
+        any::<u128>()
+            .prop_map(move |x| {
+                let mask = if host_bits == 0 {
+                    0
+                } else {
+                    u128::MAX >> (128 - host_bits)
+                };
+                IpAddr::V6(Ipv6Addr::from(u128::from(base) | (x & mask)))
+            })
+            .boxed()
+    });
+    proptest::strategy::Union::new(v4.chain(v6))
 }
 
 /// An https URL whose host is an allowed IP literal, with a default,
