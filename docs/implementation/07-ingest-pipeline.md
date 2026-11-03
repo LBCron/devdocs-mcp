@@ -3,7 +3,7 @@ type: guide
 title: Ingest Pipeline (L1 + L2)
 description: The source adapters, the fetch guard, the license gate, the normalization and segmentation pipeline, dedup, the injection filter, and the refresh policy for devdocs.
 tags: [devdocs, ingest, llms-txt, git, openapi, html, segmentation]
-timestamp: 2026-11-03T17:30:00Z
+timestamp: 2026-11-04T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -131,7 +131,7 @@ Runtime consequences:
 
 Order matters. Each stage is a pure function over `RawDocument` streams, so snapshots test it deterministically.
 
-1. **Media split.** JSON/YAML documents route to the OpenAPI-shaped path. Markdown routes to segmentation. HTML routes through the HTML extractor first, which emits Markdown. In this slice the HTML extractor does not exist yet: the ingest loop skips a link whose body opens a doctype or `html` tag, and counts it as skipped, so markup never reaches the chunks.
+1. **Media split.** JSON/YAML documents route to the OpenAPI-shaped path. Markdown routes to segmentation. HTML routes through the HTML extractor first, which emits Markdown. In this slice the HTML extractor does not exist yet: the ingest loop skips a link whose body starts with a doctype or an `html` tag (case-insensitive, after leading whitespace and a leading BOM), and counts it as skipped. This check looks only at the start of the body. A body that starts with an HTML comment or an XML declaration is not skipped, and HTML inside markdown is not removed, so markup can reach the chunks.
 2. **Chrome strip.** For HTML: the adapter extracts main content before this stage. For Markdown: strip leading site navigation blocks, "edit this page" links, cookie banners, and repeated boilerplate detected by exact-match frequency across the source (a block identical in more than 60% of pages is chrome).
 3. **Segmentation.** Algorithm below.
 4. **Contextual headers.** Prepend the breadcrumb and version to every chunk body: `[{library} {version} › {section path}]` (research: architecture.md §L2. Measured effect −49% retrieval failures, −67% with reranking).
