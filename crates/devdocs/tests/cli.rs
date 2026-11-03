@@ -741,7 +741,7 @@ fn add_reports_a_withdrawal_that_cannot_be_recorded() {
     assert_eq!(code, 0, "stderr: {stderr}");
 
     // The registry status flips to revoked, and the store cannot record
-    // the withdrawal: the db file becomes unwritable.
+    // the withdrawal: the db file becomes read-only.
     std::fs::write(
         &config,
         concat!(
@@ -753,18 +753,12 @@ fn add_reports_a_withdrawal_that_cannot_be_recorded() {
         ),
     )
     .expect("config rewritten");
-    let restore = |mode: u32| {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&db).expect("db metadata").permissions();
-        perms.set_mode(mode);
-        std::fs::set_permissions(&db, perms).expect("mode set");
-    };
-    restore(0o444);
+    set_db_readonly(&db, true);
 
     // A root process ignores the permission bits, so the seal cannot hold
     // and the withdrawal would succeed; skip loudly in that case.
     if std::fs::OpenOptions::new().append(true).open(&db).is_ok() {
-        restore(0o644);
+        set_db_readonly(&db, false);
         eprintln!("skipping: the process ignores file permission bits");
         return;
     }
@@ -777,9 +771,22 @@ fn add_reports_a_withdrawal_that_cannot_be_recorded() {
         "stderr should name the failed withdrawal: {stderr}"
     );
 
-    restore(0o644);
+    set_db_readonly(&db, false);
     // The withdrawal never landed, and the command said so instead of
     // reporting the refusal alone.
+    assert_source_still_active(&env, &config, &db);
+}
+
+/// Flips the db file's read-only flag: on unix the write bits drop, on
+/// windows the read-only attribute set, and both stop a read-write open.
+fn set_db_readonly(db: &std::path::Path, readonly: bool) {
+    let mut perms = std::fs::metadata(db).expect("db metadata").permissions();
+    perms.set_readonly(readonly);
+    std::fs::set_permissions(db, perms).expect("read-only flag set");
+}
+
+/// The source is still active: the withdrawal never landed.
+fn assert_source_still_active(env: &Env, config: &std::path::Path, db: &std::path::Path) {
     let (code, stdout, stderr) = output(
         env.cmd(),
         &[
@@ -793,8 +800,7 @@ fn add_reports_a_withdrawal_that_cannot_be_recorded() {
     );
     assert_eq!(code, 0, "stdout: {stdout} stderr: {stderr}");
     let envelope: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
-    let source = &envelope["results"][0];
-    assert_eq!(source["active"], true);
+    assert_eq!(envelope["results"][0]["active"], true);
 }
 
 /// Writes a fixture manifest from raw entry objects and returns its path.
