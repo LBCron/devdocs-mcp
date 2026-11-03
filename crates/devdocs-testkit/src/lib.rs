@@ -106,3 +106,49 @@ pub fn read_chunks(path: &Path) -> Result<Vec<StoredChunk>, rusqlite::Error> {
     })?;
     rows.collect()
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use rusqlite::Connection;
+
+    use super::{StoredChunk, open_migrated, read_chunks};
+
+    /// Seeded rows read back in order, and a deactivated source drops out.
+    #[test]
+    fn read_chunks_returns_active_rows_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("docs.db");
+        {
+            let _store = open_migrated(&db).unwrap();
+        }
+        let conn = Connection::open(&db).unwrap();
+        let first = super::seed_source(&conn, "acme", true).unwrap();
+        let second = super::seed_source(&conn, "beta", true).unwrap();
+        super::seed_chunk(&conn, first, 0, "Guide", None, "acme chunk one").unwrap();
+        super::seed_chunk(&conn, second, 0, "Guide", None, "beta chunk one").unwrap();
+        drop(conn);
+
+        let chunks = read_chunks(&db).unwrap();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].library, "acme");
+        assert_eq!(chunks[1].library, "beta");
+        assert_eq!(chunks[0].token_count, 8);
+        assert!(chunks.iter().all(|chunk: &StoredChunk| chunk.ordinal == 0));
+
+        // Deactivating the source removes its chunks from the read.
+        {
+            let store = open_migrated(&db).unwrap();
+            store
+                .withdraw_source_by_origin_url(
+                    "https://example.test/acme",
+                    devdocs_model::LicenseStatus::Denied,
+                )
+                .unwrap();
+        }
+        let chunks = read_chunks(&db).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].library, "beta");
+    }
+}

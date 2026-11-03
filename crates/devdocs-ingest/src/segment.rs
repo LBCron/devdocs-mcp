@@ -655,4 +655,63 @@ mod tests {
         assert_eq!(chunk.text, format!("{}\n\n{}", chunk.header, chunk.body));
         assert_eq!(chunk.content_hash, devdocs_store::content_hash(&chunk.body));
     }
+
+    /// The segmenter debug shape names its limits.
+    #[test]
+    fn segmenter_debug_names_the_limits() {
+        let text = format!("{:?}", small());
+        assert!(text.contains("target_tokens"), "{text}");
+        assert!(text.contains("overlap_tokens"), "{text}");
+    }
+
+    /// Overlap at or above the target is a construction error.
+    #[test]
+    fn overlap_at_or_above_the_target_refuses() {
+        assert!(Segmenter::with_limits(40, 40).is_err());
+        assert!(Segmenter::with_limits(40, 50).is_err());
+    }
+
+    /// Content before the first heading forms a heading-less section: the
+    /// chunk carries the bare `[library version]` header.
+    #[test]
+    fn heading_less_content_gets_a_bare_header() {
+        let chunks = Segmenter::with_limits(40, 8).unwrap().segment(
+            "lib",
+            "1.0",
+            "plain words before any heading\n",
+        );
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].section_path, Vec::<String>::new());
+        assert_eq!(chunks[0].header, "[lib 1.0]");
+        assert!(chunks[0].body.contains("plain words"));
+    }
+
+    /// Inline code inside a heading joins the breadcrumb.
+    #[test]
+    fn inline_code_in_a_heading_joins_the_breadcrumb() {
+        let page = "# Use `acme` here\n\nbody text\n";
+        let chunks = Segmenter::new().unwrap().segment("lib", "1.0", page);
+        assert_eq!(
+            chunks[0].section_path,
+            vec![String::from("Use acme here")],
+            "{:?}",
+            chunks[0].section_path
+        );
+    }
+
+    /// A boundary that lands mid-line on a fence marker sits inside the
+    /// open state until past the marker characters.
+    #[test]
+    fn fence_probe_handles_marker_lines_and_unclosed_fences() {
+        let text = "before\n```\nbody\n```\nafter\n";
+        // Inside the closing marker line: within the three characters is
+        // inside, past them is outside.
+        let close_line = text.find("```\nafter").unwrap();
+        assert!(boundary_inside_fence(text, close_line + 1));
+        assert!(!boundary_inside_fence(text, close_line + 3));
+        // A boundary past the last line keeps the running state.
+        assert!(!boundary_inside_fence(text, text.len() + 10));
+        let unclosed = "before\n```\nbody\n";
+        assert!(boundary_inside_fence(unclosed, unclosed.len() + 10));
+    }
 }

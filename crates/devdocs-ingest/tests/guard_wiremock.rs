@@ -160,6 +160,22 @@ async fn get_reports_an_http_error_status() {
 }
 
 #[tokio::test]
+async fn get_reports_a_connection_failure_as_transport() {
+    // Bind a port, then drop the listener: the connect fails while the
+    // resolution still pins loopback, so the error walks the transport
+    // mapping into `Transport` (not a refusal).
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let url = url::Url::parse(&format!("http://127.0.0.1:{port}/llms.txt")).unwrap();
+    let error = test_guard(1024, 5_000, 3).get(&url).await.unwrap_err();
+    assert!(!error.is_refusal(), "{error}");
+    // The subject carries the URL attached to the transport error.
+    assert!(error.subject().contains(&port.to_string()), "{error}");
+}
+
+#[tokio::test]
 async fn get_serves_an_ipv6_literal_url() {
     // Wiremock binds 127.0.0.1 by default; bind a second server on the
     // IPv6 loopback so the fetch path exercises a bracketed IPv6 host

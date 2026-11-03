@@ -120,3 +120,38 @@ pub fn empty_envelope() -> ResultEnvelope {
         served_at: now_rfc3339(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{SourceSummary, empty_envelope, now_rfc3339};
+
+    /// A source summary round-trips through the envelope JSON, so the
+    /// `list` output parses on the consumer side.
+    #[test]
+    fn source_summary_round_trips_through_json() {
+        let summary = SourceSummary {
+            library: String::from("acme"),
+            version: String::from("1.0"),
+            kind: String::from("llms_txt"),
+            license_status: String::from("approved_index"),
+            active: true,
+        };
+        let text = serde_json::to_string(&summary).unwrap();
+        let back: SourceSummary = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, summary);
+    }
+
+    /// The empty envelope carries the documented top-level shape and an
+    /// RFC 3339 `served_at`.
+    #[test]
+    fn empty_envelope_carries_the_contract_shape() {
+        let envelope = empty_envelope();
+        assert_eq!(envelope.results, Vec::new());
+        assert!(!envelope.truncated);
+        assert_eq!(envelope.next_cursor, None);
+        assert!(envelope.served_at.contains('T'), "{:?}", envelope.served_at);
+        assert!(now_rfc3339().ends_with('Z'));
+    }
+}

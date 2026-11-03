@@ -264,6 +264,28 @@ mod tests {
         assert_eq!(LicenseStatus::parse("approved"), None);
     }
 
+    /// Only the three terminal refusals report terminal.
+    #[test]
+    fn only_terminal_refusals_report_terminal() {
+        for status in [
+            LicenseStatus::Denied,
+            LicenseStatus::Expired,
+            LicenseStatus::Revoked,
+        ] {
+            assert!(status.is_terminal(), "{status}");
+        }
+        for status in [
+            LicenseStatus::PendingReview,
+            LicenseStatus::ApprovedFetch,
+            LicenseStatus::ApprovedIndex,
+            LicenseStatus::ApprovedEmbed,
+            LicenseStatus::ApprovedCache,
+            LicenseStatus::ApprovedSnippet,
+        ] {
+            assert!(!status.is_terminal(), "{status}");
+        }
+    }
+
     /// The index gate admits the index stage and every later grant, and
     /// refuses everything below it including terminal refusals.
     #[test]
