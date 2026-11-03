@@ -161,18 +161,16 @@ async fn get_reports_an_http_error_status() {
 
 #[tokio::test]
 async fn get_reports_a_connection_failure_as_transport() {
-    // Bind a port, then drop the listener: the connect fails while the
-    // resolution still pins loopback, so the error walks the transport
+    // Port 4 sits below the privileged range: an unprivileged parallel
+    // test server cannot bind it on Unix, and nothing in the suite binds
+    // fixed low ports, so the connect is deterministically refused while
+    // the resolution still pins loopback. The error walks the transport
     // mapping into `Transport` (not a refusal).
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-
-    let url = url::Url::parse(&format!("http://127.0.0.1:{port}/llms.txt")).unwrap();
+    let url = url::Url::parse("http://127.0.0.1:4/llms.txt").unwrap();
     let error = test_guard(1024, 5_000, 3).get(&url).await.unwrap_err();
     assert!(!error.is_refusal(), "{error}");
     // The subject carries the URL attached to the transport error.
-    assert!(error.subject().contains(&port.to_string()), "{error}");
+    assert!(error.subject().contains("127.0.0.1:4"), "{error}");
 }
 
 #[tokio::test]
