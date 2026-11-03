@@ -1,0 +1,5 @@
+{
+  "curation_minutes": 90,
+  "curated_at": "2026-11-02",
+  "description": "Phase 0 pilot: 20 questions across next.js 16.2.9, zod 4.6.7, and serde 1.0.229 (the project's own lockfile), covering all eight task-type categories with two unanswerable questions. Refs are section pins the fixture corpus resolves when ingestion lands."
+}
