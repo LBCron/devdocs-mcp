@@ -104,22 +104,8 @@ pub fn parse_llms_txt(text: &str, url: &str) -> Result<LlmsTxtIndex, IngestError
         if open_fence.is_some() {
             continue;
         }
-        if let Some(heading) = trimmed.strip_prefix("## ") {
-            sections.push(LlmsSection {
-                heading: Some(heading.trim().to_owned()),
-                links: Vec::new(),
-            });
-        } else if let Some(link) = parse_link_line(trimmed) {
-            if sections.is_empty() {
-                sections.push(LlmsSection {
-                    heading: None,
-                    links: Vec::new(),
-                });
-            }
-            if let Some(section) = sections.last_mut() {
-                section.links.push(link);
-                link_count += 1;
-            }
+        if push_section_line(&mut sections, trimmed) {
+            link_count += 1;
         }
     }
 
@@ -133,6 +119,32 @@ pub fn parse_llms_txt(text: &str, url: &str) -> Result<LlmsTxtIndex, IngestError
         summary,
         sections,
     })
+}
+
+/// Handles one line outside a fence: an H2 opens a section, a link line
+/// joins the current one (opening the heading-less leading section when
+/// the page starts with links). Returns true when the line was a link.
+fn push_section_line(sections: &mut Vec<LlmsSection>, trimmed: &str) -> bool {
+    if let Some(heading) = trimmed.strip_prefix("## ") {
+        sections.push(LlmsSection {
+            heading: Some(heading.trim().to_owned()),
+            links: Vec::new(),
+        });
+        return false;
+    }
+    let Some(link) = parse_link_line(trimmed) else {
+        return false;
+    };
+    if sections.is_empty() {
+        sections.push(LlmsSection {
+            heading: None,
+            links: Vec::new(),
+        });
+    }
+    if let Some(section) = sections.last_mut() {
+        section.links.push(link);
+    }
+    true
 }
 
 /// Consumes the lines up to and including the required H1

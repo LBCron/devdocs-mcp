@@ -344,23 +344,28 @@ async fn ingest_skips_a_markdown_link_that_serves_html() {
     assert!(hits.is_empty(), "HTML markup must not be searchable");
 }
 
+/// Writes the manifest entries into `dir` and loads the fixture set.
+fn write_fixture_set(dir: &std::path::Path, responses: &serde_json::Value) -> FixtureSet {
+    std::fs::write(dir.join("manifest.json"), responses.to_string()).unwrap();
+    FixtureSet::load(dir).unwrap()
+}
+
+/// The full manifest entries with every page carrying content.
+fn content_responses() -> serde_json::Value {
+    serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": INDEX },
+        { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": INTRO },
+        { "url": "https://docs.acme.test/advanced.md", "status": 200, "headers": {}, "body": ADVANCED },
+    ])
+}
+
 /// A run whose only content page carries no content blocks segments to zero
 /// chunks and fails closed: the active generation stays untouched
 /// (docs/implementation/07 §Atomic publish).
 #[tokio::test]
 async fn ingest_rejects_a_run_that_segments_to_zero_chunks() {
     let dir = tempfile::tempdir().unwrap();
-    let responses = serde_json::json!([
-        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": INDEX },
-        { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": "# Intro\n\n## Install\n\n### Notes\n" },
-        { "url": "https://docs.acme.test/advanced.md", "status": 200, "headers": {}, "body": ADVANCED },
-    ]);
-    std::fs::write(
-        dir.path().join("manifest.json"),
-        serde_json::to_string(&responses).unwrap(),
-    )
-    .unwrap();
-    let fixture = FixtureSet::load(dir.path()).unwrap();
+    let fixture = write_fixture_set(dir.path(), &content_responses());
     let config = config();
     let guard = FetchGuard::from_fetch_config(&config.fetch);
 
@@ -384,12 +389,7 @@ async fn ingest_rejects_a_run_that_segments_to_zero_chunks() {
         { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": heading_only },
         { "url": "https://docs.acme.test/advanced.md", "status": 200, "headers": {}, "body": heading_only },
     ]);
-    std::fs::write(
-        dir.path().join("manifest.json"),
-        serde_json::to_string(&responses).unwrap(),
-    )
-    .unwrap();
-    let fixture = FixtureSet::load(dir.path()).unwrap();
+    let fixture = write_fixture_set(dir.path(), &responses);
     let job = IngestJob::new(&config, &guard, Some(&fixture));
     let error = job
         .run(Arc::clone(&store), &index_url, "acme", "1.0")
