@@ -963,6 +963,16 @@ fn list_fails_when_the_data_directory_cannot_be_created() {
     std::fs::create_dir_all(&sealed).expect("sealed dir");
     std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o500)).expect("mode set");
 
+    // A root process ignores the permission bits, so the seal cannot hold
+    // and the refusal never happens; skip loudly in that case.
+    if std::fs::create_dir(sealed.join("probe")).is_ok() {
+        std::fs::remove_dir(sealed.join("probe")).ok();
+        std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755))
+            .expect("mode restored");
+        eprintln!("skipping: the process ignores directory permission bits");
+        return;
+    }
+
     let (code, _stdout, stderr) = output(
         env.cmd(),
         &[
