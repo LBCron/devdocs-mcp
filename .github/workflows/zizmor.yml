@@ -36,9 +36,6 @@ jobs:
           persist-credentials: false
       - uses: zizmorcore/zizmor-action@53290badfa369cb0bf7ad16342cb62c2fa47ac7b # v0.8.0
         with:
-          # The zizmor version floats at latest on purpose: security
-          # scanners must see new releases (same policy as the
-          # install-action tools in ci.yml and audit.yml).
           persona: regular
           # Annotations mode, not the default Advanced Security/SARIF mode:
           # with --format=sarif zizmor always exits 0 (findings are

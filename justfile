@@ -81,13 +81,20 @@ audit:
 # (gap named per the agent-ready-repo contract).
 codacy:
     @if ! command -v codacy-analysis >/dev/null 2>&1; then \
-        echo "codacy-analysis not installed (optional gate, skipped): npm i -g @codacy/analysis-cli"; \
+        echo "codacy-analysis not installed (optional gate, skipped): pnpm add -g @codacy/analysis-cli (fallback if PATH is not refreshed: pnpm exec codacy-analysis)"; \
     elif [ ! -f .codacy/codacy.config.json ]; then \
         echo "codacy-analysis not initialized (optional gate, skipped): codacy-analysis init --remote gh iamwatchdogs devdocs-mcp"; \
     elif [ -z "$(git rev-parse -q --verify origin/main 2>/dev/null)" ]; then \
         echo "codacy gate skipped: origin/main not found to diff against"; \
     else \
         CODACY_DISABLE_UPDATE_CHECK=1 codacy-analysis analyze --no-log --tool Semgrep --diff origin/main; \
+    fi
+
+trivy:
+    @if ! command -v trivy >/dev/null 2>&1; then \
+        echo "trivy not installed (optional gate, skipped): pnpm i -g trivy"; \
+    else \
+        trivy fs . --scanners vuln,secret,misconfig --skip-dirs target; \
     fi
 
 # Unused dependency scan.
@@ -126,6 +133,19 @@ features:
 # Harmless eval harness smoke run (runner lands later).
 eval:
     cargo run -p devdocs-eval -- --help
+
+# Copy-paste detection across non-Rust sources.
+#
+# Owned by Codacy — the cloud app runs jscpd via a Codacy tool integration.
+# No longer run as a local pre-push gate. If a Codacy jscpd tool is registered
+# later, its config would live in .codacy/codacy.config.json.
+
+# Trivy filesystem scan for dependency and config findings.
+#
+# Owned by Codacy — the cloud app runs Trivy as a Codacy tool with six
+# configured patterns (Trivy_malicious_packages, Trivy_secret,
+# Trivy_vulnerability_critical/high/medium/minor) in
+# .codacy/codacy.config.json. No local recipe or CI job.
 
 # Public API break detection between releases.
 semver:
