@@ -39,6 +39,13 @@ Here're the commands that you need for every task,
 
 Style config lives in `rustfmt.toml` and `Cargo.toml` — read them, do not restate them.
 
+Command output here is condensed to save tokens, keeping every signal and
+dropping costly noise. Treat it as the complete result: run commands
+normally, and batch related commands into one call to avoid extra turns.
+Truncated results state their recovery path in their own output. Re-run a
+command as `rtk bypass <cmd>` only when its result is unusable: empty when
+output was clearly expected, contradicting its exit code, or garbled.
+
 ### Worktrees (worktrunk)
 
 `wt` (worktrunk, https://worktrunk.dev) manages git worktrees by branch name. Worktrees live as sibling directories (`../devdocs-mcp.<branch>`); `wt list` shows all of them with branch, CI, and integration status. Full docs live at worktrunk.dev; every page also serves raw markdown at `<page>.md`.
@@ -111,7 +118,7 @@ Apply to every commit you make, always — read this before committing anything:
 
   <optional body: what changed and why, wrapped ~ 72 chars>
 
-  Co-authored-by: ZCode (GLM-5.3-Flash) <noreply@z.ai>
+  Co-authored-by: <harness-name> (<model-name>) <noreply@z.ai>
   ```
 
 - `<type>(<scope>)` is the Conventional Commits shape enforced by the commit-msg hook (§Environment). Omit the scope when the change spans multiple crates.
