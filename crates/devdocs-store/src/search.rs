@@ -9,12 +9,6 @@ use rusqlite::params;
 use crate::error::StoreError;
 use crate::store::Store;
 
-/// The WHERE clause that drops sources with a terminal license refusal out
-/// of retrieval at query time (docs/implementation/09 §License gate
-/// enforcement points, point 3). One string, shared by every serving query.
-const TERMINAL_LICENSE_CLAUSE: &str =
-    "AND s.license_status NOT IN ('denied', 'expired', 'revoked')";
-
 /// One search or lookup result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hit {
@@ -90,6 +84,72 @@ fn base_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<BaseColumns> {
     })
 }
 
+/// Maps an FTS row laid out at the shared column order to a [`Hit`] with
+/// its `snippet()` fragment and bm25 rank.
+fn fts_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<Hit> {
+    let base = base_columns(row)?;
+    Ok(Hit {
+        chunk_id: base.chunk_id,
+        source_id: base.source_id,
+        library: base.library,
+        version: base.version,
+        section_path: base.section_path,
+        symbol: base.symbol,
+        symbol_kind: None,
+        snippet: Some(row.get(8)?),
+        text: base.text,
+        token_count: base.token_count,
+        rank: Some(row.get(9)?),
+    })
+}
+
+/// The unscoped search SQL: the chunk/source join with the documented
+/// bm25 weights, ordered and limited. The terminal-license clause drops
+/// sources whose license state turned terminal at query time
+/// (docs/implementation/09 §License gate enforcement points, point 3).
+const FTS_SQL: &str = "SELECT c.chunk_id, c.source_id, s.library, s.version, c.section_path, \
+     c.symbol, \
+     c.text, c.token_count, \
+     snippet(chunks_fts, 1, '<mark>', '</mark>', '…', 16), \
+     bm25(chunks_fts, 5.0, 1.0) \
+     FROM chunks_fts \
+     JOIN chunks c ON c.chunk_id = chunks_fts.rowid \
+     JOIN sources s ON s.source_id = c.source_id \
+     WHERE chunks_fts MATCH ?1 AND s.active = 1 \
+     AND s.license_status NOT IN ('denied', 'expired', 'revoked') \
+     ORDER BY bm25(chunks_fts, 5.0, 1.0) \
+     LIMIT ?2";
+
+/// The library-scoped search SQL: the same projection with the library
+/// predicate before the limit, and the same terminal-license clause.
+const FTS_LIBRARY_SQL: &str = "SELECT c.chunk_id, c.source_id, s.library, s.version, \
+     c.section_path, \
+     c.symbol, \
+     c.text, c.token_count, \
+     snippet(chunks_fts, 1, '<mark>', '</mark>', '…', 16), \
+     bm25(chunks_fts, 5.0, 1.0) \
+     FROM chunks_fts \
+     JOIN chunks c ON c.chunk_id = chunks_fts.rowid \
+     JOIN sources s ON s.source_id = c.source_id \
+     WHERE chunks_fts MATCH ?1 AND s.active = 1 \
+     AND s.license_status NOT IN ('denied', 'expired', 'revoked') \
+     AND s.library = ?3 COLLATE NOCASE \
+     ORDER BY bm25(chunks_fts, 5.0, 1.0) \
+     LIMIT ?2";
+
+/// The exact-symbol lookup SQL: the symbol join with the same
+/// terminal-license clause, ordered by chunk position.
+const SYMBOL_SQL: &str = "SELECT c.chunk_id, c.source_id, s.library, s.version, \
+     c.section_path, \
+     c.symbol, \
+     c.text, c.token_count, sym.kind \
+     FROM symbols sym \
+     JOIN chunks c ON c.chunk_id = sym.chunk_id \
+     JOIN sources s ON s.source_id = c.source_id \
+     WHERE sym.symbol = ?1 AND c.source_id = ?2 AND s.active = 1 \
+     AND s.license_status NOT IN ('denied', 'expired', 'revoked') \
+     ORDER BY c.ordinal";
+
 impl Store {
     /// Full-text search over active sources with the documented bm25
     /// weights. A source whose license state turned terminal drops out at
@@ -100,36 +160,27 @@ impl Store {
     /// parameter, never interpolated.
     pub fn search_fts(&self, match_expr: &str, limit: u32) -> Result<Vec<Hit>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
-        let sql = format!(
-            "SELECT c.chunk_id, c.source_id, s.library, s.version, c.section_path, c.symbol, \
-             c.text, c.token_count, \
-             snippet(chunks_fts, 1, '<mark>', '</mark>', '…', 16), \
-             bm25(chunks_fts, 5.0, 1.0) \
-             FROM chunks_fts \
-             JOIN chunks c ON c.chunk_id = chunks_fts.rowid \
-             JOIN sources s ON s.source_id = c.source_id \
-             WHERE chunks_fts MATCH ?1 AND s.active = 1 \
-               {TERMINAL_LICENSE_CLAUSE} \
-             ORDER BY bm25(chunks_fts, 5.0, 1.0) \
-             LIMIT ?2"
-        );
-        let mut stmt = conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(params![match_expr, limit], |row| {
-            let base = base_columns(row)?;
-            Ok(Hit {
-                chunk_id: base.chunk_id,
-                source_id: base.source_id,
-                library: base.library,
-                version: base.version,
-                section_path: base.section_path,
-                symbol: base.symbol,
-                symbol_kind: None,
-                snippet: Some(row.get(8)?),
-                text: base.text,
-                token_count: base.token_count,
-                rank: Some(row.get(9)?),
-            })
-        })?;
+        let mut stmt = conn.prepare_cached(FTS_SQL)?;
+        let rows = stmt.query_map(params![match_expr, limit], fts_hit)?;
+        rows.collect::<Result<Vec<Hit>, _>>()
+            .map_err(StoreError::Sql)
+    }
+
+    /// Full-text search scoped to one library, with the same bm25 weights
+    /// and ordering as [`Store::search_fts`].
+    ///
+    /// The library predicate applies before the limit, so the limit counts
+    /// same-library hits only. The comparison is case-insensitive
+    /// (`COLLATE NOCASE`), matching the retrieval-side filter it replaces.
+    pub fn search_fts_library(
+        &self,
+        match_expr: &str,
+        library: &str,
+        limit: u32,
+    ) -> Result<Vec<Hit>, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
+        let mut stmt = conn.prepare_cached(FTS_LIBRARY_SQL)?;
+        let rows = stmt.query_map(params![match_expr, limit, library], fts_hit)?;
         rows.collect::<Result<Vec<Hit>, _>>()
             .map_err(StoreError::Sql)
     }
@@ -141,17 +192,7 @@ impl Store {
         src: devdocs_model::SourceId,
     ) -> Result<Vec<Hit>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
-        let sql = format!(
-            "SELECT c.chunk_id, c.source_id, s.library, s.version, c.section_path, c.symbol, \
-             c.text, c.token_count, sym.kind \
-             FROM symbols sym \
-             JOIN chunks c ON c.chunk_id = sym.chunk_id \
-             JOIN sources s ON s.source_id = c.source_id \
-             WHERE sym.symbol = ?1 AND c.source_id = ?2 AND s.active = 1 \
-               {TERMINAL_LICENSE_CLAUSE} \
-             ORDER BY c.ordinal"
-        );
-        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut stmt = conn.prepare_cached(SYMBOL_SQL)?;
         let rows = stmt.query_map(params![symbol, src.0], |row| {
             let base = base_columns(row)?;
             Ok(Hit {

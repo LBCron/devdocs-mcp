@@ -2,8 +2,8 @@
 type: guide
 title: Code Quality Toolchain
 description: The pinned toolchain, formatter policy, lint table, MSRV policy, docs policy, and the pull-request checklist for devdocs. Tool versions verified 2026-10-28.
-tags: [devdocs, toolchain, rustfmt, clippy, msrv]
-timestamp: 2026-11-02T00:00:00Z
+tags: [devdocs, toolchain, rustfmt, clippy, msrv, jscpd, trivy]
+timestamp: 2026-11-03T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -29,6 +29,8 @@ All tools verified 2026-10-28. Install dev tools with `cargo binstall` where a p
 | insta | 1.49.0 | Snapshot tests |
 | just | 1.59.0 | Task runner |
 | lefthook | 2.2.2 | Git hooks |
+| jscpd | 5.4.2 | Copy-paste detection across non-Rust sources |
+| trivy | 0.76.1 | Filesystem vuln/secret/config scan |
 
 Maintenance notes from verification:
 
@@ -95,12 +97,16 @@ Clippy churn note. Clippy 1.91 through 1.99 renamed and moved several lints (for
 
 - `pre-commit` — fast, per commit: `cargo fmt` with auto-staged fixes, and clippy `-D warnings` via `just lint`. Both are gated to staged Rust and TOML files so docs-only commits skip them.
 - `commit-msg` — the Conventional Commits regex (also enforced on PR titles by CI, see the `commits` job).
-- `pre-push` — the CI-facing gate, once per push before workflows trigger: `fmt-check`, `lint`, `test`, `test-doc`, `docs`, plus `deny` only when `Cargo.toml`/`Cargo.lock` changed against the push target, plus `codacy` (see below). This is the backstop that catches doc warnings, test failures, and shared-code lints before CI runs.
+- `pre-push` — the CI-facing gate, once per push before workflows trigger: `fmt-check`, `lint`, `test`, `test-doc`, `docs`, plus `deny` only when `Cargo.toml`/`Cargo.lock` changed against the push target, plus `codacy`, `jscpd`, and `trivy` (see below). This is the backstop that catches doc warnings, test failures, shared-code lints, copy-paste across non-Rust sources, and dependency/config findings before CI runs.
 - `pre-merge-commit` — the full `just ci` gate, because a merge commit lands on the target branch directly and per-commit checks cannot cover its combined state.
 
 `just codacy` runs the Codacy analysis CLI locally (`@codacy/analysis-cli`) with Opengrep over the main-branch diff — the same pattern engine behind the "Codacy Static Code Analysis" PR check, which for Rust is Opengrep only (Codacy runs no clippy). It is an optional gate, unlike the required tools: when `codacy-analysis` or its repo config (`.codacy/codacy.config.json`, generated once by `codacy-analysis init`) is absent, the check skips cleanly; findings fail the push. It is not part of `just ci` and not a CI job — the cloud app already analyzes every PR, so a CI job would duplicate it (gap named per the agent-ready-repo contract). The gate mirrors the local exclusion policy in `.codacy.yml`, including the `.github/**` exclusion: workflow security is owned by zizmor and CodeQL, and Codacy's pinning pattern misreads local `$`-prefixed action refs.
 
-What hooks deliberately do not cover: code behind Linux-only `#[cfg]` gates is invisible to a macOS host, the msrv and coverage jobs are CI-only, and load-sensitive test races only reproduce on loaded CI runners. Review-tool classes also stay out of reach: CodeRabbit's semantic findings (edge-case regressions, mount-lookup shadowing, fail-open branches) are AI review, Codacy's Lizard lexer bug and Duplication/Complexity advisories are that platform's own non-gating metrics, and none of them have a mechanical local equivalent. Those stay with the review bots and CI.
+`just jscpd` runs jscpd over the non-Rust source tree with `--min-lines 5 --min-tokens 50 --ignore **/target/**`. jscpd supports Rust syntax trees only for the similarity and semantic clone modes; it does not detect exact Rust clones, so this gate does not scan `crates/`. It is an optional gate: when `jscpd` is not on PATH it skips cleanly; any reported clone fails the push. It is not part of `just ci` and not a CI job — the check is a local guard for the workflow, config, and docs surface that Rust linters do not cover.
+
+`just trivy` runs `trivy fs` with `--scanners vuln,secret,config --skip-dirs target`. The Rust crates are scanned through their `Cargo.lock`; the rest of the tree is scanned for misconfigurations and hard-coded secrets. It is an optional gate: when `trivy` is not on PATH it skips cleanly; any finding fails the push. It is not part of `just ci` and not a CI job — the dependency review workflow and the related CI checks already run comparable checks on PRs.
+
+What hooks deliberately do not cover: code behind Linux-only `#[cfg]` gates is invisible to a macOS host, the msrv and coverage jobs are CI-only, and load-sensitive test races only reproduce on loaded CI runners. Review-tool classes also stay out of reach: CodeRabbit's semantic findings (edge-case regressions, mount-lookup shadowing, fail-open branches) are AI review, and none of them have a mechanical local equivalent. Those stay with the review bots and CI. Lizard is not run locally: Codacy lists it as a non-gating complexity metric and its Rust lexer has known bugs, so this repo does not add a Lizard gate.
 
 ## Pull-request checklist
 

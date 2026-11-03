@@ -463,7 +463,11 @@ fn config_show_snapshot() {
     assert_eq!(code, 0, "stderr: {stderr}");
     let shown: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
     insta::assert_json_snapshot!(shown, {
+        // The path is machine-specific and the user agent carries the crate
+        // version, which release-plz bumps under this snapshot; both are
+        // normalized so a version bump never red-eyes this test again.
         ".index.path" => "[DB_PATH]",
+        ".fetch.user_agent" => "[USER_AGENT]",
     });
 }
 
