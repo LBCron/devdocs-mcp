@@ -46,9 +46,12 @@ lefthook install
 
 ```sh
 devdocs --version
+devdocs config init
+devdocs add https://example.test/llms.txt --fixture <fixture-dir>
+devdocs list
 ```
 
-Everything beyond the version banner lands in later milestones (docs/implementation/12). Crate-level docs: `just docs`.
+Config commands and `devdocs add --fixture` are available. Retrieval, symbols, and the MCP server land in later milestones (docs/implementation/12). Crate-level docs: `just docs`.
 
 ## Workspace layout
 

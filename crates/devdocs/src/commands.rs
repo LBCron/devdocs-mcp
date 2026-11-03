@@ -24,21 +24,27 @@ use url::Url;
 pub fn open_store(config: &Config, force: bool) -> Result<Arc<Store>, Error> {
     let path = config.index.path.clone();
     if let Some(parent) = path.parent() {
+        // The store's path checks expect a private data directory. Create a
+        // missing one with mode 0700 in the same call — including the
+        // intermediate ancestors. An existing directory keeps its mode; the
+        // store warns on drift at open (docs/implementation/09 §Storage).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)
+                .map_err(|e| Error::Upstream {
+                    code: UpstreamCode::UpstreamError,
+                    detail: format!("cannot create the data directory {}: {e}", parent.display()),
+                })?;
+        }
+        #[cfg(not(unix))]
         std::fs::create_dir_all(parent).map_err(|e| Error::Upstream {
             code: UpstreamCode::UpstreamError,
             detail: format!("cannot create the data directory {}: {e}", parent.display()),
         })?;
-        // The store's path checks expect a private data directory; bring a
-        // fresh (or drifted) one to 0700 before opening.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let permissions = std::fs::Permissions::from_mode(0o700);
-            std::fs::set_permissions(parent, permissions).map_err(|e| Error::Upstream {
-                code: UpstreamCode::UpstreamError,
-                detail: format!("cannot restrict {}: {e}", parent.display()),
-            })?;
-        }
     }
     let store = Store::open(&path).map_err(|e| map_store_error(&e))?;
     store

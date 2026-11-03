@@ -632,6 +632,36 @@ fn add_without_a_registry_entry_refuses_fetch_blocked() {
     assert!(!db.exists(), "a refused add must not create the database");
 }
 
+/// An unsupported `--kind` is a usage error, never a silent flag drop: the
+/// llms.txt pipeline must not run for a registered URL with `--kind git`.
+#[test]
+fn add_rejects_an_unsupported_kind() {
+    let env = Env::new();
+    let fixture = write_fixture(&env);
+    let config = write_config(&env, true);
+    let db = env.root.join("kind.db");
+
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "add",
+            "https://docs.acme.test/llms.txt",
+            "--kind",
+            "git",
+            "--fixture",
+            fixture.to_str().expect("fixture path"),
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+            "--db",
+            db.to_str().expect("db path"),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout} stderr: {stderr}");
+    assert!(stderr.contains("not supported yet"), "stderr: {stderr}");
+    assert!(!db.exists(), "a rejected add must not create the database");
+}
+
 /// `db migrate` runs the startup migration and is idempotent.
 #[test]
 fn db_migrate_runs_and_is_idempotent() {
