@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/iamwatchdogs/devdocs-mcp/compare/devdocs-eval-v0.2.2...devdocs-eval-v0.3.0) - 2026-11-03
+
+### Added
+
+- *(eval)* Phase 0 eval harness and 20-question pilot golden set ([#44](https://github.com/iamwatchdogs/devdocs-mcp/pull/44))
+
 ## [0.2.1](https://github.com/iamwatchdogs/devdocs-mcp/compare/devdocs-eval-v0.2.0...devdocs-eval-v0.2.1) - 2026-11-02
 
 ### Other
