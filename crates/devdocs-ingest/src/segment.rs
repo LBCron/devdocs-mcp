@@ -382,40 +382,64 @@ fn merge_until_fence_safe(mut spans: Vec<Range<usize>>, section_text: &str) -> V
 
 /// Whether the byte offset `at` (relative to `text`) sits inside an open
 /// fenced code block. Best-effort regression net for the splitter's
-/// atomicity guarantee: fence markers are three backticks or three tildes
-/// with at most three leading spaces. A boundary at a line start takes the
-/// fence state entering the line; a boundary past a closing fence marker is
-/// outside.
+/// atomicity guarantee, with `CommonMark` fence semantics: the probe tracks
+/// the opening marker (character and run length), and only a marker-only
+/// line of the same character with at least that run closes the fence —
+/// the same rule the index scanner uses
+/// ([`crate::llms_txt::fence_marker`]). A boundary at a line start takes
+/// the fence state entering the line; a boundary past a closing fence
+/// marker is outside.
 fn boundary_inside_fence(text: &str, at: usize) -> bool {
     let mut offset = 0usize;
-    let mut open = false;
+    let mut open: Option<(char, usize)> = None;
     for line in text.split('\n') {
         let line_start = offset;
         let line_end = line_start + line.len();
         if at <= line_start {
-            return open;
+            return open.is_some();
         }
         if at < line_end {
-            if !open {
-                return false;
-            }
             let trimmed = line.trim_start();
-            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-                // This line closes the fence: past the marker is outside.
+            let Some((marker, run)) = crate::llms_txt::fence_marker(trimmed) else {
+                return open.is_some();
+            };
+            let Some((open_char, open_run)) = open else {
+                // Outside, on a fence line: the bytes before the marker sit
+                // outside, from the marker on is inside the fence.
                 let indent = line.len() - trimmed.len();
-                let marker_end = line_start + indent + 3.min(trimmed.len());
+                let marker_start = line_start + indent;
+                return at >= marker_start;
+            };
+            if marker == open_char && run >= open_run && trimmed.chars().all(|c| c == marker) {
+                // A closing fence: past the marker run is outside.
+                let indent = line.len() - trimmed.len();
+                let marker_end = line_start + indent + run;
                 return at < marker_end;
             }
+            // Any other line inside an open fence is fence content.
             return true;
         }
-        // Cross the line: a fence line toggles the state.
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            open = !open;
+        // Cross the line: apply the same open/close rule the scanner uses.
+        let trimmed = line.trim();
+        match open {
+            Some((open_char, open_run)) => {
+                if let Some((marker, run)) = crate::llms_txt::fence_marker(trimmed)
+                    && marker == open_char
+                    && run >= open_run
+                    && trimmed.chars().all(|c| c == marker)
+                {
+                    open = None;
+                }
+            }
+            None => {
+                if let Some((marker, run)) = crate::llms_txt::fence_marker(trimmed) {
+                    open = Some((marker, run));
+                }
+            }
         }
         offset = line_end + 1;
     }
-    open
+    open.is_some()
 }
 
 /// Builds the active sizer: tiktoken o200k under `exact-tokens`, the
@@ -654,5 +678,30 @@ mod tests {
         let chunk = &chunks[0];
         assert_eq!(chunk.text, format!("{}\n\n{}", chunk.header, chunk.body));
         assert_eq!(chunk.content_hash, devdocs_store::content_hash(&chunk.body));
+    }
+
+    /// The probe matches the closing marker to the opening marker: a
+    /// backtick line inside a tilde fence is fence content, and a boundary
+    /// after the real closing fence is outside.
+    #[test]
+    fn fence_probe_matches_the_opening_marker() {
+        let text = "a\n~~~\n```json\n{}\n~~~\nb\n";
+        // The backtick line inside the tilde fence does not close it.
+        let json_line = text.find("```json").unwrap();
+        assert!(boundary_inside_fence(text, json_line + 1));
+        // Past the closing ~~~: outside.
+        let after = text.find("b\n").unwrap();
+        assert!(!boundary_inside_fence(text, after));
+    }
+
+    /// A line carrying the marker run plus trailing text never closes a
+    /// fence, in the probe just as in the index scanner.
+    #[test]
+    fn fence_probe_close_needs_a_marker_only_line() {
+        let text = "a\n```\n```example\nb\n```\nc\n";
+        let inside = text.find("b\n").unwrap();
+        assert!(boundary_inside_fence(text, inside));
+        let after = text.find("c\n").unwrap();
+        assert!(!boundary_inside_fence(text, after));
     }
 }

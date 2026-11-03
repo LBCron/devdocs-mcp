@@ -138,7 +138,14 @@ pub fn parse_llms_txt(text: &str, url: &str) -> Result<LlmsTxtIndex, IngestError
                 // Inside a fence: only a longer run of the same character
                 // closes it. Outside: any marker opens one.
                 Some((open_char, open_run)) => {
-                    if marker == open_char && run >= open_run {
+                    // CommonMark §4.4: the closing fence holds the marker
+                    // run and nothing else. A sample line such as
+                    // "```example" inside a backtick fence is fence
+                    // content, not a close.
+                    if marker == open_char
+                        && run >= open_run
+                        && trimmed.chars().all(|c| c == marker)
+                    {
                         open_fence = None;
                     }
                 }
@@ -182,8 +189,8 @@ pub fn parse_llms_txt(text: &str, url: &str) -> Result<LlmsTxtIndex, IngestError
 
 /// The fence marker on a line: the marker character and its run length,
 /// when the line could open or close a fenced block (three or more
-/// backticks or tildes).
-fn fence_marker(trimmed: &str) -> Option<(char, usize)> {
+/// backticks or tildes). Shared with the segmenter's fence probe.
+pub(crate) fn fence_marker(trimmed: &str) -> Option<(char, usize)> {
     let marker = trimmed.chars().next()?;
     if marker != '`' && marker != '~' {
         return None;
@@ -396,6 +403,26 @@ mod tests {
         let index = parse_llms_txt(text, "u").unwrap();
         assert_eq!(index.links().count(), 1);
         assert_eq!(index.links().next().unwrap().url(), "https://x/real.md");
+    }
+
+    /// A line that carries the marker run plus trailing text is fence
+    /// content, not a close: the fence stays open until the marker-only
+    /// line, and links inside the sample are never parsed.
+    #[test]
+    fn fence_close_needs_a_marker_only_line() {
+        let text = concat!(
+            "# T\n\n",
+            "- [real](https://x/real.md): ok\n",
+            "```\n",
+            "```example\n",
+            "- [fake](https://x/fake.md): inside the sample\n",
+            "```\n",
+            "- [after](https://x/after.md): ok\n",
+        );
+        let index = parse_llms_txt(text, "u").unwrap();
+        assert_eq!(index.links().count(), 2, "{index:?}");
+        assert_eq!(link_at(&index, 0, 0).0, "real");
+        assert_eq!(link_at(&index, 0, 1).0, "after");
     }
 
     /// The description is optional and may sit after a colon on the same
