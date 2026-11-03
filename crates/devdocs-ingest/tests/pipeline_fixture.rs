@@ -89,6 +89,41 @@ fn config() -> Config {
 }
 
 #[tokio::test]
+async fn ingest_refuses_a_library_name_that_does_not_match_the_grant() {
+    let dir = fixture_dir();
+    let fixture = FixtureSet::load(dir.path()).unwrap();
+    let config = config();
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let db = tempfile::tempdir().unwrap();
+    let db_path = db.path().join("docs.db");
+    let store = Arc::new(devdocs_testkit::open_migrated(&db_path).unwrap());
+
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    gate_fetch(&config, &index_url).unwrap();
+
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let error = job
+        .run(Arc::clone(&store), &index_url, "not-acme", "1.0")
+        .await
+        .unwrap_err();
+    match error {
+        devdocs_ingest::IngestError::LicenseNameMismatch { expected, actual } => {
+            assert_eq!(expected, "acme");
+            assert_eq!(actual, "not-acme");
+        }
+        other => panic!("expected LicenseNameMismatch, got {other}"),
+    }
+    // A refused run publishes nothing.
+    assert_eq!(
+        store
+            .search_fts(&devdocs_store::build_match_query("cursors"), 10)
+            .unwrap(),
+        Vec::new()
+    );
+}
+
+#[tokio::test]
 async fn ingest_runs_index_to_published_chunks_offline() {
     let dir = fixture_dir();
     let fixture = FixtureSet::load(dir.path()).unwrap();

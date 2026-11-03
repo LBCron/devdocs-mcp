@@ -33,6 +33,16 @@ pub enum IngestError {
     /// The license gate or another model-layer policy refused the run.
     #[error("{0}")]
     License(#[from] devdocs_model::Error),
+    /// The caller-supplied library does not match the grant's registry
+    /// name; approved content must publish under the registry identity
+    /// (docs/implementation/07 §`IngestJob::run`).
+    #[error("LICENSE_MISMATCH: library `{actual}` does not match the registry entry `{expected}`")]
+    LicenseNameMismatch {
+        /// The registry name carried by the license grant.
+        expected: String,
+        /// The library name the caller passed.
+        actual: String,
+    },
     /// The tokenizer could not load or the limits are inconsistent.
     #[error("tokenizer: {message}")]
     Tokenizer {

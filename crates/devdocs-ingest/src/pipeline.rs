@@ -97,6 +97,16 @@ impl<'a> IngestJob<'a> {
         version: &str,
     ) -> Result<IngestOutcome, IngestError> {
         let grant = crate::license::gate_fetch(self.config, index_url)?;
+        // The published library identity is the registry entry: a caller
+        // that passes another name would publish approved content under an
+        // arbitrary name, so the run refuses instead (docs/implementation/07
+        // §Pipeline stages).
+        if library != grant.name {
+            return Err(IngestError::LicenseNameMismatch {
+                expected: grant.name.clone(),
+                actual: library.to_owned(),
+            });
+        }
         let prepared = tokio::time::timeout(
             TOTAL_INGEST_CAP,
             self.prepare(index_url, library, version, &grant),

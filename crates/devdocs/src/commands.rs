@@ -217,6 +217,12 @@ fn map_ingest_error(error: devdocs_ingest::IngestError) -> Error {
             detail: guard.to_string(),
         },
         E::License(model) => model,
+        E::LicenseNameMismatch { expected, actual } => Error::Upstream {
+            code: UpstreamCode::UpstreamError,
+            detail: format!(
+                "LICENSE_MISMATCH: library `{actual}` does not match the registry entry `{expected}`"
+            ),
+        },
         E::Store(store) => map_store_error(&store),
         E::LlmsTxtEmpty { url } => Error::Upstream {
             code: UpstreamCode::UpstreamError,
