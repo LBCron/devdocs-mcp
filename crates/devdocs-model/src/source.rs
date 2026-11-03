@@ -138,6 +138,14 @@ impl LicenseStatus {
         }
     }
 
+    /// Whether the status is a terminal refusal: it ends the lifecycle, and
+    /// a source carrying it drops out of retrieval
+    /// (docs/implementation/09 §License gate enforcement points).
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Denied | Self::Expired | Self::Revoked)
+    }
+
     /// Whether the license gate lets a source flip to `active`.
     ///
     /// The store refuses to publish a source below the index stage
@@ -145,6 +153,44 @@ impl LicenseStatus {
     #[must_use]
     pub const fn allows_index(self) -> bool {
         self.rank() >= Self::ApprovedIndex.rank()
+    }
+
+    /// Whether the license gate lets the source be fetched at all.
+    ///
+    /// The ingest planner refuses sources below the fetch stage
+    /// (docs/implementation/09 §License gate enforcement points).
+    #[must_use]
+    pub const fn allows_fetch(self) -> bool {
+        self.rank() >= Self::ApprovedFetch.rank()
+    }
+
+    /// Whether the state machine admits the transition `self → next`
+    /// (docs/implementation/07 §License gate transition table).
+    ///
+    /// The approval stages form a forward-only progression and a terminal
+    /// refusal (`denied`, `expired`, `revoked`) is reachable from any state.
+    /// Every other move — backwards, sideways, or onto the same state — is
+    /// refused.
+    #[must_use]
+    pub const fn can_transition_to(self, next: Self) -> bool {
+        use LicenseStatus::{
+            ApprovedCache, ApprovedEmbed, ApprovedFetch, ApprovedIndex, ApprovedSnippet, Denied,
+            Expired, PendingReview, Revoked,
+        };
+        // Terminal refusals are absorbing: no move leaves them, not even
+        // into another refusal.
+        if matches!(self, Denied | Expired | Revoked) {
+            return false;
+        }
+        matches!(
+            (self, next),
+            (PendingReview, ApprovedFetch)
+                | (ApprovedFetch, ApprovedIndex)
+                | (ApprovedIndex, ApprovedEmbed)
+                | (ApprovedEmbed, ApprovedCache)
+                | (ApprovedCache, ApprovedSnippet)
+                | (_, Denied | Expired | Revoked)
+        )
     }
 }
 
@@ -218,6 +264,28 @@ mod tests {
         assert_eq!(LicenseStatus::parse("approved"), None);
     }
 
+    /// Only the three terminal refusals report terminal.
+    #[test]
+    fn only_terminal_refusals_report_terminal() {
+        for status in [
+            LicenseStatus::Denied,
+            LicenseStatus::Expired,
+            LicenseStatus::Revoked,
+        ] {
+            assert!(status.is_terminal(), "{status}");
+        }
+        for status in [
+            LicenseStatus::PendingReview,
+            LicenseStatus::ApprovedFetch,
+            LicenseStatus::ApprovedIndex,
+            LicenseStatus::ApprovedEmbed,
+            LicenseStatus::ApprovedCache,
+            LicenseStatus::ApprovedSnippet,
+        ] {
+            assert!(!status.is_terminal(), "{status}");
+        }
+    }
+
     /// The index gate admits the index stage and every later grant, and
     /// refuses everything below it including terminal refusals.
     #[test]
@@ -231,6 +299,60 @@ mod tests {
         assert!(!LicenseStatus::Denied.allows_index());
         assert!(!LicenseStatus::Expired.allows_index());
         assert!(!LicenseStatus::Revoked.allows_index());
+    }
+
+    /// The state machine admits only the documented transitions: the
+    /// forward progression, plus a terminal refusal from any state.
+    #[test]
+    fn transitions_follow_the_state_machine() {
+        use LicenseStatus::{
+            ApprovedCache, ApprovedEmbed, ApprovedFetch, ApprovedIndex, ApprovedSnippet, Denied,
+            Expired, PendingReview, Revoked,
+        };
+
+        // The forward progression from docs/07 §License gate.
+        assert!(PendingReview.can_transition_to(ApprovedFetch));
+        assert!(ApprovedFetch.can_transition_to(ApprovedIndex));
+        assert!(ApprovedIndex.can_transition_to(ApprovedEmbed));
+        assert!(ApprovedEmbed.can_transition_to(ApprovedCache));
+        assert!(ApprovedCache.can_transition_to(ApprovedSnippet));
+
+        // A terminal refusal is reachable from any state.
+        for from in [
+            PendingReview,
+            ApprovedFetch,
+            ApprovedIndex,
+            ApprovedEmbed,
+            ApprovedCache,
+            ApprovedSnippet,
+        ] {
+            assert!(from.can_transition_to(Denied), "{from:?} → denied");
+            assert!(from.can_transition_to(Expired), "{from:?} → expired");
+            assert!(from.can_transition_to(Revoked), "{from:?} → revoked");
+        }
+
+        // Everything else — backwards, sideways, self, and out of a
+        // terminal state — is refused.
+        assert!(!PendingReview.can_transition_to(ApprovedIndex));
+        assert!(!PendingReview.can_transition_to(PendingReview));
+        assert!(!ApprovedFetch.can_transition_to(ApprovedFetch));
+        assert!(!ApprovedIndex.can_transition_to(ApprovedFetch));
+        assert!(!ApprovedSnippet.can_transition_to(ApprovedEmbed));
+        for from in [Denied, Expired, Revoked] {
+            for to in [
+                PendingReview,
+                ApprovedFetch,
+                ApprovedIndex,
+                ApprovedEmbed,
+                ApprovedCache,
+                ApprovedSnippet,
+                Denied,
+                Expired,
+                Revoked,
+            ] {
+                assert!(!from.can_transition_to(to), "{from:?} → {to:?}");
+            }
+        }
     }
 
     /// Source ids render as plain integers for logs and envelopes.

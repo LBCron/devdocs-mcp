@@ -23,19 +23,24 @@ exact-tokens = []
 embeddings = []
 
 [dependencies]
+devdocs-ingest.workspace = true
 devdocs-model.workspace = true
 devdocs-store.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 tracing-subscriber.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true
+devdocs-testkit.workspace = true
+insta.workspace = true
 predicates.workspace = true
 tempfile.workspace = true
-insta.workspace = true
 
 [lints]
 workspace = true

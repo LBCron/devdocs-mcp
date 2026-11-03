@@ -1,0 +1,6 @@
+# Byte-exact fixtures and snapshots: the segmentation slices the page
+# bytes, so a checkout must not rewrite their line endings (no eol
+# conversion in either direction).
+crates/devdocs-ingest/testdata/** -text
+crates/devdocs-ingest/tests/snapshots/** -text
+crates/devdocs-testkit/testdata/** -text

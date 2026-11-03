@@ -3,7 +3,7 @@ type: guide
 title: Ingest Pipeline (L1 + L2)
 description: The source adapters, the fetch guard, the license gate, the normalization and segmentation pipeline, dedup, the injection filter, and the refresh policy for devdocs.
 tags: [devdocs, ingest, llms-txt, git, openapi, html, segmentation]
-timestamp: 2026-10-28T00:00:00Z
+timestamp: 2026-11-04T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -54,7 +54,7 @@ pub struct Provenance {
 
 The spec is llmstxt.org v2 (verified 2026-10-28. Updated August 2026). Parse rules:
 
-1. Fetch `/llms.txt` at the docs root. Parse the H1 (library title), the blockquote (summary), and the H2 sections of links.
+1. Fetch `/llms.txt` at the docs root. Parse the H1 (library title), the blockquote (summary), and the H2 sections of links. The H1 must carry a title: an empty one fails the parse as `LLMS_TXT_INVALID`.
 2. Each link line is `- [title](url): description`. The optional parenthesized info carries per-page hints. V2 link relations (`rel="alternate" type="text/markdown"`, `rel="describedby"`) mark markdown twins. Prefer a `.md` twin over its HTML page.
 3. If `/llms-full.txt` exists, fetch it and treat it as one pre-built export. The research bundle treats llms-full as the bulk feed (research: interfaces.md §6). It is an unofficial convention, so detection is a probe, not an assumption.
 4. v2 subpath scoping: a more specific `llms.txt` deeper in the tree applies to that subtree. The plan walks links breadth-first and uses the most specific index found per path.
@@ -101,7 +101,7 @@ Implementation: reqwest 0.13 with `dns_resolver(Arc<dyn Resolve>)`. The custom r
 
 ## License gate
 
-The gate runs before any fetch, embed, or serve decision for a source (research: security-licensing.md §3). The registry lives in the config `[sources]` table. Deny by default: a source with no entry is `pending_review` and cannot fetch.
+The gate runs before any fetch, embed, or serve decision for a source (research: security-licensing.md §3). The registry lives in the config `[sources]` table. Deny by default: a source with no entry is `pending_review` and cannot fetch. The library name a run publishes under is the registry entry: `IngestJob::run` refuses a library argument that does not match the grant's `[sources.<name>]` key.
 
 State machine:
 
@@ -131,7 +131,7 @@ Runtime consequences:
 
 Order matters. Each stage is a pure function over `RawDocument` streams, so snapshots test it deterministically.
 
-1. **Media split.** JSON/YAML documents route to the OpenAPI-shaped path. Markdown routes to segmentation. HTML routes through the HTML extractor first, which emits Markdown.
+1. **Media split.** JSON/YAML documents route to the OpenAPI-shaped path. Markdown routes to segmentation. HTML routes through the HTML extractor first, which emits Markdown. In this slice the HTML extractor does not exist yet: the ingest loop skips a link whose body starts with a doctype or an `html` tag (case-insensitive, after leading whitespace and a leading BOM), and counts it as skipped. This check looks only at the start of the body. A body that starts with an HTML comment or an XML declaration is not skipped, and HTML inside markdown is not removed, so markup can reach the chunks.
 2. **Chrome strip.** For HTML: the adapter extracts main content before this stage. For Markdown: strip leading site navigation blocks, "edit this page" links, cookie banners, and repeated boilerplate detected by exact-match frequency across the source (a block identical in more than 60% of pages is chrome).
 3. **Segmentation.** Algorithm below.
 4. **Contextual headers.** Prepend the breadcrumb and version to every chunk body: `[{library} {version} › {section path}]` (research: architecture.md §L2. Measured effect −49% retrieval failures, −67% with reranking).
@@ -146,7 +146,7 @@ Goal: chunk shape with heading, breadcrumb, signature, example, and explanation 
 
 1. Parse the Markdown with comrak (0.59.0) and read `sourcepos` for every block node. comrak's code-block source positions are reliable at 0.59 (verified 2026-10-28, sourcepos fixes landed through 0.50).
 2. Walk the block tree. Build sections at heading boundaries (ATX headings). A section keeps its nested content and its breadcrumb path.
-3. Inside a section, group blocks into chunks with text-splitter (`MarkdownSplitter`, target 400 tokens, overlap 80 tokens — the research reference engine shape, research: retrieval-design.md §3.2). The splitter treats code blocks as atomic units, so it never splits them.
+3. Inside a section, pack blocks into chunks up to the 400-token target (separator bytes between packed blocks join the budget). A block between the target and 2× the target splits with text-splitter (`MarkdownSplitter`, overlap 80 tokens — the research reference engine shape, research: retrieval-design.md §3.2). The splitter treats code blocks as atomic units, so it never splits them; a fenced block is never handed to the splitter at all. Section boundaries and packed block boundaries carry no overlap: both sides of the boundary stay whole, so no content is cut.
 4. Cross-check with sourcepos: if a chunk boundary would fall inside a fenced block (the splitter guarantees it does not, but the check catches regressions), merge the two candidate chunks and log a warning.
 5. A single block larger than 2× the target becomes its own chunk, never truncated.
 6. Token counts use the chars-per-4 heuristic by default. With feature `exact-tokens`, tiktoken o200k. The count is stored per chunk. Budget enforcement uses stored counts and never recounts at query time.
@@ -169,7 +169,7 @@ Quarantined chunks are visible with `devdocs db quarantine list` and can be rele
 
 An ingest run writes nothing visible until it succeeds:
 
-1. Compute all chunks in memory (or spill to `tmp/` for very large sources).
+1. Compute all chunks in memory (or spill to `tmp/` for very large sources). A run that segments to zero chunks fails closed before this step: it never replaces the active generation with an empty one.
 2. In one SQLite transaction: deactivate the old chunk set for the source, insert the new chunks, symbols, and FTS rows (triggers fire), update the source row (`fetched_at`, `commit_sha`, `active = 1`).
 3. On any error: rollback. The old generation stays active and queryable.
 4. Vacuum is manual: `devdocs db vacuum` after large replacements.

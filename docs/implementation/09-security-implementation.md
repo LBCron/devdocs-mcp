@@ -3,7 +3,7 @@ type: guide
 title: Security Implementation
 description: The mapping from the research threat model to concrete controls in code, the fetch-guard invariants and tests, injection-filter operations, storage controls, and the security checklist.
 tags: [devdocs, security, ssrf, injection, licensing]
-timestamp: 2026-11-01T00:00:00Z
+timestamp: 2026-11-04T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -37,14 +37,16 @@ The guard is the only network code. Enforced properties, each with a property te
 
 1. Scheme is HTTPS. Everything else fails before DNS.
 2. URL has no userinfo. URL normalizes through the `url` crate before checks.
-3. DNS resolves through the pinned resolver. The connection opens only to the resolved address, with SNI intact (reqwest 0.13 `dns_resolver` hook, verified 2026-10-28).
-4. The resolved IP passes the blocklist check at connect time: private, loopback, link-local, multicast, unspecified, documentation (`2001:db8::/32`, `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`), and cloud metadata ranges (`169.254.169.254/32` and equivalents).
-5. Redirects re-run checks 1 to 4 on every hop. Limit 3.
+3. DNS resolves through the pinned resolver. The connection opens only to the resolved address, with SNI intact (reqwest 0.13 `dns_resolver` hook, verified 2026-10-28). Ambient proxies are disabled on the guard client (`no_proxy`): a proxy would connect to its own address and resolve hostnames itself, which bypasses the pinned resolver and the peer check.
+4. The resolved IP passes the blocklist check at connect time: private, loopback, link-local, multicast, unspecified, documentation (`2001:db8::/32`, `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`), and cloud metadata ranges (`169.254.169.254/32` and equivalents). Beyond the listed set, the blocklist also refuses fail-closed: shared address space (`100.64/10`), the benchmarking range (`198.18.0.0/15`), `0/8`, and the reserved block (`240/4`).
+5. Redirects re-run checks 1 to 4 on every hop. Limit 3. A redirect hop whose host resolves to only refused addresses reports the same refusal (`FETCH_BLOCKED`) as a refused initial URL.
 6. Byte cap 20 MiB applies to decompressed bytes, enforced by a wrapping reader, not by trusting Content-Length.
-7. Timeout 15 s per request. Total ingest job wall time caps at 600 s by config.
+7. Timeout 15 s per request. The initial DNS lookup shares the same budget, so a stalled resolver surfaces as a per-request timeout, not as a total-cap trip. Total ingest job wall time caps at 600 s by config; the cap bounds the fetch-and-segment work, and the publish runs after it and reports its own result, so a timed-out run never reports failure while a generation turns active.
 8. Fail closed: any guard error aborts the whole source ingest, not just the failing request.
 
 The pinned resolver returns one address per host lookup. DNS rebinding fails because the connect-time IP is the checked IP.
+
+The blocklist has no config escape. The one exception is in test code: the guard constructor behind the wiremock doubles admits local HTTP test doubles (loopback host, http or https scheme, any port) so offline tests can exercise the live request path on `127.0.0.1`. Production paths never enable it, and a unit test pins the default off.
 
 ## Git subprocess safety
 
@@ -83,7 +85,7 @@ The state machine is defined in [07](07-ingest-pipeline.md). Enforcement is laye
 
 1. The ingest planner refuses sources below `approved_fetch`.
 2. The store refuses to flip a source to `active` below `approved_index`, and publishing a terminal license state (`denied`, `expired`, `revoked`) deactivates the source, withdrawing it from search.
-3. The retrieve layer filters on license state at query time. A source revoked after indexing drops out of results at the next query, not just at the next sync.
+3. The retrieve layer filters on the stored license state at query time. A source whose stored state is terminal drops out of results at the next query. A registry revocation reaches the stored state only when `devdocs add` runs for that URL: the gate refusal then withdraws the published generation before the error returns. The withdrawal is mandatory: when the store cannot record it, the command returns `UPSTREAM_ERROR` instead of `FETCH_BLOCKED`, so a revoked source is never left active while the command claims `FETCH_BLOCKED`. The revoke-then-query drop without an add run is scheduled for M7 (docs/implementation/13).
 4. Output rendering enforces the snippet-vs-full rule per source state.
 
 ## Code Mode sandbox (deferred)

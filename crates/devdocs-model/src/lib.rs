@@ -8,6 +8,8 @@ pub mod source;
 
 pub use chunk::Chunk;
 pub use config::{Config, Overrides, Paths, SourceConfig};
-pub use envelope::{Example, ResultEnvelope, ResultItem, VersionStatus, empty_envelope};
+pub use envelope::{
+    Example, ResultEnvelope, ResultItem, SourceSummary, VersionStatus, empty_envelope, now_rfc3339,
+};
 pub use error::{Error, ErrorEnvelope, MissReason, UpstreamCode};
 pub use source::{LicenseStatus, SourceId, SourceKind, SourceRecord};

@@ -68,16 +68,46 @@ pub struct Example {
 }
 
 /// The result envelope printed on stdout (docs/08 top-level fields).
+///
+/// The item type varies per command: search/open/symbol serve
+/// [`ResultItem`]s, `list` serves [`SourceSummary`]s. The top-level shape is
+/// the contract and stays identical.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ResultEnvelope {
+pub struct ResultEnvelope<T = ResultItem> {
     /// The results, in fusion order.
-    pub results: Vec<ResultItem>,
+    pub results: Vec<T>,
     /// Whether the budget cut the result list short.
     pub truncated: bool,
     /// The cursor for the next page, when results were truncated.
     pub next_cursor: Option<String>,
     /// The RFC 3339 time the envelope was served at.
     pub served_at: String,
+}
+
+/// One `devdocs list` item: the discovery surface names every indexed
+/// source and version (docs/implementation/08 §CLI contract).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceSummary {
+    /// The library name, for example `next.js`.
+    pub library: String,
+    /// The exact version, for example `16.2.9`.
+    pub version: String,
+    /// The origin adapter that produced the content, for example
+    /// `llms_txt`.
+    pub kind: String,
+    /// The license approval stage of the source.
+    pub license_status: String,
+    /// Whether the source is active in search.
+    pub active: bool,
+}
+
+/// The RFC 3339 UTC timestamp envelopes carry as `served_at`; the fallback
+/// keeps the envelope contract when the clock is unavailable.
+#[must_use]
+pub fn now_rfc3339() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
 }
 
 /// Build the empty result envelope that placeholder commands print.
@@ -87,8 +117,41 @@ pub fn empty_envelope() -> ResultEnvelope {
         results: Vec::new(),
         truncated: false,
         next_cursor: None,
-        served_at: OffsetDateTime::now_utc()
-            .format(&Rfc3339)
-            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned()),
+        served_at: now_rfc3339(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{SourceSummary, empty_envelope, now_rfc3339};
+
+    /// A source summary round-trips through the envelope JSON, so the
+    /// `list` output parses on the consumer side.
+    #[test]
+    fn source_summary_round_trips_through_json() {
+        let summary = SourceSummary {
+            library: String::from("acme"),
+            version: String::from("1.0"),
+            kind: String::from("llms_txt"),
+            license_status: String::from("approved_index"),
+            active: true,
+        };
+        let text = serde_json::to_string(&summary).unwrap();
+        let back: SourceSummary = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, summary);
+    }
+
+    /// The empty envelope carries the documented top-level shape and an
+    /// RFC 3339 `served_at`.
+    #[test]
+    fn empty_envelope_carries_the_contract_shape() {
+        let envelope = empty_envelope();
+        assert_eq!(envelope.results, Vec::new());
+        assert!(!envelope.truncated);
+        assert_eq!(envelope.next_cursor, None);
+        assert!(envelope.served_at.contains('T'), "{:?}", envelope.served_at);
+        assert!(now_rfc3339().ends_with('Z'));
     }
 }

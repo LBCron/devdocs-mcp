@@ -30,6 +30,14 @@ pub enum StoreError {
         source: rusqlite::Error,
     },
 
+    /// A pending migration is marked destructive and the runner ran without
+    /// `--force` (docs/implementation/06 §Migrations).
+    #[error("migration {version} is destructive; rerun with --force to apply it")]
+    MigrationRequiresForce {
+        /// The version that needs the flag.
+        version: u32,
+    },
+
     /// The database path sits on a network filesystem, where SQLite locking
     /// is unreliable (docs/implementation/09 §Local storage controls).
     #[error("database path is on a network filesystem: {path}")]

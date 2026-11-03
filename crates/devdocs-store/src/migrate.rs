@@ -9,13 +9,18 @@ use rusqlite::TransactionBehavior;
 use crate::error::StoreError;
 
 /// One embedded migration file.
+#[derive(Clone)]
 struct EmbeddedMigration {
     version: u32,
     name: &'static str,
     sql: &'static str,
+    destructive: bool,
 }
 
-/// The shipped migrations, in application order.
+/// The shipped migrations, in application order. A migration whose SQL
+/// header comment carries `devdocs: destructive` sets the flag; applying
+/// one without `--force` refuses
+/// (docs/implementation/06 §Migrations).
 const MIGRATIONS: &[EmbeddedMigration] = &[EmbeddedMigration {
     version: 1,
     name: "0001_init",
@@ -23,7 +28,15 @@ const MIGRATIONS: &[EmbeddedMigration] = &[EmbeddedMigration {
         env!("CARGO_MANIFEST_DIR"),
         "/migrations/0001_init.sql"
     )),
+    destructive: false,
 }];
+
+/// Options for the migration runner.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MigrateOptions {
+    /// Admit destructive (drop) migrations for this run.
+    pub force: bool,
+}
 
 /// A migration the runner applied during this call.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,17 +52,30 @@ pub struct AppliedMigration {
 /// Re-running on an up-to-date database applies nothing and returns an empty
 /// vector.
 pub fn migrate(conn: &mut Connection) -> Result<Vec<AppliedMigration>, StoreError> {
-    apply_all(conn, MIGRATIONS)
+    migrate_with_options(conn, &MigrateOptions::default())
+}
+
+/// Applies every pending migration with explicit options.
+///
+/// # Errors
+/// [`StoreError::MigrationRequiresForce`] when a pending migration is
+/// marked destructive and [`MigrateOptions::force`] is off.
+pub fn migrate_with_options(
+    conn: &mut Connection,
+    options: &MigrateOptions,
+) -> Result<Vec<AppliedMigration>, StoreError> {
+    apply_all(conn, MIGRATIONS, *options)
 }
 
 /// Applies `migrations` in order, skipping versions at or below the current
 /// `user_version`. The unlocked read is a fast path for up-to-date
 /// databases; [`apply_one`] re-checks the version under the write lock, so
-/// a concurrent runner that applied the migration after the read skips it
+/// a concurrent runner that applied the migration at the same time skips it
 /// instead of failing on the existing DDL.
 fn apply_all(
     conn: &mut Connection,
     migrations: &[EmbeddedMigration],
+    options: MigrateOptions,
 ) -> Result<Vec<AppliedMigration>, StoreError> {
     let current: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -59,7 +85,7 @@ fn apply_all(
         if i64::from(migration.version) <= current {
             continue;
         }
-        if let Some(done) = apply_one(conn, migration)? {
+        if let Some(done) = apply_one(conn, migration, options)? {
             applied.push(done);
         }
     }
@@ -72,9 +98,14 @@ fn apply_all(
 /// Returns `None` when another connection applied this migration between
 /// the unlocked read and the transaction: the `Immediate` transaction now
 /// holds the write lock, so the re-read `user_version` is authoritative.
+/// The destructive gate sits behind that re-read: a no-force run that
+/// loses a race against another runner skips the already-applied
+/// migration instead of refusing one that is done. Dropping `tx` on the
+/// refusal rolls back, and no write has run in the transaction yet.
 fn apply_one(
     conn: &mut Connection,
     migration: &EmbeddedMigration,
+    options: MigrateOptions,
 ) -> Result<Option<AppliedMigration>, StoreError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let stored: i64 = tx
@@ -82,6 +113,11 @@ fn apply_one(
         .map_err(StoreError::Sql)?;
     if i64::from(migration.version) <= stored {
         return Ok(None);
+    }
+    if migration.destructive && !options.force {
+        return Err(StoreError::MigrationRequiresForce {
+            version: migration.version,
+        });
     }
     let result = tx
         .execute_batch(migration.sql)
@@ -105,7 +141,7 @@ fn apply_one(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{EmbeddedMigration, apply_all, apply_one};
+    use super::{EmbeddedMigration, MigrateOptions, apply_all, apply_one};
     use crate::error::StoreError;
 
     /// The shipped migrations form a contiguous run starting at 1.
@@ -125,17 +161,19 @@ mod tests {
             version: 1,
             name: "0001_good",
             sql: "CREATE TABLE keep_me (id INTEGER);",
+            destructive: false,
         };
         let bad = EmbeddedMigration {
             version: 2,
             name: "0002_bad",
             sql: "CREATE TABLE broken (id INTEGER); INSERT INTO missing_table VALUES (1);",
+            destructive: false,
         };
 
-        let applied = apply_all(&mut conn, &[good]).unwrap();
+        let applied = apply_all(&mut conn, &[good], MigrateOptions::default()).unwrap();
         assert_eq!(applied.len(), 1);
 
-        let error = apply_all(&mut conn, &[bad]).unwrap_err();
+        let error = apply_all(&mut conn, &[bad], MigrateOptions::default()).unwrap_err();
         match error {
             StoreError::Migration { version, .. } => assert_eq!(version, 2),
             other => panic!("expected StoreError::Migration, got {other:?}"),
@@ -165,7 +203,7 @@ mod tests {
         let mut second = rusqlite::Connection::open(dir.path().join("docs.db")).unwrap();
 
         // Another connection wins the race and applies the migration.
-        let applied = apply_all(&mut first, super::MIGRATIONS).unwrap();
+        let applied = apply_all(&mut first, super::MIGRATIONS, MigrateOptions::default()).unwrap();
         assert_eq!(applied.len(), 1);
 
         // The loser's `apply_all` fast path would still see the migration
@@ -175,8 +213,48 @@ mod tests {
             version: 1,
             name: "0001_init",
             sql: super::MIGRATIONS[0].sql,
+            destructive: false,
         };
-        let loser = apply_one(&mut second, &stale).unwrap();
+        let loser = apply_one(&mut second, &stale, MigrateOptions::default()).unwrap();
         assert!(loser.is_none(), "the re-check must skip, not re-apply");
+    }
+
+    /// A destructive migration refuses without force and applies with it.
+    #[test]
+    fn destructive_migration_gates_on_force() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        let destructive = EmbeddedMigration {
+            version: 1,
+            name: "0001_destructive",
+            sql: "CREATE TABLE keep_me (id INTEGER);",
+            destructive: true,
+        };
+
+        let error = apply_all(
+            &mut conn,
+            std::slice::from_ref(&destructive),
+            MigrateOptions::default(),
+        )
+        .unwrap_err();
+        match error {
+            StoreError::MigrationRequiresForce { version } => assert_eq!(version, 1),
+            other => panic!("expected MigrationRequiresForce, got {other:?}"),
+        }
+        let created: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'keep_me'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(created, 0, "the refusal must write nothing");
+
+        let applied = apply_all(
+            &mut conn,
+            std::slice::from_ref(&destructive),
+            MigrateOptions { force: true },
+        )
+        .unwrap();
+        assert_eq!(applied.len(), 1);
     }
 }
