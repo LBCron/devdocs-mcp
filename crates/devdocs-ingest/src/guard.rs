@@ -297,19 +297,23 @@ impl FetchGuard {
     /// does for the request; the connection opens only to the returned
     /// address, and the connect-time re-check re-validates it.
     async fn resolve_pinned(&self, url: &Url) -> Result<IpAddr, GuardError> {
-        let Some(host) = url.host_str() else {
+        let Some(host) = bare_host(url) else {
             return Err(GuardError::NoAllowedAddress {
                 host: String::from("<no host>"),
                 url: url.to_string(),
             });
         };
-        for addr in tokio::net::lookup_host((host, 0))
+        // The lookup shares the per-request budget: a stalled resolver must
+        // surface as `Timeout`, not as a 600 s total-cap trip
+        // (docs/implementation/09 invariant 7).
+        let addrs = tokio::time::timeout(self.timeout, tokio::net::lookup_host((host, 0)))
             .await
+            .map_err(|_| GuardError::Timeout)?
             .map_err(|e| GuardError::Dns {
                 host: host.to_owned(),
                 source: Box::new(e),
-            })?
-        {
+            })?;
+        for addr in addrs {
             if ip_allowed(&addr.ip(), self.policy.allow_loopback_for_tests) {
                 return Ok(addr.ip());
             }
@@ -445,36 +449,103 @@ fn map_transport(error: reqwest::Error) -> GuardError {
                 .map_or_else(|| String::from("<unknown>"), ToString::to_string),
             limit: 0,
         })
+    } else if let Some(rebuilt) = unwrap_policy_error(&error) {
+        // A connect-time failure whose source chain carries a guard refusal:
+        // the pinned resolver refused every address for a redirect hop, so
+        // the same host reports `FETCH_BLOCKED` on hop 0 and on a later hop
+        // alike (docs/implementation/09 invariant 4).
+        rebuilt
     } else {
         GuardError::Transport(error)
     }
 }
 
 /// Searches the error source chain for the [`GuardError`] a redirect policy
-/// pass emitted, and rebuilds the cloneable refusal variants.
+/// pass emitted, or for the pinned resolver's [`ResolverRefusal`] sentinel,
+/// and rebuilds the cloneable refusal variants.
 fn unwrap_policy_error(error: &reqwest::Error) -> Option<GuardError> {
-    let mut source = std::error::Error::source(error);
+    let rebuilt = refusal_in_source_chain(std::error::Error::source(error))?;
+    Some(match rebuilt {
+        // The resolver learns only the host name; attach the hop URL that
+        // reqwest carries on the transport error.
+        GuardError::NoAllowedAddress { host, url } if url.is_empty() => {
+            GuardError::NoAllowedAddress {
+                host,
+                url: error
+                    .url()
+                    .map_or_else(|| String::from("<unknown>"), ToString::to_string),
+            }
+        }
+        other => other,
+    })
+}
+
+/// Walks a source chain looking for a rebuildable guard refusal: the
+/// [`GuardError`] a redirect policy pass emitted, or the pinned resolver's
+/// [`ResolverRefusal`]. A resolver-built refusal carries an empty URL that
+/// the caller fills from the transport error.
+fn refusal_in_source_chain(
+    mut source: Option<&(dyn std::error::Error + 'static)>,
+) -> Option<GuardError> {
     while let Some(current) = source {
         if let Some(guard) = current.downcast_ref::<GuardError>()
             && let Some(rebuilt) = guard.policy_reconstruction()
         {
             return Some(rebuilt);
         }
+        if let Some(refusal) = current.downcast_ref::<ResolverRefusal>() {
+            return Some(GuardError::NoAllowedAddress {
+                host: refusal.host.clone(),
+                url: String::new(),
+            });
+        }
         source = current.source();
     }
     None
 }
 
+/// The pinned resolver's blocklist refusal, as a distinct error type so
+/// `map_transport` can rebuild the typed [`GuardError::NoAllowedAddress`]
+/// refusal from inside a reqwest transport error. The resolver learns only
+/// the host name from reqwest; `map_transport` attaches the hop URL.
+#[derive(Debug)]
+struct ResolverRefusal {
+    host: String,
+}
+
+impl std::fmt::Display for ResolverRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "every resolved address for {} is on the blocklist",
+            self.host
+        )
+    }
+}
+
+impl std::error::Error for ResolverRefusal {}
+
 /// The IP blocklist (docs/implementation/09 invariant 4): private, loopback,
 /// link-local, multicast, unspecified, documentation, cloud-metadata, and —
 /// beyond the doc list, still fail-closed — shared address space, the
-/// reserved block, and the broadcast address.
+/// benchmarking range, the reserved block, and the broadcast address.
 #[must_use]
 pub fn ip_allowed(ip: &IpAddr, allow_loopback_for_tests: bool) -> bool {
     if allow_loopback_for_tests && is_loopback_form(ip) {
         return true;
     }
     !is_blocked(ip)
+}
+
+/// The host to resolve: `url::Url` keeps the brackets around an IPv6
+/// literal, and neither getaddrinfo nor tokio's `ToSocketAddrs` accepts the
+/// bracketed form, so strip them the way the policy check does.
+fn bare_host(url: &Url) -> Option<&str> {
+    url.host_str().map(|host| {
+        host.strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+            .unwrap_or(host)
+    })
 }
 
 /// Loopback forms: plain IPv4/IPv6 loopback and the IPv4-mapped form.
@@ -526,6 +597,7 @@ fn v4_blocked(v4: std::net::Ipv4Addr) -> bool {
         || v4.is_broadcast() // 255.255.255.255
         || v4.is_documentation() // 192.0.2/24, 198.51.100/24, 203.0.113/24
         || (o[0] == 100 && (o[1] & 0b1100_0000) == 0b0100_0000) // 100.64/10 shared
+        || (o[0] == 198 && (o[1] & 0b1111_1110) == 18) // 198.18/15 benchmarking
         || o[0] == 0 // 0/8 "this network" — includes 0.0.0.0
         || o[0] >= 240 // 240/4 reserved + 255.255.255.255 broadcast
 }
@@ -580,10 +652,8 @@ impl reqwest::dns::Resolve for PinnedResolver {
                 .into_iter()
                 .find(|addr| ip_allowed(&addr.ip(), allow_loopback))
                 .ok_or_else(|| {
-                    Box::new(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "every resolved address is on the blocklist",
-                    )) as Box<dyn std::error::Error + Send + Sync>
+                    Box::new(ResolverRefusal { host: host.clone() })
+                        as Box<dyn std::error::Error + Send + Sync>
                 })?;
             Ok(Box::new(std::iter::once(pinned)) as Box<dyn Iterator<Item = SocketAddr> + Send>)
         })
@@ -722,7 +792,7 @@ mod tests {
     /// Every docs/09 blocklist literal is refused, address by address.
     #[test]
     fn ip_blocklist_covers_the_documented_ranges() {
-        let blocked: [&str; 21] = [
+        let blocked: [&str; 23] = [
             "10.0.0.1",
             "10.255.255.255",
             "172.16.0.1",
@@ -743,10 +813,14 @@ mod tests {
             "255.255.255.255",
             "100.64.0.1",
             "100.127.255.255",
+            "198.18.0.1",
+            "198.19.255.255",
             "::1",
         ];
         // The one deliberate non-blocked address in the list.
         assert!(ip_allowed(&"172.15.255.255".parse().unwrap(), false));
+        // The benchmarking range ends at 198.19.255.255; 198.20 stays public.
+        assert!(ip_allowed(&"198.20.0.1".parse().unwrap(), false));
         for raw in blocked {
             let ip: std::net::IpAddr = raw.parse().unwrap();
             assert!(!ip_allowed(&ip, false), "{raw} must be blocked");
@@ -819,5 +893,57 @@ mod tests {
             }
             .is_refusal()
         );
+    }
+
+    /// The resolution host drops the brackets around an IPv6 literal;
+    /// `lookup_host` rejects the bracketed form.
+    #[test]
+    fn bare_host_strips_ipv6_brackets() {
+        assert_eq!(
+            super::bare_host(&url("https://[2606:4700::1111]/llms.txt")),
+            Some("2606:4700::1111")
+        );
+        assert_eq!(
+            super::bare_host(&url("https://nextjs.org/llms.txt")),
+            Some("nextjs.org")
+        );
+        assert_eq!(super::bare_host(&url("data:text/plain,hi")), None);
+    }
+
+    /// The pinned resolver reports a typed refusal sentinel when every
+    /// address for the host is on the blocklist, and the transport error
+    /// mapping rebuilds the typed `NoAllowedAddress` refusal from it.
+    #[test]
+    fn resolver_refusal_surfaces_as_the_typed_refusal() {
+        use std::str::FromStr;
+
+        use super::{PinnedResolver, refusal_in_source_chain};
+        use reqwest::dns::Resolve;
+
+        let refusal = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                PinnedResolver {
+                    allow_loopback_for_tests: false,
+                }
+                .resolve(reqwest::dns::Name::from_str("127.0.0.1").unwrap())
+                .await
+                .err()
+                .expect("loopback is refused with the exception off")
+            });
+
+        // The sentinel survives in the chain, and the walk rebuilds the
+        // refusal; the caller attaches the URL from the transport error.
+        let rebuilt =
+            refusal_in_source_chain(Some(refusal.as_ref())).expect("sentinel in source chain");
+        match &rebuilt {
+            GuardError::NoAllowedAddress { host, url } => {
+                assert_eq!(host, "127.0.0.1");
+                assert!(url.is_empty(), "url must be empty");
+            }
+            other => panic!("expected NoAllowedAddress, got {other}"),
+        }
+        assert!(rebuilt.is_refusal());
     }
 }

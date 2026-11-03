@@ -156,3 +156,18 @@ async fn get_reports_an_http_error_status() {
         other => panic!("expected Http, got {other}"),
     }
 }
+
+#[tokio::test]
+async fn get_serves_an_ipv6_literal_url() {
+    // Wiremock binds 127.0.0.1 by default; bind a second server on the
+    // IPv6 loopback so the fetch path exercises a bracketed IPv6 host
+    // end to end (the resolver must strip the brackets before lookup).
+    let listener = std::net::TcpListener::bind("[::1]:0").unwrap();
+    let server = MockServer::builder().listener(listener).start().await;
+    mount_ok(&server, "/llms.txt", "ipv6 body").await;
+
+    let url = url::Url::parse(&format!("{}/llms.txt", server.uri())).unwrap();
+    assert!(url.host_str().unwrap_or_default().starts_with('['));
+    let body = test_guard(1024, 5_000, 3).get(&url).await.unwrap();
+    assert_eq!(body.as_ref(), b"ipv6 body");
+}
