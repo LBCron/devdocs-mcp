@@ -89,17 +89,11 @@ pub fn parse_llms_txt(text: &str, url: &str) -> Result<LlmsTxtIndex, IngestError
         let trimmed = line.trim();
         if let Some((marker, run)) = fence_marker(trimmed) {
             match open_fence {
-                // Inside a fence: only a longer run of the same character
-                // closes it. Outside: any marker opens one.
-                Some((open_char, open_run)) => {
-                    // CommonMark §4.4: the closing fence holds the marker
-                    // run and nothing else. A sample line such as
-                    // "```example" inside a backtick fence is fence
-                    // content, not a close.
-                    if marker == open_char
-                        && run >= open_run
-                        && trimmed.chars().all(|c| c == marker)
-                    {
+                // Inside a fence: only a run at least as long, of the same
+                // character, holding nothing else closes it. Outside: any
+                // marker opens one.
+                Some(open) => {
+                    if fence_closes(open, trimmed) {
                         open_fence = None;
                     }
                 }
@@ -199,6 +193,18 @@ where
     } else {
         Some(summary_lines.join(" "))
     }
+}
+
+/// Whether `line` closes the open fence `(marker, run)`: the same marker
+/// character, at least the opening run length, and nothing but the marker
+/// run on the line (`CommonMark` §4.4 — a sample line that starts with the
+/// marker run and carries trailing text is fence content, not a close).
+/// Shared by the index scanner and the segmenter's fence probe.
+pub(crate) fn fence_closes(open: (char, usize), line: &str) -> bool {
+    let Some((marker, run)) = fence_marker(line) else {
+        return false;
+    };
+    marker == open.0 && run >= open.1 && line.chars().all(|c| c == marker)
 }
 
 /// The fence marker on a line: the marker character and its run length,

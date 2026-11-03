@@ -426,20 +426,20 @@ fn boundary_inside_fence(text: &str, at: usize) -> bool {
         }
         if at < line_end {
             let trimmed = line.trim_start();
-            let Some((marker, run)) = crate::llms_txt::fence_marker(trimmed) else {
+            let Some((marker, _run)) = crate::llms_txt::fence_marker(trimmed) else {
                 return open.is_some();
             };
-            let Some((open_char, open_run)) = open else {
+            let Some(open) = open else {
                 // Outside, on a fence line: the bytes before the marker sit
                 // outside, from the marker on is inside the fence.
                 let indent = line.len() - trimmed.len();
                 let marker_start = line_start + indent;
                 return at >= marker_start;
             };
-            if marker == open_char && run >= open_run && trimmed.chars().all(|c| c == marker) {
+            if crate::llms_txt::fence_closes(open, line.trim()) {
                 // A closing fence: past the marker run is outside.
                 let indent = line.len() - trimmed.len();
-                let marker_end = line_start + indent + run;
+                let marker_end = line_start + indent + marker_run(marker, trimmed);
                 return at < marker_end;
             }
             // Any other line inside an open fence is fence content.
@@ -448,12 +448,8 @@ fn boundary_inside_fence(text: &str, at: usize) -> bool {
         // Cross the line: apply the same open/close rule the scanner uses.
         let trimmed = line.trim();
         match open {
-            Some((open_char, open_run)) => {
-                if let Some((marker, run)) = crate::llms_txt::fence_marker(trimmed)
-                    && marker == open_char
-                    && run >= open_run
-                    && trimmed.chars().all(|c| c == marker)
-                {
+            Some(open_fence) => {
+                if crate::llms_txt::fence_closes(open_fence, trimmed) {
                     open = None;
                 }
             }
@@ -466,6 +462,11 @@ fn boundary_inside_fence(text: &str, at: usize) -> bool {
         offset = line_end + 1;
     }
     open.is_some()
+}
+
+/// The marker run length of a line already known to start with the marker.
+fn marker_run(marker: char, trimmed: &str) -> usize {
+    trimmed.chars().take_while(|&c| c == marker).count()
 }
 
 /// Builds the active sizer: tiktoken o200k under `exact-tokens`, the
