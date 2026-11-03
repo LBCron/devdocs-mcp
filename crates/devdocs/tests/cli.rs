@@ -130,17 +130,34 @@ fn exit_one_on_usage_error() {
     );
 }
 
-/// Exit 2 for a valid query that serves nothing.
+/// Exit 2 for a valid query that serves nothing. The cold miss carries
+/// `PKG_NOT_INDEXED` with the `not_indexed` reason; the plain
+/// `NO_RESULT` code serves a valid-query miss
+/// (docs/implementation/08 §Error codes).
 #[test]
 fn exit_two_on_no_result() {
     let mut env = Env::new();
-    env.inject("NO_RESULT");
+    env.inject("PKG_NOT_INDEXED");
     let (code, stdout, stderr) = output(env.cmd(), &["list", "--json"]);
     assert_eq!(code, 2);
     assert_eq!(stdout, "");
     let error: Value = serde_json::from_str(stderr.trim()).expect("stderr is JSON");
-    assert_eq!(error["error"], "NO_RESULT");
+    assert_eq!(error["error"], "PKG_NOT_INDEXED");
     assert_eq!(error["miss_reason"], "not_indexed");
+    assert!(
+        error["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("devdocs add")
+    );
+
+    let mut env = Env::new();
+    env.inject("NO_RESULT");
+    let (code, _stdout, stderr) = output(env.cmd(), &["list", "--json"]);
+    assert_eq!(code, 2);
+    let error: Value = serde_json::from_str(stderr.trim()).expect("stderr is JSON");
+    assert_eq!(error["error"], "NO_RESULT");
+    assert_eq!(error["miss_reason"], "low_confidence");
 }
 
 /// Exit 3 for an upstream failure.

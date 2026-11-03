@@ -25,6 +25,7 @@ embeddings = []
 [dependencies]
 devdocs-ingest.workspace = true
 devdocs-model.workspace = true
+devdocs-retrieve.workspace = true
 devdocs-store.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
