@@ -10,6 +10,7 @@
 //! store state never diverges from the reported outcome. A run that never
 //! reaches publish leaves the store untouched.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use devdocs_model::config::Config;
@@ -150,14 +151,18 @@ impl<'a> IngestJob<'a> {
             self.ingest_link(&ctx, link, &mut docs, &mut run).await?;
         }
 
-        // Chrome strip (docs/implementation/07 §Normalization pipeline
-        // stage 2), off the async path: comrak parsing is CPU work.
-        let (chrome_report, docs) = tokio::task::spawn_blocking(move || {
+        // Normalization runs off the async path over the whole corpus:
+        // comrak parsing and hashing are CPU work. Dedup first, so a
+        // duplicate page cannot skew the chrome frequency counts; then the
+        // chrome strip (docs/implementation/07 §Normalization pipeline).
+        let (dedup_dropped, chrome_report, docs) = tokio::task::spawn_blocking(move || {
+            let dropped = dedup_pages(&mut docs);
             let report = crate::chrome::strip_chrome(&mut docs);
-            (report, docs)
+            (dropped, report, docs)
         })
         .await
         .map_err(|join| IngestError::Join(join.to_string()))?;
+        run.events.dedup_dropped_pages = dedup_dropped;
         run.events.skipped_blocks += chrome_report.pattern_drops;
         run.events.chrome_drops += chrome_report.frequency_drops;
 
@@ -343,6 +348,23 @@ struct LinkContext<'a> {
     index_base: &'a Url,
 }
 
+/// Collapses duplicate pages by canonical body hash: the first occurrence
+/// of a SHA-256 content hash stays, every later duplicate drops. The hash
+/// is the store's canonical hash (CRLF folds to LF), so twins that differ
+/// only in line endings collapse too
+/// (docs/implementation/07 §Normalization pipeline stage 6). Returns the
+/// dropped count.
+fn dedup_pages(docs: &mut Vec<PageDocument>) -> usize {
+    let before = docs.len();
+    let mut seen: HashSet<[u8; 32]> = HashSet::new();
+    docs.retain(|doc| seen.insert(devdocs_store::content_hash(&doc.body)));
+    let dropped = before - docs.len();
+    if dropped > 0 {
+        tracing::debug!(dropped, "duplicate pages collapsed by content hash");
+    }
+    dropped
+}
+
 /// Segments one page body off the async path. The blocking thread owns the
 /// page segmenter clone, so the async loop never waits on parsing. Returns
 /// the chunks plus the page's event counters.
@@ -421,5 +443,32 @@ mod tests {
     fn markdown_body_does_not_match() {
         assert!(!is_html_body("# Title\n\nbody text"));
         assert!(!is_html_body("\u{feff}# Titled"));
+    }
+
+    /// Duplicate pages collapse to the first occurrence; distinct pages
+    /// stay; CRLF/LF twins collapse through the canonical hash
+    /// (docs/implementation/07 §Normalization pipeline stage 6).
+    #[test]
+    fn dedup_collapses_identical_bodies() {
+        use crate::chrome::PageDocument;
+
+        let doc = |path: &str, body: &str| PageDocument {
+            path: path.to_owned(),
+            body: body.to_owned(),
+        };
+        let mut docs = vec![
+            doc("https://x/a.md", "# A\n\nalpha\n"),
+            doc("https://x/b.md", "# B\n\nbeta\n"),
+            doc("https://x/a-copy.md", "# A\n\nalpha\n"),
+            doc("https://x/crlf.md", "# A\r\n\r\nalpha\r\n"),
+            doc("https://x/c.md", "# C\n\ngamma\n"),
+        ];
+        let dropped = dedup_pages(&mut docs);
+        assert_eq!(dropped, 2, "the copy and the CRLF twin collapse");
+        let paths: Vec<&str> = docs.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["https://x/a.md", "https://x/b.md", "https://x/c.md"]
+        );
     }
 }
