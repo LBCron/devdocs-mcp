@@ -47,6 +47,19 @@ lefthook install
 ```sh
 devdocs --version
 devdocs config init
+```
+
+The license gate is deny-by-default, so register the source in the config
+file that `config init` wrote, then run the rest:
+
+```toml
+[sources.example]
+kind = "llms_txt"
+url = "https://example.test/llms.txt"
+status = "approved_index"
+```
+
+```sh
 devdocs add https://example.test/llms.txt --fixture <fixture-dir>
 devdocs list
 ```

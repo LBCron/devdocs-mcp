@@ -3,7 +3,7 @@ type: guide
 title: Security Implementation
 description: The mapping from the research threat model to concrete controls in code, the fetch-guard invariants and tests, injection-filter operations, storage controls, and the security checklist.
 tags: [devdocs, security, ssrf, injection, licensing]
-timestamp: 2026-11-03T12:00:00Z
+timestamp: 2026-11-03T17:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -85,7 +85,7 @@ The state machine is defined in [07](07-ingest-pipeline.md). Enforcement is laye
 
 1. The ingest planner refuses sources below `approved_fetch`.
 2. The store refuses to flip a source to `active` below `approved_index`, and publishing a terminal license state (`denied`, `expired`, `revoked`) deactivates the source, withdrawing it from search.
-3. The retrieve layer filters on license state at query time. A source revoked after indexing drops out of results at the next query, not just at the next sync.
+3. The retrieve layer filters on the stored license state at query time. A source whose stored state is terminal drops out of results at the next query. A registry revocation reaches the stored state only when `devdocs add` runs for that URL: the gate refusal then withdraws the published generation before the error returns. The revoke-then-query drop without an add run is scheduled for M7 (docs/implementation/13).
 4. Output rendering enforces the snippet-vs-full rule per source state.
 
 ## Code Mode sandbox (deferred)
