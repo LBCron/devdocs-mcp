@@ -725,6 +725,78 @@ fn add_refuses_a_revoked_source_and_withdraws_it() {
     assert_eq!(source["active"], false);
 }
 
+/// A terminal refusal whose withdrawal cannot be recorded surfaces as
+/// `UPSTREAM_ERROR` instead of `FETCH_BLOCKED`, so the reported outcome
+/// never hides an unrecorded withdrawal (docs/09 §License gate enforcement
+/// points, point 3).
+#[test]
+fn add_reports_a_withdrawal_that_cannot_be_recorded() {
+    let env = Env::new();
+    let fixture = write_fixture(&env);
+    let config = write_config(&env, true);
+    let db = env.root.join("withdraw-fail.db");
+
+    // First run publishes the source.
+    let (code, _stdout, stderr) = run_acme_add(&env, &fixture, &config, &db);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    // The registry status flips to revoked, and the store cannot record
+    // the withdrawal: the db file becomes unwritable.
+    std::fs::write(
+        &config,
+        concat!(
+            "[sources.acme]\n",
+            "kind = \"llms_txt\"\n",
+            "url = \"https://docs.acme.test/llms.txt\"\n",
+            "license = \"MIT\"\n",
+            "status = \"revoked\"\n"
+        ),
+    )
+    .expect("config rewritten");
+    let restore = |mode: u32| {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&db).expect("db metadata").permissions();
+        perms.set_mode(mode);
+        std::fs::set_permissions(&db, perms).expect("mode set");
+    };
+    restore(0o444);
+
+    // A root process ignores the permission bits, so the seal cannot hold
+    // and the withdrawal would succeed; skip loudly in that case.
+    if std::fs::OpenOptions::new().append(true).open(&db).is_ok() {
+        restore(0o644);
+        eprintln!("skipping: the process ignores file permission bits");
+        return;
+    }
+
+    let (code, _stdout, stderr) = run_acme_add(&env, &fixture, &config, &db);
+    assert_eq!(code, 3, "stderr: {stderr}");
+    assert!(stderr.contains("UPSTREAM_ERROR"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("withdrawal"),
+        "stderr should name the failed withdrawal: {stderr}"
+    );
+
+    restore(0o644);
+    // The withdrawal never landed, and the command said so instead of
+    // reporting the refusal alone.
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "list",
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+            "--db",
+            db.to_str().expect("db path"),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout} stderr: {stderr}");
+    let envelope: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    let source = &envelope["results"][0];
+    assert_eq!(source["active"], true);
+}
+
 /// Writes a fixture manifest from raw entry objects and returns its path.
 fn write_manifest(env: &Env, entries: &Value) -> PathBuf {
     let dir = env.root.join("fixture-custom");

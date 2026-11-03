@@ -67,37 +67,36 @@ fn map_store_error(error: &devdocs_store::StoreError) -> Error {
 /// retrieval even though the publish-time withdrawal never runs
 /// (docs/implementation/09 §License gate enforcement points, point 3).
 /// A refusal without a terminal status — no entry, `pending_review` —
-/// writes nothing. The refusal itself stays the outcome: a withdrawal
-/// failure logs and keeps the `FETCH_BLOCKED` answer.
-fn withdraw_on_terminal_refusal(config: &Config, index_url: &Url) {
+/// writes nothing. The withdrawal is not best-effort: when the store
+/// cannot record it, the command returns `UPSTREAM_ERROR` instead of
+/// `FETCH_BLOCKED`, so a revoked source is never left serving while the
+/// command claims `FETCH_BLOCKED`.
+fn withdraw_on_terminal_refusal(config: &Config, index_url: &Url) -> Result<(), Error> {
     let Some(status) =
         devdocs_ingest::refused_status(config, index_url).filter(|status| status.is_terminal())
     else {
-        return;
+        return Ok(());
     };
-    let Ok(store) = open_store(config, false) else {
-        tracing::warn!(
+    let store = open_store(config, false).map_err(|error| Error::Upstream {
+        code: UpstreamCode::UpstreamError,
+        detail: format!(
+            "gate refused with {status} but the withdrawal could not be recorded: {error}"
+        ),
+    })?;
+    let withdrawn = store
+        .withdraw_source_by_origin_url(index_url.as_str(), status)
+        .map_err(|error| Error::Upstream {
+            code: UpstreamCode::UpstreamError,
+            detail: format!("gate refused with {status} but the withdrawal failed: {error}"),
+        })?;
+    if withdrawn > 0 {
+        tracing::info!(
             status = status.as_str(),
-            "cannot withdraw the source on the gate refusal: the store failed to open"
+            withdrawn,
+            "withdrew the source on the gate refusal"
         );
-        return;
-    };
-    match store.withdraw_source_by_origin_url(index_url.as_str(), status) {
-        Ok(0) => {}
-        Ok(withdrawn) => {
-            tracing::info!(
-                status = status.as_str(),
-                withdrawn,
-                "withdrew the source on the gate refusal"
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                status = status.as_str(),
-                "cannot withdraw the source on the gate refusal: {error}"
-            );
-        }
     }
+    Ok(())
 }
 
 /// Runs `devdocs add <source>`.
@@ -124,7 +123,7 @@ pub fn run_add(
     let grant = match gate_fetch(config, &index_url) {
         Ok(grant) => grant,
         Err(error) => {
-            withdraw_on_terminal_refusal(config, &index_url);
+            withdraw_on_terminal_refusal(config, &index_url)?;
             return Err(error);
         }
     };
