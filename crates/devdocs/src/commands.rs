@@ -149,9 +149,11 @@ pub fn run_add(
     let store = open_store(config, false)?;
     let version = version.unwrap_or("latest");
     let job = IngestJob::new(config, &guard, fixture.as_ref());
-    let outcome = runtime
-        .block_on(job.run(Arc::clone(&store), &index_url, &grant.name, version))
-        .map_err(map_ingest_error)?;
+    let result = runtime.block_on(job.run(Arc::clone(&store), &index_url, &grant.name, version));
+    // A run that hit the total cap can leave its in-flight segmentation
+    // blocking task running; do not wait for it when the runtime drops.
+    runtime.shutdown_background();
+    let outcome = result.map_err(map_ingest_error)?;
 
     tracing::info!(
         pages = outcome.pages,
