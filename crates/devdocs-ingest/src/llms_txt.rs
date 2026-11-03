@@ -124,17 +124,29 @@ pub fn parse_llms_txt(text: &str, url: &str) -> Result<LlmsTxtIndex, IngestError
         Some(summary_lines.join(" "))
     };
 
-    // Sections and link lines.
+    // Sections and link lines. A fenced block closes only on a line of the
+    // opening marker's character with at least its run length, per
+    // CommonMark (the grammar has no code blocks; this leniency keeps code
+    // samples in an index from leaking link lines).
     let mut sections: Vec<LlmsSection> = Vec::new();
     let mut link_count = 0usize;
-    let mut in_fence = false;
+    let mut open_fence: Option<(char, usize)> = None;
     for line in lines {
         let trimmed = line.trim();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
+        if let Some((marker, run)) = fence_marker(trimmed) {
+            match open_fence {
+                // Inside a fence: only a longer run of the same character
+                // closes it. Outside: any marker opens one.
+                Some((open_char, open_run)) => {
+                    if marker == open_char && run >= open_run {
+                        open_fence = None;
+                    }
+                }
+                None => open_fence = Some((marker, run)),
+            }
             continue;
         }
-        if in_fence {
+        if open_fence.is_some() {
             continue;
         }
         if let Some(heading) = trimmed.strip_prefix("## ") {
@@ -168,6 +180,18 @@ pub fn parse_llms_txt(text: &str, url: &str) -> Result<LlmsTxtIndex, IngestError
     })
 }
 
+/// The fence marker on a line: the marker character and its run length,
+/// when the line could open or close a fenced block (three or more
+/// backticks or tildes).
+fn fence_marker(trimmed: &str) -> Option<(char, usize)> {
+    let marker = trimmed.chars().next()?;
+    if marker != '`' && marker != '~' {
+        return None;
+    }
+    let run = trimmed.chars().take_while(|&c| c == marker).count();
+    (run >= 3).then_some((marker, run))
+}
+
 /// Parses one link line: `- [title](url)` with an optional `: description`.
 /// A leading `*` bullet is tolerated next to `-`.
 fn parse_link_line(line: &str) -> Option<LlmsLink> {
@@ -177,7 +201,28 @@ fn parse_link_line(line: &str) -> Option<LlmsLink> {
     let close_bracket = rest.find("](")?;
     let title = &rest[..close_bracket];
     let after = &rest[close_bracket + 2..];
-    let url_end = after.find(')')?;
+    // The destination ends at a parenthesis at nesting depth zero: balanced
+    // parentheses are legal path characters (RFC 3986 sub-delims), so
+    // `guide_(v2).md` must not truncate at the first `)`.
+    let mut depth = 0usize;
+    let url_end = after
+        .char_indices()
+        .find(|(_, c)| match c {
+            '(' => {
+                depth += 1;
+                false
+            }
+            ')' => {
+                if depth == 0 {
+                    true
+                } else {
+                    depth -= 1;
+                    false
+                }
+            }
+            _ => false,
+        })?
+        .0;
     let url = &after[..url_end];
     // The spec requires a hyperlink `[name](url)`: a blank name or an
     // empty URL is not a link line.
@@ -298,6 +343,35 @@ mod tests {
         let index = parse_llms_txt("\u{feff}# T\n\n- [a](https://x/a.md)", "u").unwrap();
         assert_eq!(index.title, "T");
         assert_eq!(index.links().count(), 1);
+    }
+
+    /// A link destination keeps its balanced parentheses: the line ends at
+    /// the depth-zero close, not at the first `)`.
+    #[test]
+    fn link_destination_keeps_balanced_parentheses() {
+        let index =
+            parse_llms_txt("# T\n\n- [Guide](https://x/guide_(v2).md): notes\n", "u").unwrap();
+        assert_eq!(link_at(&index, 0, 0).1, "https://x/guide_(v2).md");
+        assert_eq!(link_at(&index, 0, 0).2, Some("notes"));
+    }
+
+    /// A fenced block skips link lines inside it, and a marker of the
+    /// other character does not close a fence.
+    #[test]
+    fn fence_skips_links_until_the_matching_close() {
+        let text = concat!(
+            "# T\n\n",
+            "~~~\n",
+            "```json\n",
+            "- [inside](https://x/inside.md)\n",
+            "```\n",
+            "- [still_inside](https://x/still.md)\n",
+            "~~~\n",
+            "- [outside](https://x/outside.md)\n",
+        );
+        let index = parse_llms_txt(text, "u").unwrap();
+        assert_eq!(index.links().count(), 1, "{index:?}");
+        assert_eq!(link_at(&index, 0, 0).0, "outside");
     }
 
     /// Links before the first H2 land in a heading-less section.
