@@ -86,7 +86,9 @@ fn base_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<BaseColumns> {
 
 impl Store {
     /// Full-text search over active sources with the documented bm25
-    /// weights.
+    /// weights. A source whose license state turned terminal drops out at
+    /// query time (docs/implementation/09 §License gate enforcement
+    /// points, point 3), even when its withdrawal never ran.
     ///
     /// `match_expr` should come from the query builder — it is bound as a
     /// parameter, never interpolated.
@@ -101,6 +103,7 @@ impl Store {
              JOIN chunks c ON c.chunk_id = chunks_fts.rowid \
              JOIN sources s ON s.source_id = c.source_id \
              WHERE chunks_fts MATCH ?1 AND s.active = 1 \
+               AND s.license_status NOT IN ('denied', 'expired', 'revoked') \
              ORDER BY bm25(chunks_fts, 5.0, 1.0) \
              LIMIT ?2",
         )?;
@@ -138,6 +141,7 @@ impl Store {
              JOIN chunks c ON c.chunk_id = sym.chunk_id \
              JOIN sources s ON s.source_id = c.source_id \
              WHERE sym.symbol = ?1 AND c.source_id = ?2 AND s.active = 1 \
+               AND s.license_status NOT IN ('denied', 'expired', 'revoked') \
              ORDER BY c.ordinal",
         )?;
         let rows = stmt.query_map(params![symbol, src.0], |row| {

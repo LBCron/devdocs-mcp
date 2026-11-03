@@ -297,6 +297,34 @@ fn a_terminal_license_state_withdraws_the_source() {
     );
 }
 
+/// A source whose stored status turns terminal while it stays active —
+/// exactly the state a revoked registry entry leaves behind when the gate
+/// refuses before any publish runs — drops out of retrieval at query time
+/// (docs/09 §License gate enforcement points, point 3).
+#[test]
+fn search_drops_sources_whose_license_turned_terminal() {
+    let rig = rig();
+    rig.store
+        .publish_generation(
+            &source(LicenseStatus::ApprovedIndex),
+            &[chunk(0, None, "published before the revocation.")],
+        )
+        .unwrap();
+    let term = build_match_query("revocation").into_owned();
+    assert_eq!(rig.store.search_fts(&term, 10).unwrap().len(), 1);
+
+    rig.conn
+        .execute(
+            "UPDATE sources SET license_status = 'revoked' WHERE active = 1",
+            [],
+        )
+        .unwrap();
+    assert!(
+        rig.store.search_fts(&term, 10).unwrap().is_empty(),
+        "a revoked source must drop out at query time"
+    );
+}
+
 /// The fetched-at format survives a round trip through storage.
 #[test]
 fn fetched_at_is_rfc3339_utc() {

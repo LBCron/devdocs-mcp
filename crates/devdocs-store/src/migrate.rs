@@ -85,12 +85,7 @@ fn apply_all(
         if i64::from(migration.version) <= current {
             continue;
         }
-        if migration.destructive && !options.force {
-            return Err(StoreError::MigrationRequiresForce {
-                version: migration.version,
-            });
-        }
-        if let Some(done) = apply_one(conn, migration)? {
+        if let Some(done) = apply_one(conn, migration, options)? {
             applied.push(done);
         }
     }
@@ -103,9 +98,14 @@ fn apply_all(
 /// Returns `None` when another connection applied this migration between
 /// the unlocked read and the transaction: the `Immediate` transaction now
 /// holds the write lock, so the re-read `user_version` is authoritative.
+/// The destructive gate sits behind that re-read: a no-force run that
+/// loses a race against another runner skips the already-applied
+/// migration instead of refusing one that is done. Dropping `tx` on the
+/// refusal rolls back, and no write has run in the transaction yet.
 fn apply_one(
     conn: &mut Connection,
     migration: &EmbeddedMigration,
+    options: MigrateOptions,
 ) -> Result<Option<AppliedMigration>, StoreError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let stored: i64 = tx
@@ -113,6 +113,11 @@ fn apply_one(
         .map_err(StoreError::Sql)?;
     if i64::from(migration.version) <= stored {
         return Ok(None);
+    }
+    if migration.destructive && !options.force {
+        return Err(StoreError::MigrationRequiresForce {
+            version: migration.version,
+        });
     }
     let result = tx
         .execute_batch(migration.sql)
@@ -210,7 +215,7 @@ mod tests {
             sql: super::MIGRATIONS[0].sql,
             destructive: false,
         };
-        let loser = apply_one(&mut second, &stale).unwrap();
+        let loser = apply_one(&mut second, &stale, MigrateOptions::default()).unwrap();
         assert!(loser.is_none(), "the re-check must skip, not re-apply");
     }
 
