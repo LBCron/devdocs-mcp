@@ -333,6 +333,26 @@ proptest::proptest! {
     }
 }
 
+/// The merge pass joins spans whose boundaries fall inside a fence in one
+/// left-to-right sweep, and leaves inputs with fewer than two spans —
+/// which skip the fence scan — byte-identical.
+#[test]
+fn merge_pass_merges_fence_crossing_boundaries_in_order() {
+    // The unclosed fence at byte 3 covers every offset from 3 on.
+    let text = "a\n```\ncode\n";
+    let merge = |spans: Vec<std::ops::Range<usize>>| super::merge_until_fence_safe(spans, text);
+    // A single span returns untouched.
+    let single: Vec<std::ops::Range<usize>> = std::iter::once(0..2).collect();
+    assert_eq!(merge(single.clone()), single);
+    // Boundaries 4 and 8 sit inside the fence: the chain merges into one
+    // span, one merge per boundary.
+    assert_eq!(merge(vec![0..4, 4..8, 8..12]), vec![0..12]);
+    // Boundary 2 sits outside (before the fence), boundary 4 inside: the
+    // last span absorbs into its predecessor; its own end, also inside
+    // the fence, merges nothing once it is the final span.
+    assert_eq!(merge(vec![0..2, 2..4, 8..12]), vec![0..2, 2..12]);
+}
+
 /// The segmenter debug shape names its limits.
 #[test]
 fn segmenter_debug_names_the_limits() {

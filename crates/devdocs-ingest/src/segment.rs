@@ -340,31 +340,31 @@ fn inline_text<'a>(node: &'a comrak::nodes::AstNode<'a>) -> String {
 /// step 4). Span ends and `section_text` are both page-absolute.
 ///
 /// The fence state is computed once per section in a single forward pass
-/// ([`fence_intervals`], issue #64): each merge iteration checks the
-/// boundary against the precomputed intervals instead of rescanning the
-/// section text from its first line, which made the merge quadratic in
-/// the section size.
-fn merge_until_fence_safe(mut spans: Vec<Range<usize>>, section_text: &str) -> Vec<Range<usize>> {
+/// ([`fence_intervals`], issue #64): each boundary check consults the
+/// precomputed intervals instead of rescanning the section text from its
+/// first line, which made the merge quadratic in the section size. The
+/// merge itself is one left-to-right pass — the earlier loop restarted
+/// its boundary scan after every merge, quadratic in the span count —
+/// and sections with fewer than two spans return before any scan, since
+/// every section passes the whole page text.
+fn merge_until_fence_safe(spans: Vec<Range<usize>>, section_text: &str) -> Vec<Range<usize>> {
+    if spans.len() < 2 {
+        return spans;
+    }
     let fences = fence_intervals(section_text);
-    loop {
-        let mut violation: Option<usize> = None;
-        for (index, window) in spans.windows(2).enumerate() {
-            if boundary_inside_fence(&fences, window[0].end) {
-                violation = Some(index);
-                break;
-            }
-        }
-        match violation {
-            Some(index) => {
-                let next = spans.remove(index + 1);
-                spans[index] = spans[index].start..next.end;
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(spans.len());
+    for span in spans {
+        match merged.last_mut() {
+            Some(last) if boundary_inside_fence(&fences, last.end) => {
+                last.end = span.end;
                 tracing::warn!(
                     "chunk boundary fell inside a fenced code block; merged the two candidate chunks"
                 );
             }
-            None => return spans,
+            _ => merged.push(span),
         }
     }
+    merged
 }
 
 /// Records one heading node: pop the breadcrumb to the heading's level,
