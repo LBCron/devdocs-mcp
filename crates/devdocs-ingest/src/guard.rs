@@ -344,6 +344,11 @@ impl FetchGuard {
         let port = url.port_or_known_default().unwrap_or(443);
         let builder = reqwest::Client::builder()
             .user_agent(&self.user_agent)
+            // Ambient proxies are off: HTTPS_PROXY and friends must not pull
+            // the request away from the pinned address, and a proxy resolves
+            // hostnames itself, which would bypass the pinned resolver
+            // (docs/implementation/09 invariant 3).
+            .no_proxy()
             .redirect(self.redirect_policy())
             .dns_resolver(PinnedResolver {
                 allow_loopback_for_tests: self.policy.allow_loopback_for_tests,

@@ -37,7 +37,7 @@ The guard is the only network code. Enforced properties, each with a property te
 
 1. Scheme is HTTPS. Everything else fails before DNS.
 2. URL has no userinfo. URL normalizes through the `url` crate before checks.
-3. DNS resolves through the pinned resolver. The connection opens only to the resolved address, with SNI intact (reqwest 0.13 `dns_resolver` hook, verified 2026-10-28).
+3. DNS resolves through the pinned resolver. The connection opens only to the resolved address, with SNI intact (reqwest 0.13 `dns_resolver` hook, verified 2026-10-28). Ambient proxies are disabled on the guard client (`no_proxy`): a proxy would connect to its own address and resolve hostnames itself, which bypasses the pinned resolver and the peer check.
 4. The resolved IP passes the blocklist check at connect time: private, loopback, link-local, multicast, unspecified, documentation (`2001:db8::/32`, `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`), and cloud metadata ranges (`169.254.169.254/32` and equivalents). Beyond the listed set, the blocklist also refuses fail-closed: shared address space (`100.64/10`), the benchmarking range (`198.18.0.0/15`), `0/8`, and the reserved block (`240/4`).
 5. Redirects re-run checks 1 to 4 on every hop. Limit 3. A redirect hop whose host resolves to only refused addresses reports the same refusal (`FETCH_BLOCKED`) as a refused initial URL.
 6. Byte cap 20 MiB applies to decompressed bytes, enforced by a wrapping reader, not by trusting Content-Length.
