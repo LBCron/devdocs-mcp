@@ -739,6 +739,284 @@ fn add_refuses_a_revoked_source_and_withdraws_it() {
     assert_eq!(source["active"], false);
 }
 
+/// Writes a fixture manifest from raw entry objects and returns its path.
+fn write_manifest(env: &Env, entries: &Value) -> PathBuf {
+    let dir = env.root.join("fixture-custom");
+    std::fs::create_dir_all(&dir).expect("fixture dir");
+    std::fs::write(dir.join("manifest.json"), entries.to_string()).expect("manifest written");
+    dir
+}
+
+/// The `add` argument list for the acme fixture replay.
+fn add_args<'a>(
+    fixture: &'a std::path::Path,
+    config: &'a std::path::Path,
+    db: &'a std::path::Path,
+    json: bool,
+) -> Vec<&'a str> {
+    let mut args = vec![
+        "add",
+        "https://docs.acme.test/llms.txt",
+        "--fixture",
+        fixture.to_str().expect("fixture path"),
+    ];
+    if json {
+        args.push("--json");
+    }
+    args.extend([
+        "--config",
+        config.to_str().expect("config path"),
+        "--db",
+        db.to_str().expect("db path"),
+    ]);
+    args
+}
+
+/// The human (non-`--json`) output paths: `add` prints the indexed summary
+/// and `list` prints one line per source.
+#[test]
+fn add_and_list_print_human_output_without_json() {
+    let env = Env::new();
+    let fixture = write_fixture(&env);
+    let config = write_config(&env, true);
+    let db = env.root.join("human.db");
+
+    let (code, stdout, stderr) = output(env.cmd(), &add_args(&fixture, &config, &db, false));
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("indexed acme latest: 1 pages,"),
+        "stdout: {stdout}"
+    );
+
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "list",
+            "--config",
+            config.to_str().expect("config path"),
+            "--db",
+            db.to_str().expect("db path"),
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("acme latest (llms_txt · approved_index · active)"),
+        "stdout: {stdout}"
+    );
+}
+
+/// A guard refusal from the replay surfaces as `FETCH_BLOCKED` through the
+/// ingest error mapping.
+#[test]
+fn add_maps_a_guard_refusal_to_fetch_blocked() {
+    let env = Env::new();
+    let fixture = write_manifest(
+        &env,
+        &serde_json::json!([
+            { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": INDEX },
+        ]),
+    );
+    // The recorded index body exceeds the 64-byte cap, so the replay
+    // refuses with `BodyTooLarge` — a guard refusal.
+    let config_path = env.root.join("tiny.toml");
+    std::fs::write(
+        &config_path,
+        concat!(
+            "[fetch]\n",
+            "max_bytes = 64\n\n",
+            "[sources.acme]\n",
+            "kind = \"llms_txt\"\n",
+            "url = \"https://docs.acme.test/llms.txt\"\n",
+            "license = \"MIT\"\n",
+            "status = \"approved_index\"\n"
+        ),
+    )
+    .expect("config written");
+    let db = env.root.join("guard.db");
+
+    let (code, _stdout, stderr) = output(env.cmd(), &add_args(&fixture, &config_path, &db, true));
+    assert_eq!(code, 3, "stderr: {stderr}");
+    assert!(stderr.contains("FETCH_BLOCKED"), "stderr: {stderr}");
+}
+
+/// A recorded non-success status is a transport failure, not a refusal:
+/// `UPSTREAM_ERROR`, matching the live path.
+#[test]
+fn add_maps_a_recorded_error_status_to_upstream_error() {
+    let env = Env::new();
+    let fixture = write_manifest(
+        &env,
+        &serde_json::json!([
+            { "url": "https://docs.acme.test/llms.txt", "status": 503, "headers": {}, "body": INDEX },
+        ]),
+    );
+    let config = write_config(&env, true);
+    let db = env.root.join("status.db");
+
+    let (code, _stdout, stderr) = output(env.cmd(), &add_args(&fixture, &config, &db, true));
+    assert_eq!(code, 3, "stderr: {stderr}");
+    assert!(stderr.contains("UPSTREAM_ERROR"), "stderr: {stderr}");
+}
+
+/// An index without link lines fails `LLMS_TXT_EMPTY`.
+#[test]
+fn add_maps_llms_txt_empty() {
+    let env = Env::new();
+    let fixture = write_manifest(
+        &env,
+        &serde_json::json!([
+            { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": "# Acme\n\nNo links here.\n" },
+        ]),
+    );
+    let config = write_config(&env, true);
+    let db = env.root.join("empty.db");
+
+    let (code, _stdout, stderr) = output(env.cmd(), &add_args(&fixture, &config, &db, true));
+    assert_eq!(code, 3, "stderr: {stderr}");
+    assert!(stderr.contains("LLMS_TXT_EMPTY"), "stderr: {stderr}");
+}
+
+/// A link that does not resolve fails with the parse error: an absolute
+/// URL with an empty host cannot join.
+#[test]
+fn add_maps_an_unresolvable_link() {
+    let env = Env::new();
+    let fixture = write_manifest(
+        &env,
+        &serde_json::json!([
+            { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": "# Acme\n\n- [Bad](http://:80/page.md)\n" },
+        ]),
+    );
+    let config = write_config(&env, true);
+    let db = env.root.join("link.db");
+
+    let (code, _stdout, stderr) = output(env.cmd(), &add_args(&fixture, &config, &db, true));
+    assert_eq!(code, 3, "stderr: {stderr}");
+    assert!(stderr.contains("does not resolve"), "stderr: {stderr}");
+}
+
+/// An index whose links are all non-markdown fails with no ingestable
+/// pages.
+#[test]
+fn add_maps_no_ingestable_pages() {
+    let env = Env::new();
+    let fixture = write_manifest(
+        &env,
+        &serde_json::json!([
+            { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": "# Acme\n\n- [Printable](https://docs.acme.test/intro.html)\n" },
+        ]),
+    );
+    let config = write_config(&env, true);
+    let db = env.root.join("nomd.db");
+
+    let (code, _stdout, stderr) = output(env.cmd(), &add_args(&fixture, &config, &db, true));
+    assert_eq!(code, 3, "stderr: {stderr}");
+    assert!(
+        stderr.contains("no ingestable markdown pages"),
+        "stderr: {stderr}"
+    );
+}
+
+/// A fixture directory without a manifest fails with the fixture error.
+#[test]
+fn add_maps_a_missing_manifest() {
+    let env = Env::new();
+    let dir = env.root.join("no-manifest");
+    std::fs::create_dir_all(&dir).expect("fixture dir");
+    let config = write_config(&env, true);
+    let db = env.root.join("manifest.db");
+
+    let (code, _stdout, stderr) = output(env.cmd(), &add_args(&dir, &config, &db, true));
+    assert_eq!(code, 3, "stderr: {stderr}");
+    assert!(stderr.contains("fixture"), "stderr: {stderr}");
+}
+
+/// A store path that is a directory fails through the store error mapping.
+#[test]
+fn list_fails_when_the_db_path_is_a_directory() {
+    let env = Env::new();
+    let config = write_config(&env, true);
+    let db = env.root.join("as-dir.db");
+    std::fs::create_dir_all(&db).expect("db dir");
+
+    let (code, _stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "list",
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+            "--db",
+            db.to_str().expect("db path"),
+        ],
+    );
+    assert_eq!(code, 3, "stderr: {stderr}");
+    assert!(stderr.contains("UPSTREAM_ERROR"), "stderr: {stderr}");
+}
+
+/// A data directory the process cannot create fails before the store
+/// opens.
+#[cfg(unix)]
+#[test]
+fn list_fails_when_the_data_directory_cannot_be_created() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = Env::new();
+    let config = write_config(&env, true);
+    let sealed = env.root.join("sealed");
+    std::fs::create_dir_all(&sealed).expect("sealed dir");
+    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o500)).expect("mode set");
+
+    let (code, _stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "list",
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+            "--db",
+            sealed
+                .join("nested")
+                .join("docs.db")
+                .to_str()
+                .expect("db path"),
+        ],
+    );
+    std::fs::set_permissions(&sealed, std::fs::Permissions::from_mode(0o755))
+        .expect("mode restored");
+    assert_eq!(code, 3, "stderr: {stderr}");
+    assert!(stderr.contains("UPSTREAM_ERROR"), "stderr: {stderr}");
+}
+
+/// A revoked registry entry with no prior publish writes nothing: the
+/// withdrawal matches no row and the refusal still returns.
+#[test]
+fn add_with_a_revoked_source_and_no_prior_publish_writes_nothing() {
+    let env = Env::new();
+    let fixture = write_fixture(&env);
+    let config = write_config(&env, true);
+    let db = env.root.join("fresh-revoked.db");
+    std::fs::write(
+        &config,
+        concat!(
+            "[sources.acme]\n",
+            "kind = \"llms_txt\"\n",
+            "url = \"https://docs.acme.test/llms.txt\"\n",
+            "license = \"MIT\"\n",
+            "status = \"revoked\"\n"
+        ),
+    )
+    .expect("config written");
+
+    let (code, _stdout, stderr) = output(env.cmd(), &add_args(&fixture, &config, &db, true));
+    assert_eq!(code, 3, "stderr: {stderr}");
+    assert!(stderr.contains("FETCH_BLOCKED"), "stderr: {stderr}");
+    assert!(
+        devdocs_testkit::read_chunks(&db).unwrap().is_empty(),
+        "a fresh revoked add must publish nothing"
+    );
+}
+
 /// `db migrate` runs the startup migration and is idempotent.
 #[test]
 fn db_migrate_runs_and_is_idempotent() {
