@@ -13,6 +13,15 @@ devdocs-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+toml.workspace = true
+serde_yaml_ng.workspace = true
+
+[dev-dependencies]
+devdocs-testkit.workspace = true
+insta.workspace = true
+proptest.workspace = true
+rusqlite.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
