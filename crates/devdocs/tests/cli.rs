@@ -662,6 +662,83 @@ fn add_rejects_an_unsupported_kind() {
     assert!(!db.exists(), "a rejected add must not create the database");
 }
 
+/// A terminal registry status withdraws the previously published
+/// generation before the refusal returns: the revoked source deactivates
+/// and leaves retrieval, while a refusal without a terminal status still
+/// writes nothing (docs/09 §License gate enforcement points, point 3).
+#[test]
+fn add_refuses_a_revoked_source_and_withdraws_it() {
+    let env = Env::new();
+    let fixture = write_fixture(&env);
+    let config = write_config(&env, true);
+    let db = env.root.join("withdraw.db");
+
+    // First run publishes the source.
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "add",
+            "https://docs.acme.test/llms.txt",
+            "--fixture",
+            fixture.to_str().expect("fixture path"),
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+            "--db",
+            db.to_str().expect("db path"),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout} stderr: {stderr}");
+
+    // The registry status flips to revoked; the second run refuses.
+    std::fs::write(
+        &config,
+        concat!(
+            "[sources.acme]\n",
+            "kind = \"llms_txt\"\n",
+            "url = \"https://docs.acme.test/llms.txt\"\n",
+            "license = \"MIT\"\n",
+            "status = \"revoked\"\n"
+        ),
+    )
+    .expect("config rewritten");
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "add",
+            "https://docs.acme.test/llms.txt",
+            "--fixture",
+            fixture.to_str().expect("fixture path"),
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+            "--db",
+            db.to_str().expect("db path"),
+        ],
+    );
+    assert_eq!(code, 3, "stdout: {stdout} stderr: {stderr}");
+    assert!(stderr.contains("FETCH_BLOCKED"), "stderr: {stderr}");
+
+    // The withdrawal landed: the source is inactive with the recorded
+    // status, so retrieval no longer serves it.
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "list",
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+            "--db",
+            db.to_str().expect("db path"),
+        ],
+    );
+    assert_eq!(code, 0, "stdout: {stdout} stderr: {stderr}");
+    let envelope: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    let source = &envelope["results"][0];
+    assert_eq!(source["license_status"], "revoked");
+    assert_eq!(source["active"], false);
+}
+
 /// `db migrate` runs the startup migration and is idempotent.
 #[test]
 fn db_migrate_runs_and_is_idempotent() {

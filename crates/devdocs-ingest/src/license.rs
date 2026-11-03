@@ -30,18 +30,7 @@ pub struct LicenseGrant {
 /// recorded stage sits below `approved_fetch`; [`Error::ConfigInvalid`]
 /// when an entry carries an unparsable status string.
 pub fn gate_fetch(config: &Config, url: &Url) -> Result<LicenseGrant, Error> {
-    let mut match_result: Option<(String, &devdocs_model::config::SourceConfig)> = None;
-    for (name, entry) in &config.sources {
-        let Some(candidate) = entry.parsed_url(&format!("sources.{name}"))? else {
-            continue;
-        };
-        if candidate.as_str() == url.as_str() {
-            match_result = Some((name.clone(), entry));
-            break;
-        }
-    }
-
-    let Some((name, entry)) = match_result else {
+    let Some((name, entry)) = find_entry(config, url)? else {
         return Err(Error::Upstream {
             code: UpstreamCode::FetchBlocked,
             detail: format!(
@@ -80,6 +69,33 @@ pub fn gate_fetch(config: &Config, url: &Url) -> Result<LicenseGrant, Error> {
         license: entry.license.clone(),
         status,
     })
+}
+
+/// The registry status behind a gate refusal for `url`, when the URL has
+/// an entry with a parseable status. The add path uses it to withdraw a
+/// source whose license turned terminal before the refusal returns
+/// (docs/implementation/09 §License gate enforcement points); an unparsable
+/// status is a config error and withdraws nothing.
+#[must_use]
+pub fn refused_status(config: &Config, url: &Url) -> Option<LicenseStatus> {
+    let (_, entry) = find_entry(config, url).ok().flatten()?;
+    entry.status.as_deref().and_then(LicenseStatus::parse)
+}
+
+/// Finds the registry entry whose URL equals `url` exactly.
+fn find_entry<'a>(
+    config: &'a Config,
+    url: &Url,
+) -> Result<Option<(String, &'a devdocs_model::config::SourceConfig)>, Error> {
+    for (name, entry) in &config.sources {
+        let Some(candidate) = entry.parsed_url(&format!("sources.{name}"))? else {
+            continue;
+        };
+        if candidate.as_str() == url.as_str() {
+            return Ok(Some((name.clone(), entry)));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -205,5 +221,30 @@ mod tests {
             }
             other => panic!("expected ConfigInvalid, got {other:?}"),
         }
+    }
+
+    /// A refusal names the parsed registry status when one exists; a URL
+    /// without an entry or with an unparsable status withdraws nothing.
+    #[test]
+    fn refused_status_names_the_registry_entry() {
+        let revoked = config_with("acme", "https://docs.acme.test/llms.txt", Some("revoked"));
+        assert_eq!(
+            super::refused_status(&revoked, &url("https://docs.acme.test/llms.txt")),
+            Some(LicenseStatus::Revoked)
+        );
+        let unregistered = config_with(
+            "other",
+            "https://docs.other.test/llms.txt",
+            Some("approved_index"),
+        );
+        assert_eq!(
+            super::refused_status(&unregistered, &url("https://docs.acme.test/llms.txt")),
+            None
+        );
+        let unparsable = config_with("acme", "https://docs.acme.test/llms.txt", Some("approved"));
+        assert_eq!(
+            super::refused_status(&unparsable, &url("https://docs.acme.test/llms.txt")),
+            None
+        );
     }
 }

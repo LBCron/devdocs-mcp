@@ -61,10 +61,49 @@ fn map_store_error(error: &devdocs_store::StoreError) -> Error {
     }
 }
 
+/// A gate refusal carrying a terminal status (`denied`, `expired`,
+/// `revoked`) withdraws the previously published generation before the
+/// refusal returns, so a revoked registry entry takes its source out of
+/// retrieval even though the publish-time withdrawal never runs
+/// (docs/implementation/09 §License gate enforcement points, point 3).
+/// A refusal without a terminal status — no entry, `pending_review` —
+/// writes nothing. The refusal itself stays the outcome: a withdrawal
+/// failure logs and keeps the `FETCH_BLOCKED` answer.
+fn withdraw_on_terminal_refusal(config: &Config, index_url: &Url) {
+    let Some(status) =
+        devdocs_ingest::refused_status(config, index_url).filter(|status| status.is_terminal())
+    else {
+        return;
+    };
+    let Ok(store) = open_store(config, false) else {
+        return;
+    };
+    match store.withdraw_source_by_origin_url(index_url.as_str(), status) {
+        Ok(0) => {}
+        Ok(withdrawn) => {
+            tracing::info!(
+                status = status.as_str(),
+                withdrawn,
+                "withdrew the source on the gate refusal"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                status = status.as_str(),
+                "cannot withdraw the source on the gate refusal: {error}"
+            );
+        }
+    }
+}
+
 /// Runs `devdocs add <source>`.
 ///
 /// Order matters: the license gate fires before the store opens, so a
-/// refused source costs no bytes and writes no database.
+/// refused source costs no bytes and writes no database — except a refusal
+/// carrying a terminal status, which withdraws the previously published
+/// generation first (docs/implementation/09 §License gate enforcement
+/// points): the publish-time withdrawal cannot run, because this refusal
+/// happens before any publish.
 ///
 /// # Errors
 /// [`Error`] for the gate refusal (`FETCH_BLOCKED`), guard refusals and
@@ -78,7 +117,13 @@ pub fn run_add(
     let index_url = Url::parse(source).map_err(|e| Error::Usage(format!("bad source URL: {e}")))?;
 
     // 1. The license gate: deny by default, before any fetch or store open.
-    let grant = gate_fetch(config, &index_url)?;
+    let grant = match gate_fetch(config, &index_url) {
+        Ok(grant) => grant,
+        Err(error) => {
+            withdraw_on_terminal_refusal(config, &index_url);
+            return Err(error);
+        }
+    };
 
     // 2. The fixture set, when replaying.
     let fixture = fixture_dir

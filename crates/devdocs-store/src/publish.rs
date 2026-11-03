@@ -86,6 +86,27 @@ impl Store {
         }
     }
 
+    /// Records the terminal license state and deactivates every source
+    /// published from `origin_url`, whatever its library or version. The
+    /// add path calls this when the gate refuses a previously indexed
+    /// source: the refusal fires before any publish, so the publish-time
+    /// withdrawal cannot run. A source that was never published matches no
+    /// row. Returns the number of rows withdrawn.
+    pub fn withdraw_source_by_origin_url(
+        &self,
+        origin_url: &str,
+        status: devdocs_model::LicenseStatus,
+    ) -> Result<usize, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
+        let n = conn
+            .execute(
+                "UPDATE sources SET license_status = ?1, active = 0 WHERE origin_url = ?2",
+                params![status.as_str(), origin_url],
+            )
+            .map_err(StoreError::Sql)?;
+        Ok(n)
+    }
+
     /// Records the terminal license state and deactivates the matching
     /// source row. A source that was never published matches no row, and
     /// the single UPDATE is its own transaction.

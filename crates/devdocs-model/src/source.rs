@@ -138,6 +138,14 @@ impl LicenseStatus {
         }
     }
 
+    /// Whether the status is a terminal refusal: it ends the lifecycle, and
+    /// a source carrying it drops out of retrieval
+    /// (docs/implementation/09 §License gate enforcement points).
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Denied | Self::Expired | Self::Revoked)
+    }
+
     /// Whether the license gate lets a source flip to `active`.
     ///
     /// The store refuses to publish a source below the index stage
