@@ -8,11 +8,22 @@ repository.workspace = true
 description = "Evaluation harness for devdocs retrieval quality"
 
 [dependencies]
-devdocs-model.workspace = true
-devdocs-store.workspace = true
-devdocs-retrieve.workspace = true
-anyhow.workspace = true
 clap.workspace = true
+devdocs-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+devdocs-testkit.workspace = true
+insta.workspace = true
+proptest.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

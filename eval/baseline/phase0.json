@@ -1,0 +1,15 @@
+{
+  "recorded": "2026-11-02",
+  "workflow": "the current (pre-devdocs) docs workflow: hosted docs MCP plus web search over vendor docs pages",
+  "schema_rent": {
+    "band_tokens_per_tool": [550, 1400],
+    "source": "research: interfaces.md §1 (GEM §4 single-tool band)",
+    "notes": "raw multi-tool MCP dumps run 17,600–80,000 tokens (GLMP §1); a 1–2-tool docs surface costs 600–1,200 tokens, close to an 800-token CLI SKILL.md"
+  },
+  "per_query_cost": {
+    "hosted_api_usd_per_1000_queries": 1.66,
+    "raw_mcp_usd_per_1000_queries": 3.66,
+    "assumptions": "frontier list pricing ($3/M in, $15/M out); hosted API = 1,500-token schema + 4,000-token response + 300 output; raw MCP = 26,000-token schema rent amortized over a 10-query session (2,600 input/query) + 500 in / 1,500 out; modeled estimates, not invoices (GLMP Ch.9 Table 6)",
+    "source": "research: interfaces.md §1 (GLMP Ch.9 cost model)"
+  }
+}

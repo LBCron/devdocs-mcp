@@ -130,9 +130,12 @@ features:
     cargo build --locked -p devdocs --no-default-features --features exact-tokens
     cargo build --locked -p devdocs --no-default-features --features embeddings
 
-# Harmless eval harness smoke run (runner lands later).
+# Run the default eval suite and print the gate table (docs/implementation/14).
+# A gate that is not PASS exits 2 — the honest state until the retrieval
+# core lands at M4.
 eval:
-    cargo run -p devdocs-eval -- --help
+    cargo build --locked -p devdocs
+    cargo run -p devdocs-eval -- run pilot
 
 # Copy-paste detection across non-Rust sources.
 #

@@ -3,7 +3,7 @@ type: guide
 title: Benchmark and Eval Harness
 description: The golden-set format, the eval harness implementation, the gate metrics with thresholds, run artifacts, and the regression policy that wires the research benchmark protocol into devdocs.
 tags: [devdocs, eval, benchmark, golden-set, gates]
-timestamp: 2026-10-31T00:00:00Z
+timestamp: 2026-11-03T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -15,9 +15,10 @@ The research bundle states that no controlled docs-domain benchmark exists, and 
 ## Components
 
 - `crates/devdocs-eval` — the harness binary. Reads a suite, runs the retrieve crate, scores results, writes artifacts.
-- `eval/golden/*.jsonl` — golden question files, one suite per file.
+- `eval/golden/*.jsonl` — golden question files, one suite per file. A `<suite>.meta.json` sidecar next to a suite records the curation minutes.
 - `eval/runs/<date>-<suite>/` — run artifacts. Gitignored.
-- `just eval` — runs the default suite and prints the gate table. Until the harness binary lands at M10 ([12](12-roadmap-milestones.md)), the recipe is a smoke check: it runs `devdocs-eval -- --help` and stops.
+- `eval/baseline/*.json` — the standing Phase 0 baseline records (schema rent, per-query cost of the current docs workflow) that each run report carries.
+- `just eval` — runs the default pilot suite through the harness binary and prints the gate table. A gate that is not PASS exits 2, so the recipe reports the honest state until the retrieval core lands at M4 ([13](13-implementation-plan.md)).
 
 ## Golden-set format
 
@@ -51,7 +52,7 @@ Build a 20-question suite across 3 libraries before writing retrieval code. This
 ## Harness flow
 
 ```text
-devdocs eval run <suite> [--db PATH] [--json]
+devdocs-eval [--json] run <suite> [--db PATH]
   1. load suite, validate every question (version pinned, refs well-formed)
   2. for each question: run the retrieve pipeline, record hits, ranks, timings
   3. score per question, aggregate per task_type and overall
@@ -59,7 +60,9 @@ devdocs eval run <suite> [--db PATH] [--json]
   5. print the gate table; exit 0 when all gates PASS, 2 on any FAIL
 ```
 
-Timing note: the harness measures the in-process pipeline plus, in a second pass, the CLI subprocess end-to-end. The p95 gate is judged on the subprocess pass, cold-start excluded after one warmup call.
+`--json` is a top-level flag and precedes the subcommand. The harness binary is `devdocs-eval`. When the CLI subcommand wiring lands at M10 ([12](12-roadmap-milestones.md)), `devdocs eval run` proxies to it with the same flags. Exit codes: 0 every gate PASS; 1 invalid input (a broken suite, an unknown flag); 2 any gate FAIL or INCONCLUSIVE; 3 operational failure (a missing `devdocs` binary, I/O, a `devdocs search` call that exits nonzero or overshoots its 30-second deadline).
+
+Timing note: the harness measures the in-process pipeline plus, in a second pass, the CLI subprocess end-to-end. The p95 gate is judged on the subprocess pass, cold-start excluded after one warmup call. Until M4, the CLI `search` path is a placeholder. The p95 row then times process start and dispatch only, not retrieval. Every timed call must exit 0; a failed or stalled call fails the run with exit 3 instead of contributing its wall time to the gate.
 
 ## Metrics
 
@@ -67,12 +70,14 @@ Timing note: the harness measures the in-process pipeline plus, in a second pass
 |---|---|---|
 | hit@5 | Fraction of questions with at least one expected ref in the top 5 results | ≥ 0.8 |
 | symbol recall | Fraction of `expect_symbols` present in the symbol rung results for exact-lookup questions | ≥ 0.95 |
-| p95 latency | 95th percentile of CLI subprocess wall time across the suite | < 400 ms |
+| p95 latency | 95th percentile of CLI subprocess wall time across the suite. Until M4, the CLI `search` path is a placeholder, so the row times process start and dispatch only | < 400 ms |
 | cost per query | Model cost of the retrieval path (always $0 locally. Ingest embedding cost counted in Phase 3) | $0 |
 | failure rate | Fraction of questions with a wrong or partial result under the binary grader | baseline for the −49% Phase 2 delta |
 | version correctness | Fraction of results with `version_status = verified` where an exact version was requested | ≥ 0.99 |
 
 The binary grader: partial counts as wrong. The research protocol is explicit (research: benchmark-protocol.md Step 6).
+
+Denominators: hit@5 counts only questions with non-empty `expect_refs`; symbol recall counts pinned symbols; failure rate and version correctness count every question — an abstention with no results is not version-correct. The harness grades `ref_match` and `symbol_match`; a suite that carries the `manual` grader makes a run exit 1 until manual grading lands.
 
 ## Gate table
 

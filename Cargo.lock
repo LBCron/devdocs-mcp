@@ -869,11 +869,19 @@ dependencies = [
 name = "devdocs-eval"
 version = "0.2.2"
 dependencies = [
- "anyhow",
+ "assert_cmd",
  "clap",
- "devdocs-model",
- "devdocs-retrieve",
  "devdocs-store",
+ "devdocs-testkit",
+ "insta",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "time",
 ]
 
 [[package]]
