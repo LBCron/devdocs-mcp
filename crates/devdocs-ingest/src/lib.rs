@@ -11,6 +11,7 @@ pub mod guard;
 pub mod license;
 pub mod llms_txt;
 pub mod pipeline;
+pub mod relations;
 pub mod resolver;
 
 pub mod segment;

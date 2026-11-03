@@ -25,6 +25,7 @@ use crate::events::IngestEvents;
 use crate::fixture::FixtureSet;
 use crate::guard::FetchGuard;
 use crate::llms_txt::parse_llms_txt;
+use crate::relations::PageRelations;
 use crate::segment::Segmenter;
 
 /// The total ingest wall-time cap (docs/implementation/09 invariant 7: "by
@@ -138,7 +139,7 @@ impl<'a> IngestJob<'a> {
         // Relative links resolve against the URL the index actually came
         // from: a redirect can move it to another directory, and the
         // pre-redirect URL would join every link to the wrong base.
-        let (index_body, index_base) = self.fetch(index_url).await?;
+        let (index_body, index_base, _) = self.fetch(index_url).await?;
         let index = parse_llms_txt(&index_body, index_url.as_str())?;
         let segmenter = Segmenter::new()?;
         let mut run = RunState::default();
@@ -147,8 +148,10 @@ impl<'a> IngestJob<'a> {
             index_base: &index_base,
         };
         let mut docs: Vec<PageDocument> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
         for link in index.links() {
-            self.ingest_link(&ctx, link, &mut docs, &mut run).await?;
+            self.ingest_link(&ctx, link, &mut docs, &mut seen, &mut run)
+                .await?;
         }
 
         // Normalization runs off the async path over the whole corpus:
@@ -213,14 +216,17 @@ impl<'a> IngestJob<'a> {
         })
     }
 
-    /// Ingests one index link: resolve, skip non-markdown URLs and HTML
-    /// bodies, and buffer the body into the corpus. Segmentation happens
-    /// after the chrome strip, over the whole buffered corpus.
+    /// Ingests one index link: resolve, skip non-page URLs, fetch, prefer
+    /// the v2 markdown twin over an HTML body, and buffer the markdown body
+    /// into the corpus (docs/implementation/07 §llms.txt adapter rule 2).
+    /// Segmentation happens after the chrome strip, over the whole buffered
+    /// corpus.
     async fn ingest_link(
         &self,
         ctx: &LinkContext<'_>,
         link: &crate::llms_txt::LlmsLink,
         docs: &mut Vec<PageDocument>,
+        seen: &mut HashSet<String>,
         run: &mut RunState,
     ) -> Result<(), IngestError> {
         let page_url =
@@ -230,17 +236,67 @@ impl<'a> IngestJob<'a> {
                     url: ctx.index_url.to_string(),
                     reason: format!("link {:?} does not resolve: {e}", link.url()),
                 })?;
-        if !is_markdown_page(&page_url) {
-            tracing::warn!("skipping non-markdown link {}", page_url);
+        if !is_page_url(&page_url) {
+            tracing::warn!("skipping non-page link {}", page_url);
             run.events.skipped_pages += 1;
             return Ok(());
         }
-        let (body, _) = self.fetch(&page_url).await?;
+        if !seen.insert(page_url.to_string()) {
+            // The page already reached the corpus through another link;
+            // the dedup pass would collapse it anyway.
+            return Ok(());
+        }
+        let (body, _, link_headers) = self.fetch(&page_url).await?;
+        let response_relations = if is_html_body(&body) {
+            PageRelations::from_html(&body)
+        } else {
+            PageRelations::default()
+        };
+        let relations = PageRelations::from_link_headers(&link_headers)
+            .merge(response_relations)
+            .merge(PageRelations {
+                markdown_twin: link.markdown_twin().map(str::to_owned),
+                described_by: link.described_by().map(str::to_owned),
+            });
+
         if is_html_body(&body) {
-            tracing::warn!("markdown link {} returned an HTML body; skipping", page_url);
-            run.events.skipped_pages += 1;
+            // The markdown twin wins over the HTML page (docs/07 rule 2).
+            // Without one, the page falls back to its HTML path, which the
+            // media split skips: no HTML extractor exists in this slice
+            // (docs/implementation/07 §Media split).
+            let Some(twin) = relations.markdown_twin.clone() else {
+                tracing::warn!("html page {} carries no markdown twin; skipping", page_url);
+                run.events.skipped_pages += 1;
+                return Ok(());
+            };
+            let twin_url = page_url
+                .join(&twin)
+                .map_err(|e| IngestError::LlmsTxtInvalid {
+                    url: page_url.to_string(),
+                    reason: format!("markdown twin {twin:?} does not resolve: {e}"),
+                })?;
+            if !seen.insert(twin_url.to_string()) {
+                // The twin is already in the corpus through another route.
+                return Ok(());
+            }
+            let (twin_body, _, _) = self.fetch(&twin_url).await?;
+            if is_html_body(&twin_body) {
+                tracing::warn!(
+                    "markdown twin {} served HTML; {} falls back to its HTML path",
+                    twin_url,
+                    page_url
+                );
+                run.events.skipped_pages += 1;
+                return Ok(());
+            }
+            docs.push(PageDocument {
+                path: twin_url.to_string(),
+                body: twin_body,
+            });
+            run.events.markdown_twins_used += 1;
             return Ok(());
         }
+
         docs.push(PageDocument {
             path: page_url.to_string(),
             body,
@@ -285,9 +341,11 @@ impl<'a> IngestJob<'a> {
 
     /// Fetches one URL: the guard policy always runs; the bytes come from
     /// the fixture replay when one is loaded, else from the network.
-    /// Returns the body and the URL the response actually came from — the
-    /// requested URL in replay (no redirects), the final URL on the wire.
-    async fn fetch(&self, url: &Url) -> Result<(String, Url), IngestError> {
+    /// Returns the body, the URL the response actually came from — the
+    /// requested URL in replay (no redirects), the final URL on the wire —
+    /// and every `Link` header of the final response, which carry the v2
+    /// relations.
+    async fn fetch(&self, url: &Url) -> Result<(String, Url, Vec<String>), IngestError> {
         self.guard.check(url)?;
         if let Some(fixture) = self.fixture {
             let recorded = fixture.serve(url).ok_or_else(|| {
@@ -315,11 +373,12 @@ impl<'a> IngestJob<'a> {
                     limit,
                 }));
             }
-            return Ok((recorded.body.clone(), url.clone()));
+            let link_headers = recorded.headers.get("link").cloned().into_iter().collect();
+            return Ok((recorded.body.clone(), url.clone(), link_headers));
         }
-        let (bytes, final_url) = self.guard.get(url).await?;
+        let (bytes, final_url, link_headers) = self.guard.get_with_link_headers(url).await?;
         String::from_utf8(bytes.to_vec())
-            .map(|body| (body, final_url))
+            .map(|body| (body, final_url, link_headers))
             .map_err(|_| IngestError::LlmsTxtInvalid {
                 url: url.to_string(),
                 reason: String::from("the response is not valid UTF-8"),
@@ -407,17 +466,31 @@ fn is_html_body(body: &str) -> bool {
     head.starts_with("<!doctype html") || head.starts_with("<html")
 }
 
-/// Whether the URL path names a markdown page (the M3a slice ingests
-/// markdown only; the HTML adapter owns other page kinds).
-fn is_markdown_page(url: &Url) -> bool {
-    url.path()
-        .split('/')
-        .next_back()
-        .is_some_and(|last| last.to_ascii_lowercase().ends_with(".md"))
+/// Whether the URL path names a page the slice can ingest: markdown, HTML,
+/// or an extensionless directory-style path. The index and export files
+/// (`llms.txt`, `llms-full.txt`) are not pages.
+fn is_page_url(url: &Url) -> bool {
+    let Some(file) = url.path().split('/').next_back() else {
+        return false;
+    };
+    if file.is_empty() {
+        return true;
+    }
+    let Some((stem, ext)) = file.rsplit_once('.') else {
+        return true;
+    };
+    let stem = stem.to_ascii_lowercase();
+    let ext = ext.to_ascii_lowercase();
+    if (stem == "llms" || stem == "llms-full") && ext == "txt" {
+        return false;
+    }
+    matches!(ext.as_str(), "md" | "mdx" | "html" | "htm" | "xhtml")
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use super::*;
 
     /// An HTML body is detected case-insensitively after leading
@@ -443,6 +516,25 @@ mod tests {
     fn markdown_body_does_not_match() {
         assert!(!is_html_body("# Title\n\nbody text"));
         assert!(!is_html_body("\u{feff}# Titled"));
+    }
+
+    /// Page URLs span markdown, HTML, and extensionless paths; assets,
+    /// index files, and exports are not pages.
+    #[test]
+    fn page_urls_span_the_page_shapes() {
+        let url = |path: &str| Url::parse(&format!("https://x{path}")).unwrap();
+        for path in ["/intro.md", "/intro.mdx", "/intro.html", "/docs/intro", "/"] {
+            assert!(is_page_url(&url(path)), "{path}");
+        }
+        for path in [
+            "/llms.txt",
+            "/docs/llms.txt",
+            "/llms-full.txt",
+            "/logo.png",
+            "/spec.pdf",
+        ] {
+            assert!(!is_page_url(&url(path)), "{path}");
+        }
     }
 
     /// Duplicate pages collapse to the first occurrence; distinct pages

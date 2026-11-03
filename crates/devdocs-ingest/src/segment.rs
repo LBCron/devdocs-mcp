@@ -74,7 +74,7 @@ pub struct SegmentStats {
     /// range).
     pub skipped_blocks: usize,
     /// Fenced code blocks whose info string names a language outside
-    /// [`KNOWN_FENCE_LANGUAGES`].
+    /// the known fence language set of this module.
     pub unknown_fence_languages: usize,
 }
 

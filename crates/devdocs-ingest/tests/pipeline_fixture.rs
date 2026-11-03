@@ -14,13 +14,14 @@ use devdocs_model::error::{Error, UpstreamCode};
 use devdocs_model::source::LicenseStatus;
 use url::Url;
 
-/// The index body: two markdown links and one HTML link.
+/// The index body: one HTML page with a markdown twin, one HTML page
+/// without a twin, and one markdown page.
 const INDEX: &str = concat!(
     "# Acme\n\n> Acme widgets documentation.\n\n",
     "## Guides\n\n",
-    "- [Intro](https://docs.acme.test/intro.md): Start here\n",
-    "- [Advanced](https://docs.acme.test/advanced.md): Deep dive\n",
-    "- [Printable](https://docs.acme.test/intro.html): The HTML twin\n"
+    "- [Intro](https://docs.acme.test/intro.html): Start here\n",
+    "- [Faq](https://docs.acme.test/faq.html): No markdown twin\n",
+    "- [Advanced](https://docs.acme.test/advanced.md): Deep dive\n"
 );
 
 const INTRO: &str = concat!(
@@ -38,12 +39,30 @@ const ADVANCED: &str = concat!(
     "Pass the cursor to walk the whole list without double counting.\n"
 );
 
-/// Builds the fixture directory with the index and both pages.
+/// The intro HTML page: its `Link` header names the markdown twin
+/// (llmstxt.org v2: `rel="alternate" type="text/markdown"`).
+const INTRO_HTML: &str = concat!(
+    "<!doctype html><html><head>",
+    "<title>Intro</title>",
+    "</head><body><main><p>The Acme SDK ships a client for every runtime.</p></main></body></html>"
+);
+
+/// The faq HTML page: no markdown twin anywhere.
+const FAQ_HTML: &str =
+    "<!doctype html><html><body><p>Frequently asked questions about widgets.</p></body></html>";
+
+/// The `Link` header of the intro HTML page.
+const INTRO_TWIN_HEADER: &str =
+    "<https://docs.acme.test/intro.md>; rel=\"alternate\"; type=\"text/markdown\"";
+
+/// Builds the fixture directory with the index and every page it links.
 fn fixture_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let responses = serde_json::json!([
         { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": INDEX },
+        { "url": "https://docs.acme.test/intro.html", "status": 200, "headers": { "link": INTRO_TWIN_HEADER }, "body": INTRO_HTML },
         { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": INTRO },
+        { "url": "https://docs.acme.test/faq.html", "status": 200, "headers": {}, "body": FAQ_HTML },
         { "url": "https://docs.acme.test/advanced.md", "status": 200, "headers": {}, "body": ADVANCED },
     ]);
     std::fs::write(
@@ -148,10 +167,14 @@ async fn ingest_runs_index_to_published_chunks_offline() {
         .await
         .unwrap();
 
-    assert_eq!(outcome.pages, 2, "two markdown pages ingested");
-    assert_eq!(outcome.skipped_pages, 1, "the HTML twin is skipped");
+    assert_eq!(outcome.pages, 2, "the twin and the markdown page ingested");
+    assert_eq!(outcome.skipped_pages, 1, "the twin-less HTML page skips");
     assert!(outcome.chunks > 0);
     assert_eq!(outcome.license_status, LicenseStatus::ApprovedIndex);
+    assert_eq!(
+        outcome.events.markdown_twins_used, 1,
+        "the intro page ingested through its markdown twin"
+    );
 
     // The published content is searchable through the store.
     let hits = store
@@ -211,7 +234,9 @@ async fn ingest_fails_closed_on_a_missing_fixture_page() {
     // replay cannot serve it — the run must fail closed before publish.
     let responses = serde_json::json!([
         { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": INDEX },
+        { "url": "https://docs.acme.test/intro.html", "status": 200, "headers": { "link": INTRO_TWIN_HEADER }, "body": INTRO_HTML },
         { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": INTRO },
+        { "url": "https://docs.acme.test/faq.html", "status": 200, "headers": {}, "body": FAQ_HTML },
     ]);
     std::fs::write(
         dir.path().join("manifest.json"),
@@ -338,15 +363,17 @@ async fn fixture_replay_enforces_the_byte_cap() {
     }
 }
 
-/// A markdown link that serves an HTML document is skipped, not segmented:
-/// its markup never reaches the chunks (docs/implementation/07 §Media
-/// split).
+/// A markdown twin that serves an HTML document is unusable: its page falls
+/// back to the HTML path and skips, and its markup never reaches the chunks
+/// (docs/implementation/07 §Media split, §llms.txt adapter rule 2).
 #[tokio::test]
-async fn ingest_skips_a_markdown_link_that_serves_html() {
+async fn ingest_falls_back_when_a_markdown_twin_serves_html() {
     let dir = tempfile::tempdir().unwrap();
     let responses = serde_json::json!([
         { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": INDEX },
+        { "url": "https://docs.acme.test/intro.html", "status": 200, "headers": { "link": INTRO_TWIN_HEADER }, "body": INTRO_HTML },
         { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": "<!DOCTYPE html><html><body><p>not markdown</p></body></html>" },
+        { "url": "https://docs.acme.test/faq.html", "status": 200, "headers": {}, "body": FAQ_HTML },
         { "url": "https://docs.acme.test/advanced.md", "status": 200, "headers": {}, "body": ADVANCED },
     ]);
     std::fs::write(
@@ -368,11 +395,12 @@ async fn ingest_skips_a_markdown_link_that_serves_html() {
         .await
         .unwrap();
 
-    assert_eq!(outcome.pages, 1, "only the markdown body is ingested");
+    assert_eq!(outcome.pages, 1, "only the markdown page is ingested");
     assert_eq!(
         outcome.skipped_pages, 2,
-        "the HTML twin and the HTML body are both skipped"
+        "the twin-less page and the failed twin both skip"
     );
+    assert_eq!(outcome.events.markdown_twins_used, 0);
     let hits = store
         .search_fts(&devdocs_store::build_match_query("not markdown"), 10)
         .unwrap();
@@ -389,7 +417,9 @@ fn write_fixture_set(dir: &std::path::Path, responses: &serde_json::Value) -> Fi
 fn content_responses() -> serde_json::Value {
     serde_json::json!([
         { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": INDEX },
+        { "url": "https://docs.acme.test/intro.html", "status": 200, "headers": { "link": INTRO_TWIN_HEADER }, "body": INTRO_HTML },
         { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": INTRO },
+        { "url": "https://docs.acme.test/faq.html", "status": 200, "headers": {}, "body": FAQ_HTML },
         { "url": "https://docs.acme.test/advanced.md", "status": 200, "headers": {}, "body": ADVANCED },
     ])
 }
@@ -421,7 +451,9 @@ async fn ingest_rejects_a_run_that_segments_to_zero_chunks() {
     let heading_only = "# Intro\n\n## Install\n\n### Notes\n";
     let responses = serde_json::json!([
         { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": INDEX },
+        { "url": "https://docs.acme.test/intro.html", "status": 200, "headers": { "link": INTRO_TWIN_HEADER }, "body": INTRO_HTML },
         { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": heading_only },
+        { "url": "https://docs.acme.test/faq.html", "status": 200, "headers": {}, "body": FAQ_HTML },
         { "url": "https://docs.acme.test/advanced.md", "status": 200, "headers": {}, "body": heading_only },
     ]);
     let fixture = write_fixture_set(dir.path(), &responses);

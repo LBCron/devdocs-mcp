@@ -335,6 +335,22 @@ impl FetchGuard {
     /// # Errors
     /// [`GuardError`] when any check refuses or the transport fails.
     pub async fn get(&self, url: &Url) -> Result<(bytes::Bytes, Url), GuardError> {
+        self.get_with_link_headers(url)
+            .await
+            .map(|(bytes, url, _)| (bytes, url))
+    }
+
+    /// Fetches like [`Self::get`] and additionally returns every `Link`
+    /// header value of the final response, lower-cased name — the v2 link
+    /// relations ride these (llmstxt.org v2: HTML `<link>` elements or an
+    /// HTTP `Link:` header).
+    ///
+    /// # Errors
+    /// [`GuardError`] when any check refuses or the transport fails.
+    pub async fn get_with_link_headers(
+        &self,
+        url: &Url,
+    ) -> Result<(bytes::Bytes, Url, Vec<String>), GuardError> {
         self.check(url)?;
         // One deadline spans the DNS lookup and the request: the lookup
         // spends from it, and the request gets only the time left
@@ -403,7 +419,15 @@ impl FetchGuard {
             }
             body.extend_from_slice(&chunk);
         }
-        Ok((bytes::Bytes::from(body), final_url))
+        // The link relations of the final response: every `Link` header
+        // value, verbatim, for the v2 relations parser.
+        let link_headers: Vec<String> = response
+            .headers()
+            .get_all(reqwest::header::LINK)
+            .iter()
+            .filter_map(|value| value.to_str().ok().map(str::to_owned))
+            .collect();
+        Ok((bytes::Bytes::from(body), final_url, link_headers))
     }
 
     /// The redirect policy: every hop re-runs the URL checks before the

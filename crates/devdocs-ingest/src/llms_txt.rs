@@ -14,6 +14,8 @@ pub struct LlmsLink {
     title: String,
     url: String,
     description: Option<String>,
+    markdown_twin: Option<String>,
+    described_by: Option<String>,
 }
 
 impl LlmsLink {
@@ -33,6 +35,21 @@ impl LlmsLink {
     #[must_use]
     pub fn description(&self) -> Option<&str> {
         self.description.as_deref()
+    }
+
+    /// The markdown twin the v2 `rel="alternate" type="text/markdown"`
+    /// hint names, when present (docs/implementation/07 §llms.txt adapter
+    /// rule 2).
+    #[must_use]
+    pub fn markdown_twin(&self) -> Option<&str> {
+        self.markdown_twin.as_deref()
+    }
+
+    /// The covering index the v2 `rel="describedby"` hint names, when
+    /// present (docs/implementation/07 §llms.txt adapter rule 2).
+    #[must_use]
+    pub fn described_by(&self) -> Option<&str> {
+        self.described_by.as_deref()
     }
 }
 
@@ -277,17 +294,104 @@ fn parse_link_line(line: &str) -> Option<LlmsLink> {
     if title.trim().is_empty() || url.trim().is_empty() {
         return None;
     }
-    let description = after[url_end + 1..]
+    // The optional parenthesized per-page hints sit before the colon
+    // (docs/implementation/07 §llms.txt adapter rule 2):
+    // `- [Page](url) (rel="alternate" type="text/markdown" twin-url): notes`.
+    let (hint_text, tail) = split_hints(&after[url_end + 1..]);
+    let description = tail
         .trim()
         .strip_prefix(':')
         .map(str::trim)
         .filter(|desc| !desc.is_empty())
         .map(str::to_owned);
+    let (markdown_twin, described_by) = parse_hints(&hint_text);
     Some(LlmsLink {
         title: title.to_owned(),
         url: url.to_owned(),
         description,
+        markdown_twin,
+        described_by,
     })
+}
+
+/// Splits the text after a link destination into the optional
+/// parenthesized hint group and the tail after it. No group means the
+/// whole text is the tail.
+fn split_hints(tail: &str) -> (String, &str) {
+    let trimmed_start = tail.trim_start();
+    let Some(rest) = trimmed_start.strip_prefix('(') else {
+        return (String::new(), tail);
+    };
+    let mut depth = 1usize;
+    for (offset, ch) in rest.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return (rest[..offset].to_owned(), &rest[offset + 1..]);
+                }
+            }
+            _ => {}
+        }
+    }
+    (String::new(), tail)
+}
+
+/// Parses the v2 relations out of one hint group: `rel="alternate"
+/// type="text/markdown" twin-url` and `rel="describedby" index-url`. The
+/// target URL is the first token that is not a `rel=` or `type=`
+/// parameter.
+fn parse_hints(hint: &str) -> (Option<String>, Option<String>) {
+    let tokens: Vec<&str> = hint.split_whitespace().collect();
+    let mut twin = None;
+    let mut described = None;
+    let mut index = 0usize;
+    while index < tokens.len() {
+        let Some(rel) = tokens[index]
+            .strip_prefix("rel=")
+            .map(|value| value.trim_matches('"'))
+        else {
+            index += 1;
+            continue;
+        };
+        match rel {
+            "alternate" => {
+                let mut markdown_type = false;
+                let mut target = None;
+                let mut scan = index + 1;
+                while scan < tokens.len() && !tokens[scan].starts_with("rel=") {
+                    // Quotes can sit inside a token (`type="text/markdown"`),
+                    // so strip every quote, not only edge ones.
+                    let token = tokens[scan].replace('"', "");
+                    if token.eq_ignore_ascii_case("type=text/markdown") {
+                        markdown_type = true;
+                    } else if !token.starts_with("type=") && target.is_none() {
+                        target = Some(token);
+                    }
+                    scan += 1;
+                }
+                if markdown_type {
+                    twin = target;
+                }
+                index = scan;
+            }
+            "describedby" => {
+                let mut scan = index + 1;
+                while scan < tokens.len() && !tokens[scan].starts_with("rel=") {
+                    let token = tokens[scan].replace('"', "");
+                    if !token.starts_with("type=") {
+                        described = Some(token);
+                        break;
+                    }
+                    scan += 1;
+                }
+                index = scan;
+            }
+            _ => index += 1,
+        }
+    }
+    (twin, described)
 }
 
 #[cfg(test)]
@@ -494,5 +598,58 @@ mod tests {
         assert_eq!(index.links().count(), 2);
         assert_eq!(link_at(&index, 0, 0).2, Some("desc one"));
         assert_eq!(link_at(&index, 0, 1).2, None);
+    }
+
+    /// The v2 parenthesized hints parse: the markdown twin and the
+    /// covering index. The description after the hints still parses
+    /// (docs/implementation/07 §llms.txt adapter rule 2).
+    #[test]
+    fn v2_hints_carry_the_relations() {
+        let index = parse_llms_txt(
+            concat!(
+                "# T\n\n",
+                "- [Guide](https://x/guide.html) (rel=\"alternate\" type=\"text/markdown\" https://x/guide.md): notes\n",
+                "- [Api](https://x/api.html) (rel=\"describedby\" /x/api/llms.txt)\n",
+                "- [Plain](https://x/plain.md)\n",
+            ),
+            "u",
+        )
+        .unwrap();
+        assert_eq!(index.links().count(), 3);
+        assert_eq!(
+            index.links().next().unwrap().markdown_twin(),
+            Some("https://x/guide.md")
+        );
+        assert_eq!(index.links().next().unwrap().description(), Some("notes"));
+        let api = index.links().nth(1).unwrap();
+        assert_eq!(api.described_by(), Some("/x/api/llms.txt"));
+        assert_eq!(api.markdown_twin(), None);
+        let plain = index.links().nth(2).unwrap();
+        assert_eq!(plain.markdown_twin(), None);
+        assert_eq!(plain.described_by(), None);
+    }
+
+    /// A `rel="alternate"` hint without the markdown type names no twin.
+    #[test]
+    fn alternate_hint_needs_the_markdown_type() {
+        let index = parse_llms_txt(
+            "# T\n\n- [Pdf](https://x/doc.pdf) (rel=\"alternate\" type=\"application/pdf\" https://x/doc.pdf)\n",
+            "u",
+        )
+        .unwrap();
+        assert_eq!(index.links().next().unwrap().markdown_twin(), None);
+    }
+
+    /// An unterminated hint group leaves the line as a plain link.
+    #[test]
+    fn unterminated_hints_do_not_break_the_line() {
+        let index = parse_llms_txt(
+            "# T\n\n- [Guide](https://x/guide.html) (rel=\"alternate\" never closed\n",
+            "u",
+        )
+        .unwrap();
+        let link = index.links().next().unwrap();
+        assert_eq!(link.markdown_twin(), None);
+        assert_eq!(link.url(), "https://x/guide.html");
     }
 }
