@@ -19,7 +19,7 @@ use crate::fusion::fuse;
 use crate::item::{match_ref, to_result_item};
 use crate::resolver::{ProjectContext, Query, resolve};
 use crate::rung::{Scope, fts_rung, symbol_rung};
-use crate::version::{is_migration_query, pick, version_cmp};
+use crate::version::{Version, is_migration_query, pick};
 
 /// The search/open knobs the CLI carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,14 +77,18 @@ pub fn search(
         Option<String>,
         Option<String>,
     ) = if let Some(library) = &resolved.library {
-        let available = store.library_versions(library)?;
+        let available: Vec<Version> = store
+            .library_versions(library)?
+            .into_iter()
+            .map(Version::from)
+            .collect();
         if available.is_empty() {
             return Err(MissReason::NotIndexed.into());
         }
         let pick = pick(&available, resolved.version.as_deref());
         let served = pick.version.clone().ok_or(MissReason::NotIndexed)?;
         let source_id = store
-            .find_source(library, &served)?
+            .find_source(library, served.as_str())?
             .ok_or(MissReason::NotIndexed)?;
         let scope = Scope::Source(source_id);
         rung_hits.push(fts_rung(store, &query.text, scope, headroom)?);
@@ -94,7 +98,7 @@ pub fn search(
         // served_version (docs/08 §Version resolution).
         if is_migration_query(&query.text)
             && let Some(older) = nearest_older(&available, &served)
-            && let Some(older_id) = store.find_source(library, &older)?
+            && let Some(older_id) = store.find_source(library, older.as_str())?
         {
             rung_hits.push(fts_rung(
                 store,
@@ -103,7 +107,11 @@ pub fn search(
                 headroom,
             )?);
         }
-        (pick.status, Some(served), resolved.version.clone())
+        (
+            pick.status,
+            Some(served.as_str().to_owned()),
+            resolved.version.clone(),
+        )
     } else {
         // Unfiltered fallback: search all approved sources. Per-item
         // status is the alias default (no version requested).
@@ -179,11 +187,11 @@ fn scope_for(resolved: &crate::resolver::Resolved) -> Scope<'_> {
 
 /// The highest version strictly below the served one — the migration
 /// rung's second target.
-fn nearest_older(available: &[String], served: &str) -> Option<String> {
+fn nearest_older(available: &[Version], served: &Version) -> Option<Version> {
     available
         .iter()
-        .filter(|v| version_cmp(v, served) == std::cmp::Ordering::Less)
-        .max_by(|a, b| version_cmp(a, b))
+        .filter(|v| v.cmp_version(served) == std::cmp::Ordering::Less)
+        .max_by(|a, b| a.cmp_version(b))
         .cloned()
 }
 

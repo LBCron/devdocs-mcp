@@ -24,4 +24,4 @@ pub use resolver::{
 };
 pub use rung::{Scope, fts_rung, symbol_rung};
 pub use serve::Plan;
-pub use version::version_cmp;
+pub use version::{Version, version_cmp};

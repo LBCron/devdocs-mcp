@@ -19,6 +19,50 @@ use std::cmp::Ordering;
 
 use devdocs_model::VersionStatus;
 
+/// One exact version string as the store and the refs spell it: bare
+/// (no leading `v`), dot-separated numeric components.
+///
+/// Ordering never derives from the inner string; it goes through
+/// [`Version::cmp_version`] (and the free [`version_cmp`] on raw
+/// `&str`s).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Version(String);
+
+impl Version {
+    /// Wraps a bare version string.
+    #[must_use]
+    pub fn new(s: String) -> Self {
+        Self(s)
+    }
+
+    /// The version string as the store and the refs spell it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Compares two versions by their dotted numeric components,
+    /// numerically and left to right, padding missing components with
+    /// zero (`16` < `16.2` < `16.2.9`). Non-numeric suffixes compare
+    /// lexically as a last resort.
+    #[must_use]
+    pub fn cmp_version(&self, other: &Version) -> Ordering {
+        version_cmp(&self.0, &other.0)
+    }
+}
+
+impl From<String> for Version {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for Version {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
 /// Compares two version strings by their dotted numeric components,
 /// numerically and left to right, padding missing components with zero
 /// (`16` < `16.2` < `16.2.9`). Non-numeric suffixes compare lexically as
@@ -71,15 +115,17 @@ pub fn version_cmp(a: &str, b: &str) -> Ordering {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Served {
     /// The version that serves, when the library has active sources.
-    pub version: Option<String>,
+    pub version: Option<Version>,
     /// The status the served results carry.
     pub status: VersionStatus,
 }
 
 /// Picks the version that serves a request from the library's available
 /// versions (descending version order is not required; the picker sorts).
+/// The request arrives raw — it can be `latest`, a major alias, an exact
+/// version, or absent.
 #[must_use]
-pub fn pick(available: &[String], requested: Option<&str>) -> Served {
+pub fn pick(available: &[Version], requested: Option<&str>) -> Served {
     if available.is_empty() {
         return Served {
             version: None,
@@ -101,14 +147,14 @@ pub fn pick(available: &[String], requested: Option<&str>) -> Served {
             status: VersionStatus::Alias,
         };
     }
-    if available.iter().any(|v| v == requested) {
+    if available.iter().any(|v| v.as_str() == requested) {
         return Served {
-            version: Some(requested.to_owned()),
+            version: Some(Version::from(requested)),
             status: VersionStatus::Verified,
         };
     }
     if is_major_alias(requested) {
-        let same_major: Vec<String> = available
+        let same_major: Vec<Version> = available
             .iter()
             .filter(|v| major_of(v).as_deref() == Some(requested))
             .cloned()
@@ -124,14 +170,14 @@ pub fn pick(available: &[String], requested: Option<&str>) -> Served {
     // numeric distance; never silently `latest` (docs/08 §Version
     // resolution policy).
     Served {
-        version: nearest(available, requested),
+        version: nearest(available, &Version::from(requested)),
         status: VersionStatus::Fallback,
     }
 }
 
-/// The highest version by [`version_cmp`].
-fn highest(available: &[String]) -> Option<String> {
-    available.iter().max_by(|a, b| version_cmp(a, b)).cloned()
+/// The highest version by [`Version::cmp_version`].
+fn highest(available: &[Version]) -> Option<Version> {
+    available.iter().max_by(|a, b| a.cmp_version(b)).cloned()
 }
 
 /// A major alias: one dotted component, all digits (`16`, not `16.2`).
@@ -140,8 +186,8 @@ fn is_major_alias(requested: &str) -> bool {
 }
 
 /// The leading numeric component of a version.
-fn major_of(version: &str) -> Option<String> {
-    let head = version.split('.').next()?;
+fn major_of(version: &Version) -> Option<String> {
+    let head = version.as_str().split('.').next()?;
     if head.chars().all(|c| c.is_ascii_digit()) && !head.is_empty() {
         Some(head.to_owned())
     } else {
@@ -153,13 +199,13 @@ fn major_of(version: &str) -> Option<String> {
 /// closest numeric distance `|Δmajor|·10⁶ + |Δminor|·10³ + |Δpatch|` with
 /// missing components read as zero; with no shared major the same
 /// distance rule applies across majors, so the closest major serves.
-fn nearest(available: &[String], requested: &str) -> Option<String> {
+fn nearest(available: &[Version], requested: &Version) -> Option<Version> {
     let req_major = major_of(requested).unwrap_or_default();
-    let same_major: Vec<&String> = available
+    let same_major: Vec<&Version> = available
         .iter()
         .filter(|v| major_of(v).as_deref() == Some(req_major.as_str()))
         .collect();
-    let candidates: Vec<&String> = if same_major.is_empty() {
+    let candidates: Vec<&Version> = if same_major.is_empty() {
         available.iter().collect()
     } else {
         same_major
@@ -173,9 +219,9 @@ fn nearest(available: &[String], requested: &str) -> Option<String> {
 /// The numeric distance between two versions on their dotted components,
 /// weighted per position (docs/implementation/08 §Version resolution:
 /// "the nearest available version").
-fn version_distance(candidate: &str, requested: &str) -> u64 {
-    let mut cand = candidate.split('.').map(component_head);
-    let mut req = requested.split('.').map(component_head);
+fn version_distance(candidate: &Version, requested: &Version) -> u64 {
+    let mut cand = candidate.as_str().split('.').map(component_head);
+    let mut req = requested.as_str().split('.').map(component_head);
     let mut distance: u64 = 0;
     let mut weight: u64 = 1_000_000;
     for _ in 0..3 {
@@ -224,12 +270,12 @@ pub fn is_migration_query(text: &str) -> bool {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{Served, is_major_alias, is_migration_query, pick, version_cmp};
+    use super::{Served, Version, is_major_alias, is_migration_query, pick, version_cmp};
     use devdocs_model::VersionStatus;
     use std::cmp::Ordering;
 
-    fn versions(list: &[&str]) -> Vec<String> {
-        list.iter().map(|s| (*s).to_owned()).collect()
+    fn versions(list: &[&str]) -> Vec<Version> {
+        list.iter().map(|s| Version::from(*s)).collect()
     }
 
     /// Numeric component-wise comparison with zero padding.
@@ -242,6 +288,19 @@ mod tests {
         assert_eq!(version_cmp("1.0.0-beta", "1.0.0"), Ordering::Less);
     }
 
+    /// The newtype compares through the same rule as [`version_cmp`].
+    #[test]
+    fn the_newtype_compares_through_version_cmp() {
+        assert_eq!(
+            Version::from("16").cmp_version(&Version::from("16.2.9")),
+            Ordering::Less
+        );
+        assert_eq!(
+            Version::from("1.0.0").cmp_version(&Version::from("1.0.0-beta")),
+            Ordering::Greater
+        );
+    }
+
     /// An exact request serves itself as `verified`.
     #[test]
     fn exact_requests_verify() {
@@ -249,7 +308,7 @@ mod tests {
         assert_eq!(
             pick(&available, Some("16.2.9")),
             Served {
-                version: Some("16.2.9".to_owned()),
+                version: Some(Version::from("16.2.9")),
                 status: VersionStatus::Verified,
             }
         );
@@ -264,7 +323,7 @@ mod tests {
             assert_eq!(
                 pick(&available, request),
                 Served {
-                    version: Some("16.2.9".to_owned()),
+                    version: Some(Version::from("16.2.9")),
                     status: VersionStatus::Alias,
                 }
             );
@@ -278,7 +337,7 @@ mod tests {
         assert_eq!(
             pick(&available, Some("16")),
             Served {
-                version: Some("16.2.10".to_owned()),
+                version: Some(Version::from("16.2.10")),
                 status: VersionStatus::Alias,
             }
         );
@@ -292,7 +351,7 @@ mod tests {
         assert_eq!(
             pick(&available, Some("16.2.10")),
             Served {
-                version: Some("16.2.9".to_owned()),
+                version: Some(Version::from("16.2.9")),
                 status: VersionStatus::Fallback,
             }
         );
@@ -301,14 +360,14 @@ mod tests {
         assert_eq!(
             pick(&available, Some("9.0.0")),
             Served {
-                version: Some("15.0.0".to_owned()),
+                version: Some(Version::from("15.0.0")),
                 status: VersionStatus::Fallback,
             }
         );
         assert_eq!(
             pick(&available, Some("20.0.0")),
             Served {
-                version: Some("16.2.9".to_owned()),
+                version: Some(Version::from("16.2.9")),
                 status: VersionStatus::Fallback,
             }
         );
