@@ -151,8 +151,8 @@ fn major_of(version: &str) -> Option<String> {
 
 /// The nearest available version to a request: same major first, then the
 /// closest numeric distance `|Δmajor|·10⁶ + |Δminor|·10³ + |Δpatch|` with
-/// missing components read as zero; without a shared major, the highest
-/// version serves.
+/// missing components read as zero; with no shared major the same
+/// distance rule applies across majors, so the closest major serves.
 fn nearest(available: &[String], requested: &str) -> Option<String> {
     let req_major = major_of(requested).unwrap_or_default();
     let same_major: Vec<&String> = available
@@ -296,7 +296,15 @@ mod tests {
                 status: VersionStatus::Fallback,
             }
         );
-        // No version shares the major: the highest serves.
+        // No version shares the major: the distance rule applies across
+        // majors, so the closest major serves — 15 is nearer to 9 than 16.
+        assert_eq!(
+            pick(&available, Some("9.0.0")),
+            Served {
+                version: Some("15.0.0".to_owned()),
+                status: VersionStatus::Fallback,
+            }
+        );
         assert_eq!(
             pick(&available, Some("20.0.0")),
             Served {

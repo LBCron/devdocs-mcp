@@ -48,7 +48,7 @@ Policy (research: retrieval-design.md §3.4): never serve `latest` silently when
 | `fallback` | Requested version absent. Served the nearest available version, named in the result. Counts as a miss for grading |
 | `absent` | Library absent from the index. Exit 2 with `miss_reason` |
 
-The declared rules the implementation applies: the alias rule serves the highest active version, and the highest active version within the requested major for a major alias (`16`); a request with no version at all serves the highest active version under the same alias rule. The fallback rule serves the nearest available version — same major first, closest numeric distance `|Δmajor|·10⁶ + |Δminor|·10³ + |Δpatch|`; when no version shares the major, the highest active version serves.
+The declared rules the implementation applies: the alias rule serves the highest active version, and the highest active version within the requested major for a major alias (`16`); a request with no version at all serves the highest active version under the same alias rule. The fallback rule serves the nearest available version — same major first, closest numeric distance `|Δmajor|·10⁶ + |Δminor|·10³ + |Δpatch|`; with no shared major the same distance rule applies across majors, so the closest major serves.
 
 Migration questions: when the query matches a migration pattern ("upgrade", "migrate", "breaking changes"), the planner retrieves both the served version and the nearest older version and labels them (research: retrieval-design.md §3.4).
 
