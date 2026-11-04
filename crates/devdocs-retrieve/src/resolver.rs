@@ -144,20 +144,25 @@ pub struct Resolved {
 /// Resolves the `(library, version)` a query should scope to.
 ///
 /// Per-field precedence: a flag beats the lockfile in its field, and a
-/// field the flags leave open falls to the lockfile. The resolution source
-/// is the strongest layer that contributed anything.
+/// field the flags leave open falls to the lockfile — but a lockfile
+/// entry never donates its version to a library the flag named unless
+/// the entry is that library. The resolution source is the strongest
+/// layer that contributed anything.
 #[must_use]
 pub fn resolve(query: &Query, ctx: &ProjectContext) -> Resolved {
-    let lockfile = ctx
-        .deps
-        .iter()
-        .find(|dep| {
+    // The lockfile contributes only to a library the flag leaves open,
+    // and only an entry that names the flagged library — an unrelated
+    // lockfile entry never donates its version to a flagged library.
+    let lockfile = if query.library.is_some() {
+        ctx.deps.iter().find(|dep| {
             query
                 .library
                 .as_deref()
-                .is_none_or(|flag| dep.library.eq_ignore_ascii_case(flag))
+                .is_some_and(|flag| dep.library.eq_ignore_ascii_case(flag))
         })
-        .or_else(|| ctx.deps.first());
+    } else {
+        ctx.deps.first()
+    };
 
     let mut library = query
         .library
@@ -654,11 +659,19 @@ mod tests {
             files: Vec::new(),
         };
 
-        // Flag beats the lockfile in the field the flag fills.
+        // Flag beats the lockfile in the field the flag fills; an
+        // unrelated lockfile entry never donates its version to a flagged
+        // library.
         let flag = resolve(&Query::new("routing", Some("react"), None), &ctx);
         assert_eq!(flag.library.as_deref(), Some("react"));
-        assert_eq!(flag.version.as_deref(), Some("16.2.9"));
+        assert_eq!(flag.version, None, "no lockfile entry names react");
         assert_eq!(flag.source, ResolutionSource::Flag);
+
+        // A lockfile entry that names the flagged library still pins it.
+        let matched = resolve(&Query::new("routing", Some("next.js"), None), &ctx);
+        assert_eq!(matched.library.as_deref(), Some("next.js"));
+        assert_eq!(matched.version.as_deref(), Some("16.2.9"));
+        assert_eq!(matched.source, ResolutionSource::Flag);
 
         // Lockfile wins over a query mention.
         let lockfile = resolve(&Query::new("react 18 routing", None, None), &ctx);

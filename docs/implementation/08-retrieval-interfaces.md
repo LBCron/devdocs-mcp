@@ -39,6 +39,8 @@ Order, highest first:
 3. Query text mentions (`next.js 16`) as a weak hint.
 4. Fallback: no library filter. Search all approved sources.
 
+The precedence applies per field: a flag beats the lockfile in the field it fills, and a field the flags leave open falls to the lockfile — but a lockfile entry never donates its version to a library a flag named unless the entry is that library.
+
 Policy (research: retrieval-design.md §3.4): never serve `latest` silently when a version was requested. The result carries `requested_version`, `served_version`, and `version_status`:
 
 | Status | Meaning |
