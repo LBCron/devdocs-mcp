@@ -16,23 +16,33 @@ pub const RRF_K_DEFAULT: u32 = 60;
 ///
 /// Each rung list must already be in its own best-first order; positions
 /// become the ranks (1-based). A chunk seen in several rungs accumulates
-/// its scores; its [`Hit`] comes from the first rung that carried it.
-/// Output order: score descending, ties by lower chunk id — byte-identical
-/// for identical rung inputs.
+/// its scores — summed in a canonical order, so the fused output is
+/// bit-identical under rung reordering; its [`Hit`] comes from the first
+/// rung that carried it. Output order: score descending, ties by lower
+/// chunk id — byte-identical for identical rung inputs.
 #[must_use]
 pub fn fuse(k: u32, rungs: &[Vec<Hit>]) -> Vec<(Hit, f64)> {
-    let mut scores: HashMap<i64, f64> = HashMap::new();
+    let mut contributions: HashMap<i64, Vec<f64>> = HashMap::new();
     let mut hits: HashMap<i64, Hit> = HashMap::new();
     for rung in rungs {
         for (position, hit) in rung.iter().enumerate() {
             let rank = f64::from(u32::try_from(position + 1).unwrap_or(u32::MAX));
-            *scores.entry(hit.chunk_id).or_insert(0.0) += 1.0 / (f64::from(k) + rank);
+            contributions
+                .entry(hit.chunk_id)
+                .or_default()
+                .push(1.0 / (f64::from(k) + rank));
             hits.entry(hit.chunk_id).or_insert_with(|| hit.clone());
         }
     }
-    let mut fused: Vec<(Hit, f64)> = scores
+    let mut fused: Vec<(Hit, f64)> = contributions
         .into_iter()
-        .filter_map(|(chunk_id, score)| hits.remove(&chunk_id).map(|hit| (hit, score)))
+        .filter_map(|(chunk_id, mut parts)| {
+            // Canonical order: equal ranks produce equal contributions, so
+            // sorting before the sum is permutation-invariant.
+            parts.sort_by(f64::total_cmp);
+            let score = parts.iter().sum();
+            hits.remove(&chunk_id).map(|hit| (hit, score))
+        })
         .collect();
     fused.sort_by(|a, b| {
         b.1.total_cmp(&a.1)
