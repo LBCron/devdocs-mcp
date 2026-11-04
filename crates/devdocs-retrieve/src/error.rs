@@ -27,10 +27,9 @@ pub enum UsageError {
     /// A `docs://` ref that does not parse.
     #[error("malformed ref {0:?}: expected docs://<library>/v<version>/<path>[#<fragment>]")]
     BadRef(String),
-    /// A `--cursor` that does not parse.
-    #[error("malformed cursor {0:?}")]
-    BadCursor(String),
-    /// A cursor naming a chunk the query does not serve.
+    /// A cursor naming a chunk the query does not serve. A non-numeric
+    /// cursor never reaches the serve layer: clap's `u64` parser rejects
+    /// it at the flag edge.
     #[error("cursor {0} is not in this query's fusion order")]
     UnknownCursor(String),
 }
