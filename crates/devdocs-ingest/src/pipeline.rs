@@ -167,8 +167,9 @@ impl<'a> IngestJob<'a> {
     /// (docs/implementation/07 §llms.txt adapter rule 4). A FIFO queue is
     /// breadth-first — the root scope drains before the subpath scopes it
     /// discovered, so the most specific llms.txt governs every page it
-    /// covers. A page linked by a shallower scope but covered by a deeper
-    /// one waits for the deeper scope.
+    /// covers. A page a queued deeper scope covers and lists itself defers
+    /// to that scope's turn, so the deeper listing — with its own relation
+    /// hints — is what ingests.
     async fn walk_scopes(
         &self,
         root: Scope,
@@ -197,15 +198,18 @@ impl<'a> IngestJob<'a> {
                 }
             }
 
-            // (b) The scope's pages. A page covered by a deeper scope is
-            // deferred to that scope's turn; the most specific index wins
+            // (b) The scope's pages. A page a queued deeper scope covers
+            // and lists itself defers to that scope's turn — the deeper
+            // listing wins, with its own relation hints
             // (docs/implementation/07 §llms.txt adapter rule 4).
             for link in scope.index.links() {
                 let link_url = resolve_link(scope, link.url())?;
                 if is_index_url(&link_url) || !is_page_url(&link_url) {
                     continue;
                 }
-                if most_specific_scope(&scopes, &link_url) != Some(scope_index) {
+                if most_specific_scope(&scopes, &link_url) != Some(scope_index)
+                    || deferred_to_queued(&pending, &link_url)
+                {
                     continue;
                 }
                 let described = self.ingest_link(link_url, link, docs, seen, run).await?;
@@ -554,6 +558,24 @@ fn most_specific_scope(scopes: &[Scope], page_url: &Url) -> Option<usize> {
         .filter(|(_index, scope)| page_url.path().starts_with(scope.dir.path()))
         .max_by_key(|(_index, scope)| scope.dir.path().len())
         .map(|(index, _scope)| index)
+}
+
+/// Whether a queued scope covers `page_url` and lists it itself: the page
+/// then defers to the deeper scope's turn, whose own listing — with its
+/// own relation hints — ingests it. A deeper scope that covers the page
+/// without listing it leaves the shallower listing in charge: the more
+/// specific index that actually describes the page is the one whose hints
+/// apply.
+fn deferred_to_queued(pending: &std::collections::VecDeque<Scope>, page_url: &Url) -> bool {
+    pending.iter().any(|scope| {
+        page_url.path().starts_with(scope.dir.path())
+            && scope.index.links().any(|link| {
+                scope
+                    .join_base
+                    .join(link.url())
+                    .is_ok_and(|listed| listed == *page_url)
+            })
+    })
 }
 
 /// Collapses duplicate pages by canonical body hash: the first occurrence
