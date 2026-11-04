@@ -64,7 +64,7 @@ Migration questions: when the query matches a migration pattern ("upgrade", "mig
 
 Reciprocal rank fusion with k = 60: `score(d) = Σ_rungs 1 / (60 + rank_rung(d))`. Ties break by lower chunk id (stable order, property-tested). The Redis production eval measured hybrid hit@3 at 0.96 against vector-only 0.88 with this mechanism (research: retrieval-design.md §3.1).
 
-The budget packer walks results in fusion order, accumulates stored `token_count` values, and stops before `max_tokens`. Properties: rank 1 always fits (a result larger than the whole budget is chunked at open time, never dropped). The envelope sets `truncated: true` and a `next_cursor` when content remains. The packer never silently drops the top result (research: retrieval-design.md §3.6).
+The budget packer walks results in fusion order, accumulates stored `token_count` values, and stops before `max_tokens`. Properties: rank 1 always fits (a result larger than the whole budget is chunked at open time, never dropped). The envelope sets `truncated: true` and a `next_cursor` when content remains. The packer never silently drops the top result (research: retrieval-design.md §3.6). The same exception governs `open`: the chunk's first line always serves, so an `open` page can exceed `--max-tokens` by one line rather than deliver an empty page.
 
 `max_tokens` default: 2000. The research bundle records a contested spread — DS says 2000 to 4000, GEM's reference uses 1000, GLMP recommends a 1000 to 2000 server-side ceiling. This design takes GLMP's ceiling and DS's floor: 2000, enforced server-side in both the CLI and the MCP path. Per-profile overrides live in config (research: retrieval-design.md §3.6. Recorded, not averaged).
 
