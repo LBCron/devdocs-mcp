@@ -1,0 +1,49 @@
+---
+source: crates/devdocs-ingest/tests/llms_txt_snapshots.rs
+assertion_line: 58
+expression: snapshot_index(&index)
+---
+{
+  "sections": [
+    {
+      "heading": "Getting Started",
+      "links": [
+        {
+          "described_by": null,
+          "description": "What Acme Widgets does and who it is for",
+          "markdown_twin": null,
+          "title": "Introduction",
+          "url": "https://docs.acme.dev/introduction.md"
+        },
+        {
+          "described_by": null,
+          "description": "Install the SDK and make a first API call",
+          "markdown_twin": null,
+          "title": "Quickstart",
+          "url": "https://docs.acme.dev/quickstart.md"
+        }
+      ]
+    },
+    {
+      "heading": "API Reference",
+      "links": [
+        {
+          "described_by": null,
+          "description": "API keys and scopes",
+          "markdown_twin": null,
+          "title": "Authentication",
+          "url": "https://docs.acme.dev/api-reference/authentication.md"
+        },
+        {
+          "described_by": null,
+          "description": "Cursor pagination over list endpoints",
+          "markdown_twin": null,
+          "title": "Pagination",
+          "url": "https://docs.acme.dev/api-reference/pagination.md"
+        }
+      ]
+    }
+  ],
+  "summary": "Documentation for the Acme Widgets API and SDKs. The index follows the Mintlify-style shape: one H2 group per docs area, one `.md` link per page.",
+  "title": "Acme Widgets"
+}

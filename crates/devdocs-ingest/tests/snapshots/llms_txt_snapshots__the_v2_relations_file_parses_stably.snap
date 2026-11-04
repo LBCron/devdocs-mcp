@@ -1,0 +1,42 @@
+---
+source: crates/devdocs-ingest/tests/llms_txt_snapshots.rs
+assertion_line: 82
+expression: snapshot_index(&index)
+---
+{
+  "sections": [
+    {
+      "heading": "Guides",
+      "links": [
+        {
+          "described_by": null,
+          "description": "Start here, the markdown twin wins over the HTML page",
+          "markdown_twin": "https://docs.acme.dev/intro.md",
+          "title": "Intro",
+          "url": "https://docs.acme.dev/intro.html"
+        },
+        {
+          "described_by": "https://docs.acme.dev/api/llms.txt",
+          "description": "API authentication, covered by the api subpath index",
+          "markdown_twin": null,
+          "title": "Auth",
+          "url": "https://docs.acme.dev/api/auth.html"
+        }
+      ]
+    },
+    {
+      "heading": "Optional",
+      "links": [
+        {
+          "described_by": null,
+          "description": "No twin, the page falls back to its HTML path",
+          "markdown_twin": null,
+          "title": "Blog",
+          "url": "https://docs.acme.dev/blog.html"
+        }
+      ]
+    }
+  ],
+  "summary": "Documentation for the Acme Widgets API and SDKs, with the llms.txt v2 link relations: the parenthesized per-page hints name a markdown twin and a covering subpath index.",
+  "title": "Acme Widgets v2"
+}
