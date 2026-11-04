@@ -24,11 +24,11 @@ struct Seeded {
     dir: tempfile::TempDir,
 }
 
-fn seeded() -> Seeded {
-    let dir = tempdir().unwrap();
-    let store = devdocs_testkit::open_migrated(&dir.path().join("docs.db")).unwrap();
-    let conn = Connection::open(dir.path().join("docs.db")).unwrap();
-    let v16 = devdocs_testkit::seed_source(&conn, "next.js", true).unwrap();
+/// Inserts the raw `sources` rows: active next.js at 15.0.0, inactive zod,
+/// and repoints the `seed_source` next.js row at its real version and
+/// origin. Returns the (next.js 16, next.js 15, zod) source ids.
+fn seeded_sources(conn: &Connection) -> (i64, i64, i64) {
+    let v16 = devdocs_testkit::seed_source(conn, "next.js", true).unwrap();
     // seed_source pins version 1.0.0 with a per-library origin; the second
     // next.js source needs distinct (version, origin) values to clear the
     // UNIQUE (library, version, kind, origin_url) constraint.
@@ -40,15 +40,21 @@ fn seeded() -> Seeded {
     )
     .unwrap();
     let v15 = conn.last_insert_rowid();
-    let zod = devdocs_testkit::seed_source(&conn, "zod", false).unwrap();
+    let zod = devdocs_testkit::seed_source(conn, "zod", false).unwrap();
     // Repoint the first next.js source at its real version and origin.
     conn.execute(
         "UPDATE sources SET version = '16.2.9', origin_url = 'https://example.test/16' WHERE source_id = ?1",
         rusqlite::params![v16],
     )
     .unwrap();
+    (v16, v15, zod)
+}
+
+/// Seeds two chunks on the next.js 16 source and one each on the next.js
+/// 15 and zod sources.
+fn seed_chunks(conn: &Connection, v16: i64, v15: i64, zod: i64) {
     devdocs_testkit::seed_chunk(
-        &conn,
+        conn,
         v16,
         0,
         "[\"Routing\"]",
@@ -57,7 +63,7 @@ fn seeded() -> Seeded {
     )
     .unwrap();
     devdocs_testkit::seed_chunk(
-        &conn,
+        conn,
         v16,
         1,
         "[\"Storage\"]",
@@ -66,7 +72,7 @@ fn seeded() -> Seeded {
     )
     .unwrap();
     devdocs_testkit::seed_chunk(
-        &conn,
+        conn,
         v15,
         0,
         "[\"Routing\"]",
@@ -74,15 +80,16 @@ fn seeded() -> Seeded {
         "Routing in version 15 used a pages directory.",
     )
     .unwrap();
-    devdocs_testkit::seed_chunk(
-        &conn,
-        zod,
-        0,
-        "[\"Parse\"]",
-        None,
-        "parse validates schema.",
-    )
-    .unwrap();
+    devdocs_testkit::seed_chunk(conn, zod, 0, "[\"Parse\"]", None, "parse validates schema.")
+        .unwrap();
+}
+
+fn seeded() -> Seeded {
+    let dir = tempdir().unwrap();
+    let store = devdocs_testkit::open_migrated(&dir.path().join("docs.db")).unwrap();
+    let conn = Connection::open(dir.path().join("docs.db")).unwrap();
+    let (v16, v15, zod) = seeded_sources(&conn);
+    seed_chunks(&conn, v16, v15, zod);
     Seeded {
         store,
         v16,
