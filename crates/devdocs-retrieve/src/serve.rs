@@ -11,7 +11,7 @@ use std::path::Path;
 use devdocs_model::envelope::{ResultEnvelope, ResultItem, SourceSummary};
 use devdocs_model::error::MissReason;
 use devdocs_model::{VersionStatus, now_rfc3339};
-use devdocs_store::Store;
+use devdocs_store::{Hit, Store};
 
 use crate::budget::pack;
 use crate::error::{RetrieveError, UsageError};
@@ -198,10 +198,7 @@ fn nearest_older(available: &[String], served: &str) -> Option<String> {
 pub fn open(store: &Store, doc_ref: &str, plan: &Plan) -> Result<ResultEnvelope, RetrieveError> {
     let parsed = devdocs_model::docref::ParsedRef::parse(doc_ref)
         .ok_or_else(|| UsageError::BadRef(doc_ref.to_owned()))?;
-
-    let source_id = resolve_source(store, &parsed.library, &parsed.version)?;
-    let chunks = store.source_chunks(source_id)?;
-    let chunk = match_ref(&chunks, &parsed).ok_or(MissReason::LowConfidence)?;
+    let chunk = resolve_chunk(store, &parsed)?;
 
     // Page the chunk text through the budget. The per-char token cost
     // scales from the stored token_count, so the estimate is stable for
@@ -239,26 +236,7 @@ pub fn open(store: &Store, doc_ref: &str, plan: &Plan) -> Result<ResultEnvelope,
         None
     };
 
-    let item = ResultItem {
-        doc_ref: doc_ref.to_owned(),
-        title: chunk
-            .section_path
-            .last()
-            .cloned()
-            .unwrap_or_else(|| chunk.library.clone()),
-        section: chunk.section_path.join(" > "),
-        snippet: page.clone(),
-        examples: Vec::new(),
-        source_url: chunk.source_url.clone(),
-        source_commit: chunk.source_commit.clone().unwrap_or_default(),
-        requested_version: Some(parsed.version.clone()),
-        served_version: chunk.version.clone(),
-        version_status: VersionStatus::Verified,
-        content_hash: crate::item::hex(&chunk.content_hash),
-        license_status: chunk.license_status.clone(),
-        confidence: 1.0,
-        token_count: used,
-    };
+    let item = served_item(&chunk, doc_ref, Some(&parsed.version), page, used, 1.0);
 
     Ok(ResultEnvelope {
         results: vec![item],
@@ -279,6 +257,55 @@ fn resolve_source(store: &Store, library: &str, version: &str) -> Result<i64, Re
         .ok_or_else(|| MissReason::VersionAbsent.into())
 }
 
+/// Resolves a parsed ref to the chunk that serves it: the ref's active
+/// source ([`resolve_source`], keeping its cold-miss mapping), that
+/// source's chunks, and the ref match
+/// ([`MissReason::LowConfidence`] when nothing matches).
+fn resolve_chunk(
+    store: &Store,
+    parsed: &devdocs_model::docref::ParsedRef,
+) -> Result<Hit, RetrieveError> {
+    let source_id = resolve_source(store, &parsed.library, &parsed.version)?;
+    let chunks = store.source_chunks(source_id)?;
+    let chunk = match_ref(&chunks, parsed).ok_or(MissReason::LowConfidence)?;
+    Ok(chunk.clone())
+}
+
+/// Builds the envelope item both ref-serving paths return. `open` and
+/// `verify` each serve an exact pinned ref version, so the status is
+/// always [`VersionStatus::Verified`] and the confidence full; `snippet`,
+/// `token_count`, and `confidence` come from the caller because `open`
+/// serves a budgeted page while `verify` serves the stored chunk.
+fn served_item(
+    chunk: &Hit,
+    doc_ref: &str,
+    requested_version: Option<&str>,
+    snippet: String,
+    token_count: u64,
+    confidence: f64,
+) -> ResultItem {
+    ResultItem {
+        doc_ref: doc_ref.to_owned(),
+        title: chunk
+            .section_path
+            .last()
+            .cloned()
+            .unwrap_or_else(|| chunk.library.clone()),
+        section: chunk.section_path.join(" > "),
+        snippet,
+        examples: Vec::new(),
+        source_url: chunk.source_url.clone(),
+        source_commit: chunk.source_commit.clone().unwrap_or_default(),
+        requested_version: requested_version.map(str::to_owned),
+        served_version: chunk.version.clone(),
+        version_status: VersionStatus::Verified,
+        content_hash: crate::item::hex(&chunk.content_hash),
+        license_status: chunk.license_status.clone(),
+        confidence,
+        token_count,
+    }
+}
+
 /// Re-derives the content hash of the chunk a ref names and compares it
 /// to the stored value (docs/implementation/06 §Hashing policy). The hash
 /// covers the canonical body — the stored text without the contextual
@@ -291,9 +318,7 @@ fn resolve_source(store: &Store, library: &str, version: &str) -> Result<i64, Re
 pub fn verify(store: &Store, doc_ref: &str) -> Result<ResultEnvelope, RetrieveError> {
     let parsed = devdocs_model::docref::ParsedRef::parse(doc_ref)
         .ok_or_else(|| UsageError::BadRef(doc_ref.to_owned()))?;
-    let source_id = resolve_source(store, &parsed.library, &parsed.version)?;
-    let chunks = store.source_chunks(source_id)?;
-    let chunk = match_ref(&chunks, &parsed).ok_or(MissReason::LowConfidence)?;
+    let chunk = resolve_chunk(store, &parsed)?;
 
     // Reconstruct the ingest-time contextual header
     // (docs/implementation/07 §Normalization pipeline stage 4) and strip
@@ -322,26 +347,14 @@ pub fn verify(store: &Store, doc_ref: &str) -> Result<ResultEnvelope, RetrieveEr
         )));
     }
 
-    let item = ResultItem {
-        doc_ref: doc_ref.to_owned(),
-        title: chunk
-            .section_path
-            .last()
-            .cloned()
-            .unwrap_or_else(|| chunk.library.clone()),
-        section: chunk.section_path.join(" > "),
-        snippet: chunk.snippet.clone().unwrap_or_else(|| chunk.text.clone()),
-        examples: Vec::new(),
-        source_url: chunk.source_url.clone(),
-        source_commit: chunk.source_commit.clone().unwrap_or_default(),
-        requested_version: Some(parsed.version.clone()),
-        served_version: chunk.version.clone(),
-        version_status: VersionStatus::Verified,
-        content_hash: crate::item::hex(&chunk.content_hash),
-        license_status: chunk.license_status.clone(),
-        confidence: 1.0,
-        token_count: u64::from(chunk.token_count),
-    };
+    let item = served_item(
+        &chunk,
+        doc_ref,
+        Some(&parsed.version),
+        chunk.snippet.clone().unwrap_or_else(|| chunk.text.clone()),
+        u64::from(chunk.token_count),
+        1.0,
+    );
 
     Ok(ResultEnvelope {
         results: vec![item],
