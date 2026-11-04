@@ -152,19 +152,46 @@ fn parse_link_value(link_value: &str) -> Option<(String, LinkParams)> {
 }
 
 /// Drops HTML comments from the body: `<!-- ... -->` is removed; an
-/// unterminated comment drops the rest of the input.
+/// unterminated comment drops the rest of the input. An inline
+/// `<script>` span plus its `</script ...>` close tag is copied verbatim
+/// first — a `<!--` in script text is not a comment and must not hide the
+/// elements after it; with no close tag, the rest of the input is copied.
 fn strip_html_comments(body: &str) -> String {
+    let lower = body.to_ascii_lowercase();
     let mut out = String::with_capacity(body.len());
-    let mut rest = body;
-    while let Some(start) = rest.find("<!--") {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 4..];
-        match after.find("-->") {
-            Some(end) => rest = &after[end + 3..],
-            None => return out,
+    let mut at = 0usize;
+    loop {
+        let comment = body[at..].find("<!--").map(|i| at + i);
+        let script = lower[at..].find("<script").map(|i| at + i);
+        let next = match (comment, script) {
+            (Some(c), Some(s)) => c.min(s),
+            (Some(c), None) | (None, Some(c)) => c,
+            (None, None) => break,
+        };
+        if script == Some(next) {
+            // Script text: copy the open tag, its content, and the close
+            // tag verbatim; with no close tag, copy the rest.
+            let after_open = lower[next..].find('>').map_or(body.len(), |i| next + i + 1);
+            if let Some(i) = lower[after_open..].find("</script") {
+                let tag = after_open + i;
+                let end = lower[tag..].find('>').map_or(body.len(), |j| tag + j + 1);
+                out.push_str(&body[at..end]);
+                at = end;
+            } else {
+                out.push_str(&body[at..]);
+                return out;
+            }
+        } else {
+            let after = next + 4;
+            out.push_str(&body[at..next]);
+            if let Some(end) = body[after..].find("-->") {
+                at = after + end + 3;
+            } else {
+                return out;
+            }
         }
     }
-    out.push_str(rest);
+    out.push_str(&body[at..]);
     out
 }
 
@@ -380,6 +407,17 @@ mod tests {
             "<!-- <link rel=\"alternate\" type=\"text/markdown\" href=\"/old.md\"",
         );
         assert_eq!(relations.markdown_twin, None);
+    }
+
+    /// A `<!--` inside inline `<script>` text is not a comment: the
+    /// script span is copied verbatim and the twin after it is found.
+    #[test]
+    fn script_text_comment_marker_does_not_hide_the_twin() {
+        let relations = PageRelations::from_html(concat!(
+            "<script>var x = a <!-- b; if (x) { init(); }</script>",
+            "<link rel=\"alternate\" type=\"text/markdown\" href=\"/twin.md\">",
+        ));
+        assert_eq!(relations.markdown_twin.as_deref(), Some("/twin.md"));
     }
 
     /// Whitespace may surround the `=` between an attribute name and its
