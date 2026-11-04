@@ -258,12 +258,18 @@ fn remove_blocks(body: &mut String, mut dropped: Vec<Range<usize>>) {
         if range.start < cursor {
             continue; // overlapping drops: already removed
         }
-        let keep_until = run_before(range.start).max(cursor);
-        out.push_str(&original[cursor..keep_until]);
         let mut next = range.end.min(original.len());
         while next < original.len() && matches!(bytes[next], b' ' | b'\t' | b'\r' | b'\n') {
             next += 1;
         }
+        // A tail block takes the separator before it. A middle block keeps
+        // that separator, so the kept blocks on either side stay apart.
+        let keep_until = if next == original.len() {
+            run_before(range.start).max(cursor)
+        } else {
+            range.start.max(cursor)
+        };
+        out.push_str(&original[cursor..keep_until]);
         cursor = next;
     }
     out.push_str(&original[cursor.min(original.len())..]);
@@ -382,6 +388,23 @@ mod tests {
         assert!(
             pages[2].body.contains("We use cookies"),
             "a short cookie mention without the call to action survives"
+        );
+    }
+
+    /// A dropped middle block keeps the separator before it, so the kept
+    /// paragraphs on either side stay apart.
+    #[test]
+    fn middle_dropped_block_keeps_paragraphs_apart() {
+        let mut pages = vec![page(
+            "https://x/a.md",
+            "# Guide\n\nFirst paragraph.\n\nWe use cookies to improve your experience. [Accept all](/accept)\n\nSecond paragraph.\n",
+        )];
+        let report = strip_chrome(&mut pages);
+        assert_eq!(report.pattern_drops, 1);
+        assert!(!pages[0].body.contains("We use cookies"), "banner dropped");
+        assert_eq!(
+            pages[0].body, "# Guide\n\nFirst paragraph.\n\nSecond paragraph.\n",
+            "the kept paragraphs stay separated by a blank line"
         );
     }
 
