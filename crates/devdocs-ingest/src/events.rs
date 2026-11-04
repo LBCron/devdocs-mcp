@@ -50,65 +50,36 @@ impl IngestEvents {
         tracing::info!(
             pages = self.pages,
             skipped_pages = self.skipped_pages,
-            "ingest events: {pages} pages, {skipped_pages} skipped pages",
-            pages = self.pages,
-            skipped_pages = self.skipped_pages,
+            "ingest events: {} pages, {} skipped pages",
+            self.pages,
+            self.skipped_pages,
         );
-        if self.skipped_blocks > 0 {
-            tracing::info!(
-                skipped_blocks = self.skipped_blocks,
-                "ingest events: {count} blocks skipped for carrying no content",
-                count = self.skipped_blocks
-            );
-        }
-        if self.chrome_pattern_drops > 0 {
-            tracing::info!(
-                chrome_pattern_drops = self.chrome_pattern_drops,
-                "ingest events: {count} blocks dropped by the chrome pattern rules",
-                count = self.chrome_pattern_drops
-            );
-        }
-        if self.unknown_fence_languages > 0 {
-            tracing::info!(
-                unknown_fence_languages = self.unknown_fence_languages,
-                "ingest events: {count} fenced blocks carry an unknown language",
-                count = self.unknown_fence_languages,
-            );
-        }
-        if self.chrome_drops > 0 {
-            tracing::info!(
-                chrome_drops = self.chrome_drops,
-                "ingest events: {count} blocks dropped as repeated chrome",
-                count = self.chrome_drops,
-            );
-        }
-        if self.dedup_dropped_pages > 0 {
-            tracing::info!(
-                dedup_dropped_pages = self.dedup_dropped_pages,
-                "ingest events: {count} duplicate pages collapsed",
-                count = self.dedup_dropped_pages,
-            );
-        }
-        if self.markdown_twins_used > 0 {
-            tracing::info!(
-                markdown_twins_used = self.markdown_twins_used,
-                "ingest events: {count} pages ingested via their markdown twin",
-                count = self.markdown_twins_used,
-            );
-        }
-        if self.subpath_indexes > 0 {
-            tracing::info!(
-                subpath_indexes = self.subpath_indexes,
-                "ingest events: {count} subpath indexes scoped",
-                count = self.subpath_indexes,
-            );
-        }
-        if self.full_exports > 0 {
-            tracing::info!(
-                full_exports = self.full_exports,
-                "ingest events: {count} llms-full exports ingested",
-                count = self.full_exports,
-            );
+        let counters = [
+            (
+                "blocks skipped for carrying no content",
+                self.skipped_blocks,
+            ),
+            (
+                "blocks dropped by the chrome pattern rules",
+                self.chrome_pattern_drops,
+            ),
+            (
+                "fenced blocks carry an unknown language",
+                self.unknown_fence_languages,
+            ),
+            ("blocks dropped as repeated chrome", self.chrome_drops),
+            ("duplicate pages collapsed", self.dedup_dropped_pages),
+            (
+                "pages ingested via their markdown twin",
+                self.markdown_twins_used,
+            ),
+            ("subpath indexes scoped", self.subpath_indexes),
+            ("llms-full exports ingested", self.full_exports),
+        ];
+        for (category, count) in counters {
+            if count > 0 {
+                tracing::info!(count, category, "ingest event: {category}: {count}",);
+            }
         }
     }
 }

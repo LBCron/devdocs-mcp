@@ -593,9 +593,10 @@ fn deferred_to_queued(pending: &std::collections::VecDeque<Scope>, page_url: &Ur
 /// Collapses duplicate pages by canonical body hash: the first occurrence
 /// of a SHA-256 content hash stays, every later duplicate drops. The hash
 /// is the store's canonical hash (CRLF folds to LF), so twins that differ
-/// only in line endings collapse too
-/// (docs/implementation/07 §Normalization pipeline stage 6). Returns the
-/// dropped count.
+/// only in line endings collapse too — a deliberate refinement of the
+/// ticket's raw "compares SHA-256" wording: line-ending twins are the same
+/// page (docs/implementation/07 §Normalization pipeline stage 6). Returns
+/// the dropped count.
 fn dedup_pages(docs: &mut Vec<PageDocument>) -> usize {
     let before = docs.len();
     let mut seen: HashSet<[u8; 32]> = HashSet::new();
