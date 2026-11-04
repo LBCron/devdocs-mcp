@@ -1,0 +1,28 @@
+---
+source: crates/devdocs/tests/search_cli.rs
+assertion_line: 130
+expression: envelope
+---
+{
+  "next_cursor": null,
+  "results": [
+    {
+      "confidence": "<confidence>",
+      "content_hash": "fb8adc6c950632386423664f080a0f983f74ebc434a5d856a0a2bd76ebf929a8",
+      "examples": [],
+      "license_status": "approved_index",
+      "ref": "docs://acme/v1.0/intro",
+      "requested_version": null,
+      "section": "Intro",
+      "served_version": "1.0",
+      "snippet": "[acme 1.0 › Intro]\n\nThe Acme SDK ships a <mark>client</mark> for every runtime.",
+      "source_commit": "",
+      "source_url": "https://docs.acme.test/llms.txt",
+      "title": "Intro",
+      "token_count": 17,
+      "version_status": "alias"
+    }
+  ],
+  "served_at": "<served_at>",
+  "truncated": false
+}
