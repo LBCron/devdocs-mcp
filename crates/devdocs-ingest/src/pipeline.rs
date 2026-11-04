@@ -10,7 +10,7 @@
 //! store state never diverges from the reported outcome. A run that never
 //! reaches publish leaves the store untouched.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use devdocs_model::config::Config;
@@ -178,12 +178,14 @@ impl<'a> IngestJob<'a> {
     /// discovered, so the most specific llms.txt governs every page it
     /// covers. A page a queued deeper scope covers and lists itself defers
     /// to that scope's turn, so the deeper listing — with its own relation
-    /// hints — is what ingests.
+    /// hints — is what ingests; a page already buffered through a shallower
+    /// listing is re-fetched there and its deeper listing replaces the
+    /// buffered document in place.
     async fn walk_scopes(
         &self,
         root: Scope,
         docs: &mut Vec<PageDocument>,
-        seen: &mut HashSet<String>,
+        seen: &mut HashMap<String, usize>,
         run: &mut RunState,
     ) -> Result<(), IngestError> {
         let mut scopes: Vec<Scope> = Vec::new();
@@ -300,7 +302,7 @@ impl<'a> IngestJob<'a> {
         let segmenter = Segmenter::new()?;
         let mut run = RunState::default();
         let mut docs: Vec<PageDocument> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut seen: HashMap<String, usize> = HashMap::new();
         self.walk_scopes(root, &mut docs, &mut seen, &mut run)
             .await?;
 
@@ -366,32 +368,26 @@ impl<'a> IngestJob<'a> {
         })
     }
 
-    /// Ingests one already-resolved page link: skip non-page URLs, fetch,
-    /// prefer the v2 markdown twin over an HTML body, and buffer the
-    /// markdown body into the corpus (docs/implementation/07 §llms.txt
-    /// adapter rule 2). Segmentation happens after the chrome strip, over
-    /// the whole buffered corpus. Returns the page's `rel="describedby"`
-    /// index URL, when the page response or the index hint named one.
+    /// Ingests one already-resolved page link: fetch, prefer the v2
+    /// markdown twin over an HTML body, and buffer the markdown body into
+    /// the corpus (docs/implementation/07 §llms.txt adapter rule 2).
+    /// Segmentation happens after the chrome strip, over the whole buffered
+    /// corpus. `seen` maps every URL to the buffered document it produced;
+    /// a duplicate hit re-fetches the page and, when this listing produces
+    /// a document, replaces the buffered one in place — the most specific
+    /// listing wins (docs/implementation/07 §llms.txt adapter rule 4). A
+    /// listing that produces nothing leaves the buffered document standing.
+    /// Returns the page's `rel="describedby"` index URL, when the page
+    /// response or the index hint named one.
     async fn ingest_link(
         &self,
         page_url: Url,
         link: &crate::llms_txt::LlmsLink,
         docs: &mut Vec<PageDocument>,
-        seen: &mut HashSet<String>,
+        seen: &mut HashMap<String, usize>,
         run: &mut RunState,
     ) -> Result<Option<Url>, IngestError> {
-        // The duplicate path returns before any fetch, so the only relation
-        // hint available is the one the listing link itself carries.
-        let hint = link
-            .described_by()
-            .and_then(|named| page_url.join(named).ok())
-            .filter(is_index_url);
-        if !seen.insert(page_url.to_string()) {
-            // The page already reached the corpus through another link;
-            // the dedup pass would collapse it anyway. Its describedby hint
-            // still stands: it names a scope that may open new pages.
-            return Ok(hint);
-        }
+        let slot = seen.get(&page_url.to_string()).copied();
         let (body, final_url, link_headers) = self.fetch(&page_url).await?;
         let response_relations = if is_html_body(&body) {
             PageRelations::from_html(&body)
@@ -417,13 +413,14 @@ impl<'a> IngestJob<'a> {
             // The markdown twin wins over the HTML page (docs/07 rule 2).
             // Without one, the page falls back to its HTML path, which the
             // media split skips: no HTML extractor exists in this slice
-            // (docs/implementation/07 §Media split). The page leaves `seen`
-            // so a later, more specific scope listing can re-ingest it with
-            // its twin hint.
+            // (docs/implementation/07 §Media split). A page whose first
+            // listing produces nothing stays out of `seen`, so a later,
+            // more specific scope listing can ingest it with its twin hint.
             let Some(twin) = relations.markdown_twin.clone() else {
-                tracing::warn!("html page {} carries no markdown twin; skipping", page_url);
-                run.events.skipped_pages += 1;
-                seen.remove(&page_url.to_string());
+                if slot.is_none() {
+                    tracing::warn!("html page {} carries no markdown twin; skipping", page_url);
+                    run.events.skipped_pages += 1;
+                }
                 return Ok(described);
             };
             let twin_url = final_url
@@ -432,42 +429,69 @@ impl<'a> IngestJob<'a> {
                     url: page_url.to_string(),
                     reason: format!("markdown twin {twin:?} does not resolve: {e}"),
                 })?;
-            if !seen.insert(twin_url.to_string()) {
-                // The twin is already in the corpus through another route.
-                // A twin that names the page itself resolves to the page's
-                // own URL — the page serves no markdown body, so nothing is
-                // buffered and the page leaves `seen` for a later, more
-                // specific listing. A different twin already seen through
-                // another route leaves the page marked.
-                if twin_url == page_url {
+            if twin_url == page_url {
+                // A twin that names the page itself: the page serves no
+                // markdown body, so nothing buffers here.
+                if slot.is_none() {
                     run.events.skipped_pages += 1;
-                    seen.remove(&page_url.to_string());
                 }
+                return Ok(described);
+            }
+            if seen.contains_key(&twin_url.to_string()) {
+                // The twin is already in the corpus through another route:
+                // a first listing is covered by it, a duplicate listing
+                // keeps the buffered document.
                 return Ok(described);
             }
             let (twin_body, _, _) = self.fetch(&twin_url).await?;
             if is_html_body(&twin_body) {
-                tracing::warn!(
-                    "markdown twin {} served HTML; {} falls back to its HTML path",
-                    twin_url,
-                    page_url
-                );
-                run.events.skipped_pages += 1;
-                seen.remove(&page_url.to_string());
+                if slot.is_none() {
+                    tracing::warn!(
+                        "markdown twin {} served HTML; {} falls back to its HTML path",
+                        twin_url,
+                        page_url
+                    );
+                    run.events.skipped_pages += 1;
+                }
                 return Ok(described);
             }
-            docs.push(PageDocument {
-                path: twin_url.to_string(),
-                body: twin_body,
-            });
-            run.events.markdown_twins_used += 1;
+            let idx = if let Some(idx) = slot {
+                replace_buffered(
+                    docs,
+                    seen,
+                    idx,
+                    PageDocument {
+                        path: twin_url.to_string(),
+                        body: twin_body,
+                    },
+                );
+                idx
+            } else {
+                let idx = docs.len();
+                docs.push(PageDocument {
+                    path: twin_url.to_string(),
+                    body: twin_body,
+                });
+                seen.insert(twin_url.to_string(), idx);
+                // The twin-use count tracks documents the buffer gains; an
+                // in-place replacement adds none.
+                run.events.markdown_twins_used += 1;
+                idx
+            };
+            seen.insert(page_url.to_string(), idx);
             return Ok(described);
         }
 
-        docs.push(PageDocument {
+        let doc = PageDocument {
             path: page_url.to_string(),
             body,
-        });
+        };
+        if let Some(idx) = slot {
+            replace_buffered(docs, seen, idx, doc);
+        } else {
+            seen.insert(page_url.to_string(), docs.len());
+            docs.push(doc);
+        }
         Ok(described)
     }
 
@@ -646,6 +670,24 @@ fn deferred_to_queued(pending: &std::collections::VecDeque<Scope>, page_url: &Ur
                     .is_ok_and(|listed| listed == *page_url)
             })
     })
+}
+
+/// Replaces the buffered document at `idx` with `doc` in place: the buffer
+/// grows only by push, never reorder. The replaced document's URL mapping
+/// drops when it named another route, so a stale listing cannot restore a
+/// body the corpus no longer holds; `doc`'s own URL maps to `idx`.
+fn replace_buffered(
+    docs: &mut [PageDocument],
+    seen: &mut HashMap<String, usize>,
+    idx: usize,
+    doc: PageDocument,
+) {
+    let old_path = docs[idx].path.clone();
+    docs[idx] = doc;
+    if old_path != docs[idx].path && seen.get(&old_path).is_some_and(|&at| at == idx) {
+        seen.remove(&old_path);
+    }
+    seen.insert(docs[idx].path.clone(), idx);
 }
 
 /// Collapses duplicate pages by canonical body hash: the first occurrence

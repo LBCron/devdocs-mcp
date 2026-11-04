@@ -778,11 +778,12 @@ async fn describedby_queued_indexes_publish_searchable_pages() {
     assert!(!hits.is_empty(), "the guide page is searchable");
 }
 
-/// A link the seen set already holds short-circuits before any fetch: the
-/// page reached the corpus through its first listing and the duplicate
-/// listing is dropped (docs/implementation/07 §Normalization pipeline).
+/// A link the seen set already holds re-fetches and replaces its buffered
+/// document in place: the two listings produce the same body, so the corpus
+/// holds the page exactly once and the page count does not grow
+/// (docs/implementation/07 §llms.txt adapter rule 4).
 #[tokio::test]
-async fn ingest_short_circuits_a_link_listed_twice() {
+async fn ingest_holds_a_link_listed_twice_once() {
     let dir = tempfile::tempdir().unwrap();
     let index = concat!(
         "# Acme\n\n> Acme widgets documentation.\n\n",
@@ -1193,4 +1194,68 @@ async fn ingest_releases_a_page_whose_markdown_twin_names_itself() {
         .search_fts(&devdocs_store::build_match_query("rotate"), 10)
         .unwrap();
     assert!(!hits.is_empty(), "the deeper twin body is searchable");
+}
+
+/// A page buffered through a shallower listing is replaced when a deeper
+/// scope lists it again: the deeper listing's markdown twin re-fetches the
+/// page and overwrites the buffered document in place, so the deeper twin's
+/// body is what remains, the shallow twin's body is gone, and the page
+/// count did not grow (docs/implementation/07 §llms.txt adapter rule 4).
+#[tokio::test]
+async fn ingest_replaces_a_buffered_page_when_a_deeper_listing_relists_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = concat!(
+        "# Acme\n\n> Acme widgets documentation.\n\n",
+        "## Guides\n\n",
+        "- [Page](https://docs.acme.test/deep/page.html) (rel=\"alternate\" type=\"text/markdown\" https://docs.acme.test/root-twin.md rel=\"describedby\" /deep/llms.txt): the root listing, ingested through its twin\n"
+    );
+    let deep_index = concat!(
+        "# Acme Deep\n\n> The deep subtree.\n\n",
+        "## Pages\n\n",
+        "- [Page](https://docs.acme.test/deep/page.html) (rel=\"alternate\" type=\"text/markdown\" https://docs.acme.test/deep-twin.md): the deeper listing carries a different twin\n"
+    );
+    let page_html = "<!doctype html><html><body>the page</body></html>";
+    let shallow =
+        "# Page\n\nThe shallow twin body carries the alpha marker.\n\n## Alpha\n\nAlpha steps.\n";
+    let deep =
+        "# Page\n\nThe deep twin body carries the omega marker.\n\n## Omega\n\nOmega steps.\n";
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": root },
+        { "url": "https://docs.acme.test/deep/llms.txt", "status": 200, "headers": {}, "body": deep_index },
+        { "url": "https://docs.acme.test/deep/page.html", "status": 200, "headers": {}, "body": page_html },
+        { "url": "https://docs.acme.test/root-twin.md", "status": 200, "headers": {}, "body": shallow },
+        { "url": "https://docs.acme.test/deep-twin.md", "status": 200, "headers": {}, "body": deep },
+    ]);
+    let fixture = write_fixture_set(dir.path(), &responses);
+    let config = config();
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let db = tempfile::tempdir().unwrap();
+    let store = Arc::new(devdocs_testkit::open_migrated(&db.path().join("docs.db")).unwrap());
+
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let outcome = job
+        .run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.pages, 1, "the page buffered once, not twice");
+    assert_eq!(
+        outcome.events.subpath_indexes, 1,
+        "the describedby hint queued the deep index"
+    );
+    assert_eq!(
+        outcome.events.markdown_twins_used, 1,
+        "the replacement does not double-count the twin"
+    );
+    assert_eq!(outcome.skipped_pages, 0);
+    let hits = store
+        .search_fts(&devdocs_store::build_match_query("omega"), 10)
+        .unwrap();
+    assert!(!hits.is_empty(), "the deeper twin's body is what remains");
+    let hits = store
+        .search_fts(&devdocs_store::build_match_query("alpha"), 10)
+        .unwrap();
+    assert!(hits.is_empty(), "the shallow twin's body is replaced");
 }
