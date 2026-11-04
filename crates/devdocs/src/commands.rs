@@ -67,6 +67,9 @@ fn map_store_error(error: &devdocs_store::StoreError) -> Error {
 /// failures exit 3.
 fn map_retrieve_error(error: devdocs_retrieve::RetrieveError) -> Error {
     match error {
+        // defensive: a store failure after the index opens is only
+        // reachable through a corrupted database, which the store-layer
+        // tests cover; this arm keeps the mapping total.
         devdocs_retrieve::RetrieveError::Store(e) => map_store_error(&e),
         devdocs_retrieve::RetrieveError::Miss(reason) => Error::NoResult { reason },
         devdocs_retrieve::RetrieveError::Usage(e) => Error::Usage(e.to_string()),

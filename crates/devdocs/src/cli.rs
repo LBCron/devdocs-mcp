@@ -385,6 +385,9 @@ fn run_verify_command(cli: &Cli, doc_ref: &str) -> Result<(), Error> {
         let item = envelope.results.first();
         write_stdout_line(&match item {
             Some(item) => format!("{} verified ({})", item.doc_ref, item.content_hash),
+            // defensive: `verify` answers with exactly one result or an
+            // error, so the envelope never arrives empty; the arm keeps
+            // the match total.
             None => String::from("nothing to verify"),
         })
     }

@@ -852,4 +852,26 @@ mod tests {
     fn pyproject_toml_errors_parse_to_nothing() {
         assert_eq!(parse_pyproject("garbage ["), Vec::new());
     }
+
+    /// Requirement names that trim to nothing and require entries that
+    /// fail the name or version shape yield no dependency.
+    #[test]
+    fn malformed_requirements_parse_to_nothing() {
+        // A requirement string that starts with a specifier character has
+        // an empty name.
+        assert_eq!(
+            parse_pyproject("[project]\ndependencies = [\">=1.0\"]\n"),
+            Vec::new()
+        );
+        // A module whose name fails `is_name` and a version with nothing
+        // after the `v` both reject the require entry.
+        assert_eq!(
+            parse_go_mod("module example.test/app\n\nrequire (bad~name v1.0.0)\n"),
+            Vec::new()
+        );
+        assert_eq!(
+            parse_go_mod("module example.test/app\n\nrequire (mod v)\n"),
+            Vec::new()
+        );
+    }
 }
