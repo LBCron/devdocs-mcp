@@ -22,7 +22,7 @@ use url::Url;
 use crate::chrome::PageDocument;
 use crate::error::IngestError;
 use crate::events::IngestEvents;
-use crate::fixture::FixtureSet;
+use crate::fixture::{FixtureSet, RecordedResponse};
 use crate::guard::FetchGuard;
 use crate::llms_txt::parse_llms_txt;
 use crate::relations::PageRelations;
@@ -144,11 +144,16 @@ impl<'a> IngestJob<'a> {
     /// 404 or 410 on the wire, a missing replay response, or a non-UTF-8
     /// body all read as "not there" (docs/implementation/07 §llms.txt
     /// adapter rule 3: detection is a probe, not an assumption). The guard
-    /// policy still applies, and every other fetch error fails the run.
+    /// policy still applies, every other fetch error fails the run, and a
+    /// recorded response holds to the same replay contracts as the fetch
+    /// path.
     async fn probe(&self, url: &Url) -> Result<Option<String>, IngestError> {
         self.guard.check(url)?;
         if let Some(fixture) = self.fixture {
-            return Ok(fixture.serve(url).map(|recorded| recorded.body.clone()));
+            return match fixture.serve(url) {
+                Some(recorded) => self.replay_body(url, recorded).map(Some),
+                None => Ok(None),
+            };
         }
         match self.guard.get_with_link_headers(url).await {
             Ok((bytes, _, _)) => Ok(String::from_utf8(bytes.to_vec()).ok()),
@@ -455,30 +460,9 @@ impl<'a> IngestJob<'a> {
             let recorded = fixture.serve(url).ok_or_else(|| {
                 IngestError::Guard(crate::guard::GuardError::FixtureMiss(url.to_string()))
             })?;
-            // Replay holds the network path to its own contracts: a
-            // recorded non-success status and an oversized body fail the
-            // same way the live fetch would (docs/04 §Fixtures).
-            let status = reqwest::StatusCode::from_u16(recorded.status).map_err(|_| {
-                IngestError::LlmsTxtInvalid {
-                    url: url.to_string(),
-                    reason: format!("fixture records status {}", recorded.status),
-                }
-            })?;
-            if !status.is_success() {
-                return Err(IngestError::Guard(crate::guard::GuardError::Http {
-                    url: url.to_string(),
-                    status,
-                }));
-            }
-            let limit = self.config.fetch.max_bytes;
-            if recorded.body.len() as u64 > limit {
-                return Err(IngestError::Guard(crate::guard::GuardError::BodyTooLarge {
-                    url: url.to_string(),
-                    limit,
-                }));
-            }
+            let body = self.replay_body(url, recorded)?;
             let link_headers = recorded.headers.get("link").cloned().into_iter().collect();
-            return Ok((recorded.body.clone(), url.clone(), link_headers));
+            return Ok((body, url.clone(), link_headers));
         }
         let (bytes, final_url, link_headers) = self.guard.get_with_link_headers(url).await?;
         String::from_utf8(bytes.to_vec())
@@ -487,6 +471,34 @@ impl<'a> IngestJob<'a> {
                 url: url.to_string(),
                 reason: String::from("the response is not valid UTF-8"),
             })
+    }
+
+    /// Validates a recorded response against the replay contracts and
+    /// returns its body: a recorded non-success status and an oversized
+    /// body fail the same way the live fetch would
+    /// (docs/implementation/04 §Fixtures, docs/implementation/09 invariant
+    /// 5). Both the fetch and the probe paths run through this check.
+    fn replay_body(&self, url: &Url, recorded: &RecordedResponse) -> Result<String, IngestError> {
+        let status = reqwest::StatusCode::from_u16(recorded.status).map_err(|_| {
+            IngestError::LlmsTxtInvalid {
+                url: url.to_string(),
+                reason: format!("fixture records status {}", recorded.status),
+            }
+        })?;
+        if !status.is_success() {
+            return Err(IngestError::Guard(crate::guard::GuardError::Http {
+                url: url.to_string(),
+                status,
+            }));
+        }
+        let limit = self.config.fetch.max_bytes;
+        if recorded.body.len() as u64 > limit {
+            return Err(IngestError::Guard(crate::guard::GuardError::BodyTooLarge {
+                url: url.to_string(),
+                limit,
+            }));
+        }
+        Ok(recorded.body.clone())
     }
 }
 

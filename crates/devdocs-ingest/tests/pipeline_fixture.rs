@@ -601,6 +601,47 @@ async fn ingest_probes_llms_full_and_ingests_it_as_one_export() {
     assert!(!hits.is_empty(), "the export content is searchable");
 }
 
+/// A recorded llms-full export holds to the same replay contracts as any
+/// fetch: a body over the byte cap fails the run instead of ingesting
+/// (docs/implementation/09 invariant 5).
+#[tokio::test]
+async fn probe_rejects_an_oversized_recorded_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let index = "# Acme\n\n> Acme widgets documentation.\n\n- [Intro](https://docs.acme.test/intro.md): Start here\n";
+    let big_body = "x".repeat(64 * 1024 + 1);
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": index },
+        { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": "# Intro\n\nContent.\n" },
+        { "url": "https://docs.acme.test/llms-full.txt", "status": 200, "headers": {}, "body": big_body },
+    ]);
+    std::fs::write(
+        dir.path().join("manifest.json"),
+        serde_json::to_string(&responses).unwrap(),
+    )
+    .unwrap();
+    let fixture = FixtureSet::load(dir.path()).unwrap();
+    let mut config = config();
+    config.fetch.max_bytes = 64 * 1024;
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let db = tempfile::tempdir().unwrap();
+    let store = Arc::new(devdocs_testkit::open_migrated(&db.path().join("docs.db")).unwrap());
+
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let error = job
+        .run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap_err();
+    match error {
+        devdocs_ingest::IngestError::Guard(devdocs_ingest::GuardError::BodyTooLarge {
+            limit,
+            ..
+        }) => assert_eq!(limit, 64 * 1024),
+        other => panic!("expected Guard(BodyTooLarge), got {other}"),
+    }
+}
+
 /// A run whose only content page carries no content blocks segments to zero
 /// chunks and fails closed: the active generation stays untouched
 /// (docs/implementation/07 §Atomic publish).
