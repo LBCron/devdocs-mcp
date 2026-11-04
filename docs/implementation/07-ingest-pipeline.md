@@ -60,6 +60,15 @@ The spec is llmstxt.org v2 (verified 2026-10-28. Updated August 2026). Parse rul
 4. v2 subpath scoping: a more specific `llms.txt` deeper in the tree applies to that subtree. The plan walks links breadth-first and uses the most specific index found per path.
 5. Quality gate: an index with zero links (the documented ADK failure, research: interfaces.md §6) fails the plan with `LLMS_TXT_EMPTY` and the picker falls to the next rung.
 
+Implemented shape (M3b): the rules above land as follows.
+
+- **Page shapes.** An index link is a page when its path ends in `.md`, `.mdx`, `.html`, `.htm`, `.xhtml`, or carries no extension at all (directory-style URLs). `llms.txt` and `llms-full.txt` are never pages.
+- **Link relations.** The relations arrive three ways: the parenthesized per-page hints of a link line (`- [Page](url) (rel="alternate" type="text/markdown" twin-url): notes`), the page response's `Link:` headers (an RFC 8288 subset), and `<link>` elements scanned from an HTML body. A response relation wins over the index hint.
+- **Twin preference.** An HTML page with a markdown twin ingests the twin (a markdown-twin event counts it). A page without a twin falls back to its HTML path; the media split skips it, because no HTML extractor exists in this slice. The same page never buffers twice: routes and twins dedup by URL, and the corpus dedup collapses equal bodies.
+- **Subpath scoping.** The walk is a FIFO queue of scopes: a link naming an `llms.txt` opens a deeper scope, a page's `rel="describedby"` response can open one, and the queue drains breadth-first. A page ingests under the scope with the longest directory path prefix — the most specific index wins; a page listed by a shallower scope defers to the deeper scope's turn. Each scope joins its links against the redirect-aware base its index response came from.
+- **llms-full probe.** Every scope probes `llms-full.txt` at its directory. Absence is an expected outcome: a 404 or 410 on the wire, a missing replay response, or a non-UTF-8 body all read as "not there"; every other fetch error still fails the run and the guard policy still applies. When present, the export is one pre-built document that joins the corpus and is segmented like any other markdown body.
+- **Ingest events.** The run reports pages, skipped pages, skipped blocks (chrome pattern drops plus content-less blocks), unknown fence languages (a named language outside the known set; unnamed fences never count), chrome drops (frequency-rule drops), dedup dropped pages, markdown twins used, subpath indexes, and llms-full exports. The counts surface as stderr log lines under `--verbose` and as the `events` object of the `--json` add envelope; they carry provenance only, never chunk text.
+
 ## Git adapter
 
 Clone and checkout shell out to the system `git` binary. This matches cargo, uv, and gh (verified 2026-10-28). Rules:
@@ -132,11 +141,11 @@ Runtime consequences:
 Order matters. Each stage is a pure function over `RawDocument` streams, so snapshots test it deterministically.
 
 1. **Media split.** JSON/YAML documents route to the OpenAPI-shaped path. Markdown routes to segmentation. HTML routes through the HTML extractor first, which emits Markdown. In this slice the HTML extractor does not exist yet: the ingest loop skips a link whose body starts with a doctype or an `html` tag (case-insensitive, after leading whitespace and a leading BOM), and counts it as skipped. This check looks only at the start of the body. A body that starts with an HTML comment or an XML declaration is not skipped, and HTML inside markdown is not removed, so markup can reach the chunks.
-2. **Chrome strip.** For HTML: the adapter extracts main content before this stage. For Markdown: strip leading site navigation blocks, "edit this page" links, cookie banners, and repeated boilerplate detected by exact-match frequency across the source (a block identical in more than 60% of pages is chrome).
+2. **Chrome strip.** For HTML: the adapter extracts main content before this stage. For Markdown: strip leading site navigation blocks, "edit this page" links, cookie banners, and repeated boilerplate detected by exact-match frequency across the source (a block identical in more than 60% of pages is chrome). Implemented (M3b): the corpus buffers first, so the strip runs over the whole source; the pattern rules match link-only blocks before the first heading (leading navigation), short edit-link phrasing, and short cookie mentions; the frequency rule counts distinct pages, not occurrences, and needs at least two pages. A dropped block collapses with the whitespace runs around it, so kept bytes survive byte-exactly and the chunks reassemble the stripped body. Pattern drops count as skipped blocks, frequency drops as chrome drops.
 3. **Segmentation.** Algorithm below.
 4. **Contextual headers.** Prepend the breadcrumb and version to every chunk body: `[{library} {version} › {section path}]` (research: architecture.md §L2. Measured effect −49% retrieval failures, −67% with reranking).
 5. **Symbol extraction.** Tree-sitter pass over fenced code blocks (per grammar) plus structured sources (OpenAPI operations, front-matter routes). Populates `chunks.symbol` and `symbols`.
-6. **Dedup.** Exact by SHA-256 across the corpus. Near-dup (cosine over embeddings) is phase 3, feature-gated.
+6. **Dedup.** Exact by SHA-256 across the corpus. Near-dup (cosine over embeddings) is phase 3, feature-gated. Implemented (M3b): the dedup runs at page granularity before the chrome strip, so a duplicate page cannot skew the frequency counts; the hash is the store's canonical hash (CRLF folds to LF), and the dropped count lands in the ingest events.
 7. **Injection filter.** Rules below. Quarantine, never silent edit: a flagged chunk is stored with a quarantine flag and excluded from serving until reviewed.
 8. **Publish.** Atomic write, below.
 

@@ -2,7 +2,7 @@
 
 Local, read-only documentation server for coding agents, exposed over MCP with a SQLite-backed index and hybrid retrieval.
 
-> **Status: M3a (ingest vertical slice).** The CLI shell with config commands, the store layer, and the llms.txt ingest path (fetch guard, license gate, parser, segmentation, `devdocs add --fixture`) are real; retrieval, symbols, and the MCP server land in later milestones (docs/implementation/12). See "Scaffold deviations" for where the repo intentionally differs from the docs.
+> **Status: M3b (llms.txt hardening).** The CLI shell with config commands, the store layer, and the llms.txt ingest path (fetch guard, license gate, parser, segmentation, v2 link relations, subpath scoping, the llms-full probe, chrome strip, exact dedup, `devdocs add --fixture`) are real; retrieval, symbols, and the MCP server land in later milestones (docs/implementation/12). See "Scaffold deviations" for where the repo intentionally differs from the docs.
 
 ## Prerequisites
 

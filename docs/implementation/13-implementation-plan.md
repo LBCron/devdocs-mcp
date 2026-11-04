@@ -3,7 +3,7 @@ type: guide
 title: Implementation Plan
 description: The step-by-step build order for devdocs with concrete commands, module sketches, and function signatures, plus the risk register and the do-not-build list.
 tags: [devdocs, implementation, plan, risks]
-timestamp: 2026-10-28T00:00:00Z
+timestamp: 2026-11-04T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -94,6 +94,8 @@ The custom `Resolve` impl returns one pinned address. A connect-time validator r
 5. Wire `devdocs add <llms.txt url>` end to end behind a `--fixture` flag that replays recorded responses instead of network (keeps CI offline). Real network use stays manual until M6.
 
 Tests: property tests for the guard. Segmentation snapshots. `LLMS_TXT_EMPTY` fallback. Publish atomicity under a forced failure.
+
+The M3b hardening completes the milestone: v2 link relations (index hints, `Link:` headers, HTML `<link>` elements) with markdown-twin preference and an HTML-path fallback, breadth-first subpath scoping where the most specific index governs, the `llms-full.txt` probe with one pre-built export per scope, the markdown chrome strip (pattern rules plus the 60% frequency rule), corpus-wide SHA-256 page dedup, the ingest event report under `--verbose` and `--json`, and parse snapshots over the three fixture shapes (docs/implementation/07 §llms.txt adapter, §Normalization pipeline).
 
 ## M4 — Search and result shape (3 days)
 
