@@ -151,12 +151,16 @@ impl<'a> IngestJob<'a> {
         self.guard.check(url)?;
         if let Some(fixture) = self.fixture {
             return match fixture.serve(url) {
-                Some(recorded) => self.replay_body(url, recorded).map(Some),
+                Some(recorded) => self
+                    .replay_body(url, recorded)
+                    .map(|body| (!is_html_body(&body)).then_some(body)),
                 None => Ok(None),
             };
         }
         match self.guard.get_with_link_headers(url).await {
-            Ok((bytes, _, _)) => Ok(String::from_utf8(bytes.to_vec()).ok()),
+            Ok((bytes, _, _)) => Ok(String::from_utf8(bytes.to_vec())
+                .ok()
+                .filter(|body| !is_html_body(body))),
             Err(crate::guard::GuardError::Http { status, .. })
                 if matches!(status.as_u16(), 404 | 410) =>
             {
@@ -355,7 +359,7 @@ impl<'a> IngestJob<'a> {
             // the dedup pass would collapse it anyway.
             return Ok(None);
         }
-        let (body, _, link_headers) = self.fetch(&page_url).await?;
+        let (body, final_url, link_headers) = self.fetch(&page_url).await?;
         let response_relations = if is_html_body(&body) {
             PageRelations::from_html(&body)
         } else {
@@ -367,10 +371,13 @@ impl<'a> IngestJob<'a> {
                 markdown_twin: link.markdown_twin().map(str::to_owned),
                 described_by: link.described_by().map(str::to_owned),
             });
+        // Relative relation targets join against the final URL: a redirect
+        // can move the page to another directory, and the pre-redirect
+        // `page_url` would join them to the wrong base.
         let described = relations
             .described_by
             .as_deref()
-            .and_then(|named| page_url.join(named).ok())
+            .and_then(|named| final_url.join(named).ok())
             .filter(is_index_url);
 
         if is_html_body(&body) {
@@ -386,7 +393,7 @@ impl<'a> IngestJob<'a> {
                 seen.remove(&page_url.to_string());
                 return Ok(described);
             };
-            let twin_url = page_url
+            let twin_url = final_url
                 .join(&twin)
                 .map_err(|e| IngestError::LlmsTxtInvalid {
                     url: page_url.to_string(),

@@ -1001,3 +1001,44 @@ async fn ingest_reingests_a_skipped_html_page_a_deeper_scope_lists_with_a_twin()
         .unwrap();
     assert!(!hits.is_empty(), "the twin body is searchable");
 }
+
+/// An HTML document recorded at the `llms-full.txt` probe URL reads as
+/// absence: no export is counted, and its markup never reaches the chunks
+/// (docs/implementation/07 §llms.txt adapter rule 3).
+#[tokio::test]
+async fn ingest_treats_html_at_the_llms_full_probe_url_as_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let index = concat!(
+        "# Acme\n\n> Acme widgets documentation.\n\n",
+        "## Guides\n\n",
+        "- [Intro](https://docs.acme.test/intro.md): Start here\n"
+    );
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": index },
+        { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": INTRO },
+        { "url": "https://docs.acme.test/llms-full.txt", "status": 200, "headers": {}, "body": FAQ_HTML },
+    ]);
+    let fixture = write_fixture_set(dir.path(), &responses);
+    let config = config();
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let db = tempfile::tempdir().unwrap();
+    let store = Arc::new(devdocs_testkit::open_migrated(&db.path().join("docs.db")).unwrap());
+
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let outcome = job
+        .run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome.events.full_exports, 0,
+        "HTML at the probe URL counts as absence"
+    );
+    assert_eq!(outcome.pages, 1, "only the markdown page ingested");
+    let hits = store
+        .search_fts(&devdocs_store::build_match_query("questions"), 10)
+        .unwrap();
+    assert!(hits.is_empty(), "the probe HTML must not be searchable");
+}
