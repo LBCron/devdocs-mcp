@@ -20,7 +20,6 @@ serde_yaml_ng.workspace = true
 devdocs-testkit.workspace = true
 insta.workspace = true
 proptest.workspace = true
-rusqlite.workspace = true
 tempfile.workspace = true
 
 [lints]

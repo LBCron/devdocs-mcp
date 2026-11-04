@@ -151,23 +151,17 @@ mod tests {
     use devdocs_store::Hit;
 
     fn hit(library: &str, version: &str, section: &[&str], symbol: Option<&str>) -> Hit {
-        Hit {
-            chunk_id: 1,
-            source_id: 1,
-            library: library.to_owned(),
-            version: version.to_owned(),
-            section_path: section.iter().map(|s| (*s).to_owned()).collect(),
-            symbol: symbol.map(str::to_owned),
-            symbol_kind: None,
-            snippet: Some("the <mark>routing</mark> layer".to_owned()),
-            text: "text".to_owned(),
-            token_count: 42,
-            rank: None,
-            content_hash: [0xab; 32],
-            source_url: "https://example.test/next".to_owned(),
-            source_commit: Some("abc123".to_owned()),
-            license_status: "approved_index".to_owned(),
-        }
+        let mut hit = devdocs_testkit::sample_hit(1, 42);
+        hit.library = library.to_owned();
+        hit.version = version.to_owned();
+        hit.section_path = section.iter().map(|s| (*s).to_owned()).collect();
+        hit.symbol = symbol.map(str::to_owned);
+        hit.snippet = Some("the <mark>routing</mark> layer".to_owned());
+        hit.text = "text".to_owned();
+        hit.content_hash = [0xab; 32];
+        hit.source_url = "https://example.test/next".to_owned();
+        hit.source_commit = Some("abc123".to_owned());
+        hit
     }
 
     /// The item carries every envelope field, with the hash hex-encoded

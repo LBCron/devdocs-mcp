@@ -10,23 +10,7 @@ use proptest::prelude::*;
 
 /// Builds a hit from the proptest's token count and id.
 fn hit(chunk_id: u64, token_count: u32) -> Hit {
-    Hit {
-        chunk_id: chunk_id.cast_signed(),
-        source_id: chunk_id.cast_signed(),
-        library: "a".to_owned(),
-        version: "1.0.0".to_owned(),
-        section_path: vec![],
-        symbol: None,
-        symbol_kind: None,
-        snippet: None,
-        text: String::new(),
-        token_count,
-        rank: None,
-        content_hash: [0u8; 32],
-        source_url: String::new(),
-        source_commit: None,
-        license_status: "approved_index".to_owned(),
-    }
+    devdocs_testkit::sample_hit(chunk_id.cast_signed(), token_count)
 }
 
 proptest! {

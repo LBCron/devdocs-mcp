@@ -69,23 +69,7 @@ mod tests {
 
     /// A hit carrying only the fields the packer reads.
     fn hit(chunk_id: i64, token_count: u32) -> Hit {
-        Hit {
-            chunk_id,
-            source_id: chunk_id,
-            library: "a".to_owned(),
-            version: "1.0.0".to_owned(),
-            section_path: vec![],
-            symbol: None,
-            symbol_kind: None,
-            snippet: None,
-            text: String::new(),
-            token_count,
-            rank: None,
-            content_hash: [0u8; 32],
-            source_url: String::new(),
-            source_commit: None,
-            license_status: "approved_index".to_owned(),
-        }
+        devdocs_testkit::sample_hit(chunk_id, token_count)
     }
 
     /// Results under the budget all fit; nothing truncates.

@@ -60,23 +60,9 @@ mod tests {
 
     /// A minimal hit carrying just the identity fields fusion orders by.
     fn hit(chunk_id: i64, library: &str) -> Hit {
-        Hit {
-            chunk_id,
-            source_id: chunk_id,
-            library: library.to_owned(),
-            version: "1.0.0".to_owned(),
-            section_path: vec![],
-            symbol: None,
-            symbol_kind: None,
-            snippet: None,
-            text: String::new(),
-            token_count: 1,
-            rank: None,
-            content_hash: [0u8; 32],
-            source_url: String::new(),
-            source_commit: None,
-            license_status: "approved_index".to_owned(),
-        }
+        let mut hit = devdocs_testkit::sample_hit(chunk_id, 1);
+        hit.library = library.to_owned();
+        hit
     }
 
     /// Fusion with one rung is identity: the rung's best-first order

@@ -299,14 +299,7 @@ fn verify_reports_hash_mismatch_on_drift() {
     // Tamper with the stored text behind the CLI's back: the index
     // drifted. DEVDOCS_HOME pins the data root, so the index lives at
     // <root>/data/docs.db.
-    let db = env.root.join("data/docs.db");
-    let conn = rusqlite::Connection::open(&db).expect("db opens");
-    conn.execute(
-        "UPDATE chunks SET text = text || ' drifted' WHERE chunk_id IN (SELECT chunk_id FROM chunks LIMIT 1)",
-        [],
-    )
-    .expect("tamper");
-    drop(conn);
+    devdocs_testkit::corrupt_one_chunk_text(&env.root.join("data/docs.db")).expect("tamper");
 
     let (code, stdout, stderr) =
         common::output(env.cmd(), &["verify", &doc_ref, "--json", cfg[0], cfg[1]]);

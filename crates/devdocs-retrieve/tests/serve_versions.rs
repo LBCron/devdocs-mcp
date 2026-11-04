@@ -8,24 +8,24 @@ use devdocs_model::MissReason;
 use devdocs_retrieve::RetrieveError;
 use devdocs_retrieve::serve::versions;
 use devdocs_store::Store;
-use rusqlite::Connection;
 use tempfile::tempdir;
 
 /// Seeds one active and one inactive source of `acme`, plus one active
 /// source of another library.
 fn seeded() -> (tempfile::TempDir, Store) {
     let dir = tempdir().unwrap();
-    let store = devdocs_testkit::open_migrated(&dir.path().join("docs.db")).unwrap();
-    let conn = Connection::open(dir.path().join("docs.db")).unwrap();
-    devdocs_testkit::seed_source(&conn, "acme", true).unwrap();
-    conn.execute(
-        "INSERT INTO sources(library, version, kind, origin_url, license_status, fetched_at, active) \
-         VALUES ('acme', '0.9.0', 'llms_txt', 'https://example.test/acme-0', 'approved_index', \
-         '2026-01-01T00:00:00Z', 0)",
-        [],
-    )
+    let store = devdocs_testkit::open_migrated_and(&dir.path().join("docs.db"), |conn| {
+        devdocs_testkit::seed_source(conn, "acme", true)?;
+        conn.execute(
+            "INSERT INTO sources(library, version, kind, origin_url, license_status, fetched_at, active) \
+             VALUES ('acme', '0.9.0', 'llms_txt', 'https://example.test/acme-0', 'approved_index', \
+             '2026-01-01T00:00:00Z', 0)",
+            [],
+        )?;
+        devdocs_testkit::seed_source(conn, "other", true)?;
+        Ok(())
+    })
     .unwrap();
-    devdocs_testkit::seed_source(&conn, "other", true).unwrap();
     (dir, store)
 }
 

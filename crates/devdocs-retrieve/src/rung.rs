@@ -71,18 +71,11 @@ mod tests {
     /// The FTS rung runs the prefix expression against a live store.
     #[test]
     fn fts_rung_searches_through_the_store() {
-        use rusqlite::Connection;
-
         let dir = tempfile::tempdir().unwrap();
-        let store = devdocs_testkit::open_migrated(&dir.path().join("docs.db")).unwrap();
-        let conn = Connection::open(dir.path().join("docs.db")).unwrap();
-        let source = devdocs_testkit::seed_source(&conn, "next.js", true).unwrap();
-        devdocs_testkit::seed_chunk(
-            &conn,
-            source,
-            0,
+        let (store, _source) = devdocs_testkit::seeded_store(
+            &dir.path().join("docs.db"),
+            "next.js",
             "[\"Routing\"]",
-            None,
             "The routing layer maps requests.",
         )
         .unwrap();
@@ -102,18 +95,11 @@ mod tests {
     /// that matches nothing, not an error.
     #[test]
     fn empty_query_matches_nothing_without_error() {
-        use rusqlite::Connection;
-
         let dir = tempfile::tempdir().unwrap();
-        let store = devdocs_testkit::open_migrated(&dir.path().join("docs.db")).unwrap();
-        let conn = Connection::open(dir.path().join("docs.db")).unwrap();
-        let source = devdocs_testkit::seed_source(&conn, "next.js", true).unwrap();
-        devdocs_testkit::seed_chunk(
-            &conn,
-            source,
-            0,
+        let (store, _source) = devdocs_testkit::seeded_store(
+            &dir.path().join("docs.db"),
+            "next.js",
             "[\"Routing\"]",
-            None,
             "The routing layer maps requests.",
         )
         .unwrap();
