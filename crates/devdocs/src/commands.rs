@@ -80,6 +80,9 @@ fn map_retrieve_error(error: devdocs_retrieve::RetrieveError) -> Error {
 /// The current directory for the resolver's lockfile walk; a vanished
 /// working directory is an upstream failure, not a usage error.
 fn project_dir() -> Result<std::path::PathBuf, Error> {
+    // defensive: the CLI never deletes its own working directory, so the
+    // arm is unreachable from a normal invocation; kept for the resolver's
+    // lockfile walk.
     std::env::current_dir().map_err(|e| Error::Upstream {
         code: UpstreamCode::UpstreamError,
         detail: format!("cannot read the current directory: {e}"),

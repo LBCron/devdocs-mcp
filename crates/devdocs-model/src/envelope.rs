@@ -138,7 +138,17 @@ pub fn empty_envelope() -> ResultEnvelope {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{SourceSummary, empty_envelope, now_rfc3339};
+    use super::{SourceSummary, VersionStatus, empty_envelope, now_rfc3339};
+
+    /// The `Display` text of each status is the exact `snake_case` string the
+    /// envelope contract names (docs/implementation/08 §CLI contract).
+    #[test]
+    fn version_status_displays_the_contract_strings() {
+        assert_eq!(VersionStatus::Verified.to_string(), "verified");
+        assert_eq!(VersionStatus::Alias.to_string(), "alias");
+        assert_eq!(VersionStatus::Fallback.to_string(), "fallback");
+        assert_eq!(VersionStatus::Absent.to_string(), "absent");
+    }
 
     /// A source summary round-trips through the envelope JSON, so the
     /// `list` output parses on the consumer side.

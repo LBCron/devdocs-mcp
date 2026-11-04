@@ -377,6 +377,202 @@ fn an_absent_version_serves_nearest_as_fallback() {
     assert_eq!(results[0]["version_status"], "alias");
 }
 
+/// Without `--json`, `search` prints one human-readable line per result in
+/// fusion order (docs/implementation/08 §CLI contract).
+#[test]
+fn search_without_json_prints_summary_lines() {
+    let (env, config) = indexed_env();
+    let (code, stdout, stderr) = common::output(
+        env.cmd(),
+        &[
+            "search",
+            "client",
+            "--config",
+            config.to_str().expect("config path"),
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_ne!(lines.len(), 0, "stdout: {stdout}");
+    for line in &lines {
+        // `<ref>  <title>  [<version> · <status> · <n> tokens]`
+        assert!(line.contains("  ["), "line: {line}");
+        assert!(line.contains(" · "), "line: {line}");
+        assert!(line.ends_with(" tokens]"), "line: {line}");
+    }
+}
+
+/// Under a tiny token budget, the non-JSON `search` output carries the
+/// truncation notice naming the resume cursor.
+#[test]
+fn search_without_json_prints_the_truncation_notice_under_a_tiny_budget() {
+    let (mut env, config) = indexed_env();
+    env.set("DEVDOCS_SEARCH_MAX_TOKENS_DEFAULT", "1");
+    // "upgrade installer" matches chunks in both versions, so rank 2 must
+    // fall off the one-token budget.
+    let (code, stdout, stderr) = common::output(
+        env.cmd(),
+        &[
+            "search",
+            "upgrade installer",
+            "--config",
+            config.to_str().expect("config path"),
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let notice_line = stdout
+        .lines()
+        .find(|line| line.starts_with("…truncated; resume with --cursor "))
+        .expect("truncation notice");
+    assert!(
+        !notice_line.ends_with("--cursor "),
+        "a cursor is named: {notice_line:?}"
+    );
+}
+
+/// Without `--json`, `open` prints the served text; under a tiny budget it
+/// appends the continuation notice.
+#[test]
+fn open_without_json_prints_the_text_and_the_truncation_notice() {
+    let (env, config) = indexed_env();
+    let cfg = ["--config", config.to_str().expect("config path")];
+    let (code, stdout, stderr) =
+        common::output(env.cmd(), &["search", "client", "--json", cfg[0], cfg[1]]);
+    assert_eq!(code, 0, "search failed: {stderr}");
+    let envelope: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
+    let doc_ref = envelope
+        .results
+        .first()
+        .expect("one result")
+        .doc_ref
+        .clone();
+
+    let (code, stdout, stderr) = common::output(
+        env.cmd(),
+        &["open", &doc_ref, "--max-tokens", "1", cfg[0], cfg[1]],
+    );
+    assert_eq!(code, 0, "open failed: {stderr}");
+    let notice_line = stdout
+        .lines()
+        .last()
+        .expect("notice line")
+        .trim()
+        .to_owned();
+    assert!(
+        notice_line.starts_with("…truncated; resume with --cursor "),
+        "stdout: {stdout:?}"
+    );
+    let cursor = notice_line
+        .rsplit_once("--cursor ")
+        .expect("cursor present")
+        .1
+        .trim()
+        .to_owned();
+    assert_ne!(cursor, "");
+
+    // A full budget prints the served text with no notice.
+    let (code, stdout, stderr) = common::output(env.cmd(), &["open", &doc_ref, cfg[0], cfg[1]]);
+    assert_eq!(code, 0, "open failed: {stderr}");
+    assert!(!stdout.contains("…truncated"), "stdout: {stdout:?}");
+    assert!(stdout.contains("Intro"), "served text: {stdout:?}");
+}
+
+/// Without `--json`, `verify` prints the ref and its re-derived hash.
+#[test]
+fn verify_without_json_prints_the_verified_line() {
+    let (env, config) = indexed_env();
+    let cfg = ["--config", config.to_str().expect("config path")];
+    let (code, stdout, stderr) =
+        common::output(env.cmd(), &["search", "client", "--json", cfg[0], cfg[1]]);
+    assert_eq!(code, 0, "search failed: {stderr}");
+    let envelope: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
+    let item = envelope.results.first().expect("one result");
+    let doc_ref = item.doc_ref.clone();
+    let hash = item.content_hash.clone();
+
+    let (code, stdout, stderr) = common::output(env.cmd(), &["verify", &doc_ref, cfg[0], cfg[1]]);
+    assert_eq!(code, 0, "verify failed: {stderr}");
+    assert_eq!(
+        stdout.trim(),
+        format!("{doc_ref} verified ({hash})"),
+        "stdout: {stdout:?}"
+    );
+}
+
+/// Without `--json`, `versions` prints one discovery line per version.
+#[test]
+fn versions_without_json_print_the_discovery_lines() {
+    let (env, config) = indexed_env();
+    let (code, stdout, stderr) = common::output(
+        env.cmd(),
+        &[
+            "versions",
+            "acme",
+            "--config",
+            config.to_str().expect("config path"),
+        ],
+    );
+    assert_eq!(code, 0, "versions failed: {stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines.contains(&"acme 1.0 (llms_txt · approved_index · active)"),
+        "stdout: {stdout:?}"
+    );
+    assert!(
+        lines.contains(&"acme 2.0 (llms_txt · approved_index · active)"),
+        "stdout: {stdout:?}"
+    );
+}
+
+/// `open` with a malformed ref is a usage error: exit 1 with the `USAGE`
+/// envelope on stderr (docs/implementation/08 §Error codes).
+#[test]
+fn open_with_a_malformed_ref_exits_one() {
+    let (env, config) = indexed_env();
+    let (code, stdout, stderr) = common::output(
+        env.cmd(),
+        &[
+            "open",
+            "not-a-docs-ref",
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout} stderr: {stderr}");
+    let error: Value = serde_json::from_str(stderr.trim()).expect("stderr is JSON");
+    assert_eq!(error["error"], "USAGE");
+}
+
+/// A search against an unusable index file is an upstream failure: exit 3
+/// with `UPSTREAM_ERROR` (docs/implementation/08 §Error codes).
+#[test]
+fn a_search_on_a_broken_index_exits_three() {
+    let (mut env, config) = indexed_env();
+    let broken = env.root.join("broken/docs.db");
+    std::fs::create_dir_all(broken.parent().expect("parent")).expect("dir");
+    std::fs::write(&broken, b"this is not a sqlite database").expect("garbage index");
+    // `DEVDOCS_HOME` overrides `DEVDOCS_INDEX_PATH`, so the home layer
+    // drops and the XDG data root applies while the index path points at
+    // the garbage file.
+    env.without_home();
+    env.set("DEVDOCS_INDEX_PATH", broken.to_str().expect("index path"));
+
+    let (code, stdout, stderr) = common::output(
+        env.cmd(),
+        &[
+            "search",
+            "client",
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+        ],
+    );
+    assert_eq!(code, 3, "stdout: {stdout} stderr: {stderr}");
+    let error: Value = serde_json::from_str(stderr.trim()).expect("stderr is JSON");
+    assert_eq!(error["error"], "UPSTREAM_ERROR");
+}
+
 /// The migration-question pattern retrieves the served version and the
 /// nearest older version, labeled through their `served_version` fields.
 #[test]
