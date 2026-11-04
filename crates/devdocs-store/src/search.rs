@@ -9,10 +9,15 @@ use rusqlite::params;
 use crate::error::StoreError;
 use crate::store::Store;
 
+/// The placeholder the serving queries carry for the terminal-license
+/// filter; [`fts_sql`] and [`plain_sql`] substitute
+/// [`TERMINAL_LICENSE_CLAUSE`] for it when they compose the final SQL.
+const LICENSE_PLACEHOLDER: &str = "{license_clause}";
+
 /// The WHERE clause that drops sources with a terminal license refusal out
 /// of retrieval at query time (docs/implementation/09 §License gate
 /// enforcement points, point 3). One string, shared by every serving
-/// query through the `{license_clause}` placeholder in the SQL consts.
+/// query through the [`LICENSE_PLACEHOLDER`] in the composed SQL.
 const TERMINAL_LICENSE_CLAUSE: &str =
     "AND s.license_status NOT IN ('denied', 'expired', 'revoked')";
 
@@ -167,88 +172,92 @@ fn plain_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<Hit> {
     })
 }
 
-/// The unscoped search SQL: the chunk/source join with the documented
-/// bm25 weights, ordered and limited. The `{license_clause}` placeholder
-/// takes the shared terminal-license filter
-/// ([`TERMINAL_LICENSE_CLAUSE`]) so sources whose license state turned
-/// terminal drop out at query time
+/// The chunk and source column list every serving query shares, in the
+/// fixed order the row readers ([`base_columns`]) index: `chunk_id`,
+/// `source_id`, `library`, `version`, `section_path`, `symbol`, `text`,
+/// `token_count`, `content_hash`, `origin_url`, `commit_sha`,
+/// `license_status` at indices 0..12. Each query appends its
+/// query-specific suffix columns behind them.
+const BASE_COLUMNS: &str = "c.chunk_id, c.source_id, s.library, s.version, c.section_path, \
+     c.symbol, c.text, c.token_count, c.content_hash, s.origin_url, s.commit_sha, \
+     s.license_status";
+
+/// The FTS suffix columns behind [`BASE_COLUMNS`]: the `snippet()` fragment
+/// at index 12 and the bm25 rank at index 13, with the documented weights.
+const FTS_COLUMNS: &str = "snippet(chunks_fts, 1, '<mark>', '</mark>', '…', 16), \
+     bm25(chunks_fts, 5.0, 1.0)";
+
+/// The FROM/JOIN of the FTS queries: the fts table driving the chunk and
+/// source joins.
+const FTS_FROM: &str = "chunks_fts \
+     JOIN chunks c ON c.chunk_id = chunks_fts.rowid \
+     JOIN sources s ON s.source_id = c.source_id";
+
+/// The WHERE clause shared by the three FTS shapes, before the scoping
+/// predicate: the FTS match plus the active-source filter, then the
+/// `{license_clause}` placeholder ([`TERMINAL_LICENSE_CLAUSE`]) that drops
+/// terminal-license sources at query time
 /// (docs/implementation/09 §License gate enforcement points, point 3).
-const FTS_SQL: &str = "SELECT c.chunk_id, c.source_id, s.library, s.version, c.section_path, \
-     c.symbol, \
-     c.text, c.token_count, c.content_hash, s.origin_url, s.commit_sha, s.license_status, \
-     snippet(chunks_fts, 1, '<mark>', '</mark>', '…', 16), \
-     bm25(chunks_fts, 5.0, 1.0) \
-     FROM chunks_fts \
-     JOIN chunks c ON c.chunk_id = chunks_fts.rowid \
-     JOIN sources s ON s.source_id = c.source_id \
-     WHERE chunks_fts MATCH ?1 AND s.active = 1 \
-     {license_clause} \
-     ORDER BY bm25(chunks_fts, 5.0, 1.0) \
-     LIMIT ?2";
+const FTS_MATCH_CLAUSE: &str = "chunks_fts MATCH ?1 AND s.active = 1 {license_clause}";
 
-/// The library-scoped search SQL: the same projection with the library
-/// predicate before the limit. The `{license_clause}` placeholder takes
-/// the shared terminal-license filter
-/// ([`TERMINAL_LICENSE_CLAUSE`]) — the same drop the unscoped query
-/// applies.
-const FTS_LIBRARY_SQL: &str = "SELECT c.chunk_id, c.source_id, s.library, s.version, \
-     c.section_path, \
-     c.symbol, \
-     c.text, c.token_count, c.content_hash, s.origin_url, s.commit_sha, s.license_status, \
-     snippet(chunks_fts, 1, '<mark>', '</mark>', '…', 16), \
-     bm25(chunks_fts, 5.0, 1.0) \
-     FROM chunks_fts \
-     JOIN chunks c ON c.chunk_id = chunks_fts.rowid \
-     JOIN sources s ON s.source_id = c.source_id \
-     WHERE chunks_fts MATCH ?1 AND s.active = 1 \
-     {license_clause} \
-     AND s.library = ?3 COLLATE NOCASE \
-     ORDER BY bm25(chunks_fts, 5.0, 1.0) \
-     LIMIT ?2";
+/// The library-scoped predicate, bound to `?3`, appended to
+/// [`FTS_MATCH_CLAUSE`] before the limit — so the limit counts
+/// same-library hits only. `COLLATE NOCASE` matches the retrieval-side
+/// filter it replaces.
+const FTS_LIBRARY_PREDICATE: &str = " AND s.library = ?3 COLLATE NOCASE";
 
-/// The source-scoped search SQL: the same projection with the source-id
-/// predicate before the limit — the exact-version serving path.
-const FTS_SOURCE_SQL: &str = "SELECT c.chunk_id, c.source_id, s.library, s.version, \
-     c.section_path, \
-     c.symbol, \
-     c.text, c.token_count, c.content_hash, s.origin_url, s.commit_sha, s.license_status, \
-     snippet(chunks_fts, 1, '<mark>', '</mark>', '…', 16), \
-     bm25(chunks_fts, 5.0, 1.0) \
-     FROM chunks_fts \
-     JOIN chunks c ON c.chunk_id = chunks_fts.rowid \
-     JOIN sources s ON s.source_id = c.source_id \
-     WHERE chunks_fts MATCH ?1 AND s.active = 1 \
-     {license_clause} \
-     AND s.source_id = ?3 \
-     ORDER BY bm25(chunks_fts, 5.0, 1.0) \
-     LIMIT ?2";
+/// The source-scoped predicate, bound to `?3`, appended to
+/// [`FTS_MATCH_CLAUSE`] before the limit — the exact-version serving path.
+const FTS_SOURCE_PREDICATE: &str = " AND s.source_id = ?3";
 
-/// The exact-symbol lookup SQL: the symbol join with the same
-/// terminal-license clause, ordered by chunk position.
-const SYMBOL_SQL: &str = "SELECT c.chunk_id, c.source_id, s.library, s.version, \
-     c.section_path, \
-     c.symbol, \
-     c.text, c.token_count, c.content_hash, s.origin_url, s.commit_sha, s.license_status, \
-     sym.kind \
-     FROM symbols sym \
+/// The FROM/JOIN of the symbol lookup: the symbol table driving the chunk
+/// and source joins.
+const SYMBOL_FROM: &str = "symbols sym \
      JOIN chunks c ON c.chunk_id = sym.chunk_id \
-     JOIN sources s ON s.source_id = c.source_id \
-     WHERE sym.symbol = ?1 AND c.source_id = ?2 AND s.active = 1 \
-     {license_clause} \
-     ORDER BY c.ordinal";
+     JOIN sources s ON s.source_id = c.source_id";
 
-/// The full-chunk read SQL: every chunk of one source in ordinal order,
-/// for the `open` path. No FTS match, so no snippet and no rank.
-const SOURCE_CHUNKS_SQL: &str = "SELECT c.chunk_id, c.source_id, s.library, s.version, \
-     c.section_path, \
-     c.symbol, \
-     c.text, c.token_count, c.content_hash, s.origin_url, s.commit_sha, s.license_status, \
-     NULL \
-     FROM chunks c \
-     JOIN sources s ON s.source_id = c.source_id \
-     WHERE c.source_id = ?1 AND s.active = 1 \
-     {license_clause} \
-     ORDER BY c.ordinal";
+/// The symbol-lookup WHERE clause: the exact symbol of one source, active
+/// only, with the terminal-license placeholder.
+const SYMBOL_CLAUSE: &str =
+    "sym.symbol = ?1 AND c.source_id = ?2 AND s.active = 1 {license_clause}";
+
+/// The FROM/JOIN of the full-chunk read: chunk and source, no symbol table.
+const SOURCE_CHUNKS_FROM: &str = "chunks c \
+     JOIN sources s ON s.source_id = c.source_id";
+
+/// The full-chunk-read WHERE clause: every chunk of one active source,
+/// with the terminal-license placeholder.
+const SOURCE_CHUNKS_CLAUSE: &str = "c.source_id = ?1 AND s.active = 1 {license_clause}";
+
+/// Composes one FTS query from a WHERE clause: the shared projection, the
+/// FTS join, the clause, and the bm25 ordering with the limit. Deterministic
+/// in `where_clause`, so the same shape yields the same SQL string on every
+/// call and `prepare_cached` stays effective.
+fn fts_sql(where_clause: &str) -> String {
+    format!(
+        "SELECT {BASE_COLUMNS}, {FTS_COLUMNS} \
+         FROM {FTS_FROM} \
+         WHERE {where_clause} \
+         ORDER BY bm25(chunks_fts, 5.0, 1.0) \
+         LIMIT ?2"
+    )
+    .replace(LICENSE_PLACEHOLDER, TERMINAL_LICENSE_CLAUSE)
+}
+
+/// Composes one ordinal-ordered query (symbol lookups, full-chunk reads):
+/// the shared projection, one query-specific suffix column at index 12,
+/// the FROM/JOIN, and the clause. Deterministic in its arguments, so the
+/// same shape yields the same SQL string on every call and
+/// `prepare_cached` stays effective.
+fn plain_sql(from_clause: &str, where_clause: &str, suffix_column: &str) -> String {
+    format!(
+        "SELECT {BASE_COLUMNS}, {suffix_column} \
+         FROM {from_clause} \
+         WHERE {where_clause} \
+         ORDER BY c.ordinal"
+    )
+    .replace(LICENSE_PLACEHOLDER, TERMINAL_LICENSE_CLAUSE)
+}
 
 /// The source lookup SQL: the active source id for one exact
 /// `(library, version)` pair, case-insensitive on the library.
@@ -273,7 +282,7 @@ impl Store {
     /// parameter, never interpolated.
     pub fn search_fts(&self, match_expr: &str, limit: u32) -> Result<Vec<Hit>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
-        let sql = FTS_SQL.replace("{license_clause}", TERMINAL_LICENSE_CLAUSE);
+        let sql = fts_sql(FTS_MATCH_CLAUSE);
         let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![match_expr, limit], fts_hit)?;
         rows.collect::<Result<Vec<Hit>, _>>()
@@ -293,7 +302,7 @@ impl Store {
         limit: u32,
     ) -> Result<Vec<Hit>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
-        let sql = FTS_LIBRARY_SQL.replace("{license_clause}", TERMINAL_LICENSE_CLAUSE);
+        let sql = fts_sql(&format!("{FTS_MATCH_CLAUSE}{FTS_LIBRARY_PREDICATE}"));
         let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![match_expr, limit, library], fts_hit)?;
         rows.collect::<Result<Vec<Hit>, _>>()
@@ -307,7 +316,7 @@ impl Store {
         src: devdocs_model::SourceId,
     ) -> Result<Vec<Hit>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
-        let sql = SYMBOL_SQL.replace("{license_clause}", TERMINAL_LICENSE_CLAUSE);
+        let sql = plain_sql(SYMBOL_FROM, SYMBOL_CLAUSE, "sym.kind");
         let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![symbol, src.0], plain_hit)?;
         rows.collect::<Result<Vec<Hit>, _>>()
@@ -323,7 +332,7 @@ impl Store {
         limit: u32,
     ) -> Result<Vec<Hit>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
-        let sql = FTS_SOURCE_SQL.replace("{license_clause}", TERMINAL_LICENSE_CLAUSE);
+        let sql = fts_sql(&format!("{FTS_MATCH_CLAUSE}{FTS_SOURCE_PREDICATE}"));
         let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![match_expr, limit, source_id], fts_hit)?;
         rows.collect::<Result<Vec<Hit>, _>>()
@@ -333,7 +342,7 @@ impl Store {
     /// Every chunk of one source in ordinal order — the `open` read path.
     pub fn source_chunks(&self, source_id: i64) -> Result<Vec<Hit>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
-        let sql = SOURCE_CHUNKS_SQL.replace("{license_clause}", TERMINAL_LICENSE_CLAUSE);
+        let sql = plain_sql(SOURCE_CHUNKS_FROM, SOURCE_CHUNKS_CLAUSE, "NULL");
         let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![source_id], plain_hit)?;
         rows.collect::<Result<Vec<Hit>, _>>()
