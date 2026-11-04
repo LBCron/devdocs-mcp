@@ -28,7 +28,6 @@ devdocs-model.workspace = true
 devdocs-retrieve.workspace = true
 devdocs-store.workspace = true
 clap.workspace = true
-ctrlc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -40,7 +39,6 @@ url.workspace = true
 assert_cmd.workspace = true
 devdocs-testkit.workspace = true
 insta.workspace = true
-predicates.workspace = true
 tempfile.workspace = true
 
 [lints]

@@ -39,3 +39,7 @@ devdocs-testkit.workspace = true
 
 [lints]
 workspace = true
+# fastembed rides the opt-in `embeddings` feature (default off) ahead of its
+# call sites; feature-gated usage is invisible to the machete scan.
+[package.metadata.cargo-machete]
+ignored = ["fastembed"]
