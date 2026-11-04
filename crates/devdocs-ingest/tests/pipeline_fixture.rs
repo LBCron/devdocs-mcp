@@ -694,12 +694,11 @@ async fn ingest_rejects_a_run_that_segments_to_zero_chunks() {
     assert!(sources[0].active, "the old generation stays active");
 }
 
-/// A `rel="describedby"` hint names the index that covers the page: that
-/// llms.txt joins the scope queue, is counted as a subpath index, and its
-/// own listing ingests the pages it governs
-/// (docs/implementation/07 §llms.txt adapter rule 2).
-#[tokio::test]
-async fn ingest_queues_the_index_a_describedby_hint_names() {
+/// The describedby fixture: two hint-carrying HTML pages, each naming the
+/// index that covers it, and two markdown pages under those indexes.
+/// Runs the ingest over the fixture and returns the published store plus
+/// the run outcome (docs/implementation/07 §llms.txt adapter rule 2).
+async fn run_describedby_ingest() -> (Arc<devdocs_store::Store>, devdocs_ingest::IngestOutcome) {
     let dir = tempfile::tempdir().unwrap();
     let root = concat!(
         "# Acme\n\n> Acme widgets documentation.\n\n",
@@ -743,7 +742,16 @@ async fn ingest_queues_the_index_a_describedby_hint_names() {
         .run(Arc::clone(&store), &index_url, "acme", "1.0")
         .await
         .unwrap();
+    (store, outcome)
+}
 
+/// A `rel="describedby"` hint queues the index it names: each hint counts
+/// as a subpath index, each queued index ingests its page, and the
+/// hint-carrying HTML pages themselves skip
+/// (docs/implementation/07 §llms.txt adapter rule 2).
+#[tokio::test]
+async fn ingest_queues_the_index_a_describedby_hint_names() {
+    let (_store, outcome) = run_describedby_ingest().await;
     assert_eq!(
         outcome.events.subpath_indexes, 2,
         "each describedby hint queued its index"
@@ -753,10 +761,21 @@ async fn ingest_queues_the_index_a_describedby_hint_names() {
         outcome.skipped_pages, 2,
         "the hint-carrying HTML pages themselves skip"
     );
+}
+
+/// The pages the describedby-queued indexes govern reach the store and
+/// stay searchable (docs/implementation/07 §llms.txt adapter rule 2).
+#[tokio::test]
+async fn describedby_queued_indexes_publish_searchable_pages() {
+    let (store, _outcome) = run_describedby_ingest().await;
     let hits = store
         .search_fts(&devdocs_store::build_match_query("scopes"), 10)
         .unwrap();
     assert!(!hits.is_empty(), "the api page is searchable");
+    let hits = store
+        .search_fts(&devdocs_store::build_match_query("tour"), 10)
+        .unwrap();
+    assert!(!hits.is_empty(), "the guide page is searchable");
 }
 
 /// A link the seen set already holds short-circuits before any fetch: the

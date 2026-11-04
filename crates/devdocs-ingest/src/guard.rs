@@ -358,25 +358,7 @@ impl FetchGuard {
         let deadline = Instant::now() + self.timeout;
         let pinned = self.resolve_pinned(url, deadline).await?;
 
-        let port = url.port_or_known_default().unwrap_or(443);
-        let builder = reqwest::Client::builder()
-            .user_agent(&self.user_agent)
-            // Ambient proxies are off: HTTPS_PROXY and friends must not pull
-            // the request away from the pinned address, and a proxy resolves
-            // hostnames itself, which would bypass the pinned resolver
-            // (docs/implementation/09 invariant 3).
-            .no_proxy()
-            .redirect(self.redirect_policy())
-            .dns_resolver(PinnedResolver {
-                allow_loopback_for_tests: self.policy.allow_loopback_for_tests,
-            })
-            // The one resolution happened above; connect only to that
-            // address, with SNI intact (docs/09 invariant 3).
-            .resolve_to_addrs(
-                url.host_str().unwrap_or_default(),
-                &[SocketAddr::new(pinned, port)],
-            );
-        let client = builder.build().map_err(GuardError::Transport)?;
+        let client = self.build_pinned_client(url, pinned)?;
 
         // The request spends only the budget left after the lookup; an
         // exhausted budget refuses before any connection attempt.
@@ -428,6 +410,37 @@ impl FetchGuard {
             .filter_map(|value| value.to_str().ok().map(str::to_owned))
             .collect();
         Ok((bytes::Bytes::from(body), final_url, link_headers))
+    }
+
+    /// Builds the client pinned to `pinned`: ambient proxies off, every
+    /// hop re-checked by the redirect policy, and the one resolution done
+    /// by the caller — connect only to that address, with SNI intact
+    /// (docs/implementation/09 invariants 3 and 5).
+    fn build_pinned_client(
+        &self,
+        url: &Url,
+        pinned: IpAddr,
+    ) -> Result<reqwest::Client, GuardError> {
+        let port = url.port_or_known_default().unwrap_or(443);
+        reqwest::Client::builder()
+            .user_agent(&self.user_agent)
+            // Ambient proxies are off: HTTPS_PROXY and friends must not pull
+            // the request away from the pinned address, and a proxy resolves
+            // hostnames itself, which would bypass the pinned resolver
+            // (docs/implementation/09 invariant 3).
+            .no_proxy()
+            .redirect(self.redirect_policy())
+            .dns_resolver(PinnedResolver {
+                allow_loopback_for_tests: self.policy.allow_loopback_for_tests,
+            })
+            // The one resolution happened above; connect only to that
+            // address, with SNI intact (docs/09 invariant 3).
+            .resolve_to_addrs(
+                url.host_str().unwrap_or_default(),
+                &[SocketAddr::new(pinned, port)],
+            )
+            .build()
+            .map_err(GuardError::Transport)
     }
 
     /// The redirect policy: every hop re-runs the URL checks before the

@@ -200,10 +200,9 @@ impl<'a> IngestJob<'a> {
             // deeper scope for its subtree.
             for link in scope.index.links() {
                 let link_url = resolve_link(scope, link.url())?;
-                if is_index_url(&link_url) && scope_urls.insert(link_url.to_string()) {
-                    run.events.subpath_indexes += 1;
-                    let sub = self.load_scope(&link_url).await?;
-                    pending.push_back(sub);
+                if is_index_url(&link_url) {
+                    self.queue_sub_scope(&link_url, &mut pending, &mut scope_urls, run)
+                        .await?;
                 }
             }
 
@@ -230,29 +229,56 @@ impl<'a> IngestJob<'a> {
                 // A `rel="describedby"` response names the index that
                 // covers the page; an unseen one joins the queue
                 // (docs/implementation/07 §llms.txt adapter rule 2).
-                if let Some(described) = described
-                    && scope_urls.insert(described.to_string())
-                {
-                    run.events.subpath_indexes += 1;
-                    let sub = self.load_scope(&described).await?;
-                    pending.push_back(sub);
+                if let Some(described) = described {
+                    self.queue_sub_scope(&described, &mut pending, &mut scope_urls, run)
+                        .await?;
                 }
             }
 
             // (c) The llms-full probe (docs/implementation/07 §llms.txt
-            // adapter rule 3): detection is a probe, never an assumption —
-            // absence is an expected outcome. When present, the export is
-            // one pre-built document and is segmented like any other
-            // markdown body.
-            let export_url = resolve_link(scope, "llms-full.txt")?;
-            if let Some(body) = self.probe(&export_url).await? {
-                tracing::info!(export = %export_url, "ingesting the llms-full export");
-                docs.push(PageDocument {
-                    path: export_url.to_string(),
-                    body,
-                });
-                run.events.full_exports += 1;
-            }
+            // adapter rule 3).
+            self.probe_llms_full(scope, docs, run).await?;
+        }
+        Ok(())
+    }
+
+    /// Queues an unseen index scope for the walk, counting it as a subpath
+    /// index. A scope already queued or walked does not re-enter: one
+    /// scope URL enters the queue at most once.
+    async fn queue_sub_scope(
+        &self,
+        index_url: &Url,
+        pending: &mut std::collections::VecDeque<Scope>,
+        scope_urls: &mut HashSet<String>,
+        run: &mut RunState,
+    ) -> Result<(), IngestError> {
+        if !scope_urls.insert(index_url.to_string()) {
+            return Ok(());
+        }
+        run.events.subpath_indexes += 1;
+        let sub = self.load_scope(index_url).await?;
+        pending.push_back(sub);
+        Ok(())
+    }
+
+    /// Probes the scope's `llms-full.txt` export
+    /// (docs/implementation/07 §llms.txt adapter rule 3). When present,
+    /// the export is one pre-built document and is buffered like any other
+    /// markdown body.
+    async fn probe_llms_full(
+        &self,
+        scope: &Scope,
+        docs: &mut Vec<PageDocument>,
+        run: &mut RunState,
+    ) -> Result<(), IngestError> {
+        let export_url = resolve_link(scope, "llms-full.txt")?;
+        if let Some(body) = self.probe(&export_url).await? {
+            tracing::info!(export = %export_url, "ingesting the llms-full export");
+            docs.push(PageDocument {
+                path: export_url.to_string(),
+                body,
+            });
+            run.events.full_exports += 1;
         }
         Ok(())
     }
