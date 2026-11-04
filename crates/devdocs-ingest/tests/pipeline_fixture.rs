@@ -424,6 +424,67 @@ fn content_responses() -> serde_json::Value {
     ])
 }
 
+/// Subpath scoping: a deeper llms.txt linked from the root index governs
+/// its subtree — the root defers a page the deeper index covers, the page
+/// ingests once, and the subpath index is counted
+/// (docs/implementation/07 §llms.txt adapter rule 4).
+#[tokio::test]
+async fn ingest_scopes_pages_to_the_most_specific_subpath_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = concat!(
+        "# Acme\n\n> Acme widgets documentation.\n\n",
+        "## Guides\n\n",
+        "- [Api](https://docs.acme.test/api/llms.txt): the api subtree index\n",
+        "- [Overview](https://docs.acme.test/overview.md): root level\n",
+        "- [Auth](https://docs.acme.test/api/auth.md): also listed at the root\n"
+    );
+    let api_index = concat!(
+        "# Acme API\n\n> The api subtree.\n\n",
+        "## Endpoints\n\n",
+        "- [Auth](https://docs.acme.test/api/auth.md): the most specific listing\n"
+    );
+    let overview =
+        "# Overview\n\nThe Acme widgets platform overview.\n\n## Tour\n\nWalk the tour.\n";
+    let auth = "# Auth\n\nAuthenticate with an API key.\n\n## Scopes\n\nKeys carry scopes.\n";
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": root },
+        { "url": "https://docs.acme.test/api/llms.txt", "status": 200, "headers": {}, "body": api_index },
+        { "url": "https://docs.acme.test/overview.md", "status": 200, "headers": {}, "body": overview },
+        { "url": "https://docs.acme.test/api/auth.md", "status": 200, "headers": {}, "body": auth },
+    ]);
+    std::fs::write(
+        dir.path().join("manifest.json"),
+        serde_json::to_string(&responses).unwrap(),
+    )
+    .unwrap();
+    let fixture = FixtureSet::load(dir.path()).unwrap();
+    let config = config();
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let db = tempfile::tempdir().unwrap();
+    let store = Arc::new(devdocs_testkit::open_migrated(&db.path().join("docs.db")).unwrap());
+
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let outcome = job
+        .run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.pages, 2, "overview and auth ingest once each");
+    assert_eq!(outcome.skipped_pages, 0);
+    assert_eq!(
+        outcome.events.subpath_indexes, 1,
+        "the api subpath index scoped"
+    );
+    // The auth page is searchable: the deferred root listing did not block
+    // the deeper scope from ingesting it.
+    let hits = store
+        .search_fts(&devdocs_store::build_match_query("scopes"), 10)
+        .unwrap();
+    assert!(!hits.is_empty(), "the api page is searchable");
+}
+
 /// A run whose only content page carries no content blocks segments to zero
 /// chunks and fails closed: the active generation stays untouched
 /// (docs/implementation/07 §Atomic publish).

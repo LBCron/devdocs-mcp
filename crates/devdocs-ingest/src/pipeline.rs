@@ -126,9 +126,23 @@ impl<'a> IngestJob<'a> {
             .await
     }
 
+    /// Fetches and parses one llms.txt index into a scope for its
+    /// directory: the join base is the URL the response actually came from,
+    /// and the covered subtree is its directory.
+    async fn load_scope(&self, index_url: &Url) -> Result<Scope, IngestError> {
+        let (body, base, _) = self.fetch(index_url).await?;
+        let index = parse_llms_txt(&body, index_url.as_str())?;
+        Ok(Scope {
+            index_url: index_url.clone(),
+            join_base: base.clone(),
+            dir: directory_url(&base),
+            index,
+        })
+    }
+
     /// The fetch-and-segment phase, inside the total-cap timeout: fetch and
-    /// parse the index, fetch every markdown page, segment, and buffer the
-    /// chunks. Publishes nothing.
+    /// parse the root index, walk the scopes breadth-first, fetch every
+    /// governed page, and buffer the corpus. Publishes nothing.
     async fn prepare(
         &self,
         index_url: &Url,
@@ -139,19 +153,63 @@ impl<'a> IngestJob<'a> {
         // Relative links resolve against the URL the index actually came
         // from: a redirect can move it to another directory, and the
         // pre-redirect URL would join every link to the wrong base.
-        let (index_body, index_base, _) = self.fetch(index_url).await?;
-        let index = parse_llms_txt(&index_body, index_url.as_str())?;
+        let root = self.load_scope(index_url).await?;
         let segmenter = Segmenter::new()?;
         let mut run = RunState::default();
-        let ctx = LinkContext {
-            index_url,
-            index_base: &index_base,
-        };
         let mut docs: Vec<PageDocument> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
-        for link in index.links() {
-            self.ingest_link(&ctx, link, &mut docs, &mut seen, &mut run)
-                .await?;
+
+        // The scope walk (docs/implementation/07 §llms.txt adapter rule 4):
+        // a FIFO queue is breadth-first — the root scope drains before the
+        // subpath scopes it discovered, so the most specific llms.txt
+        // governs every page it covers. A page linked by a shallower scope
+        // but covered by a deeper one waits for the deeper scope.
+        let mut scopes: Vec<Scope> = Vec::new();
+        let mut pending: std::collections::VecDeque<Scope> = std::collections::VecDeque::new();
+        let mut scope_urls: HashSet<String> = HashSet::new();
+        scope_urls.insert(index_url.to_string());
+        pending.push_back(root);
+        while let Some(scope) = pending.pop_front() {
+            let scope_index = scopes.len();
+            scopes.push(scope);
+            let scope = &scopes[scope_index];
+
+            // (a) Subpath discovery: a link naming an llms.txt opens a
+            // deeper scope for its subtree.
+            for link in scope.index.links() {
+                let link_url = resolve_link(scope, link.url())?;
+                if is_index_url(&link_url) && scope_urls.insert(link_url.to_string()) {
+                    run.events.subpath_indexes += 1;
+                    let sub = self.load_scope(&link_url).await?;
+                    pending.push_back(sub);
+                }
+            }
+
+            // (b) The scope's pages. A page covered by a deeper scope is
+            // deferred to that scope's turn; the most specific index wins
+            // (docs/implementation/07 §llms.txt adapter rule 4).
+            for link in scope.index.links() {
+                let link_url = resolve_link(scope, link.url())?;
+                if is_index_url(&link_url) || !is_page_url(&link_url) {
+                    continue;
+                }
+                if most_specific_scope(&scopes, &link_url) != Some(scope_index) {
+                    continue;
+                }
+                let described = self
+                    .ingest_link(link_url, link, &mut docs, &mut seen, &mut run)
+                    .await?;
+                // A `rel="describedby"` response names the index that
+                // covers the page; an unseen one joins the queue
+                // (docs/implementation/07 §llms.txt adapter rule 2).
+                if let Some(described) = described
+                    && scope_urls.insert(described.to_string())
+                {
+                    run.events.subpath_indexes += 1;
+                    let sub = self.load_scope(&described).await?;
+                    pending.push_back(sub);
+                }
+            }
         }
 
         // Normalization runs off the async path over the whole corpus:
@@ -216,35 +274,24 @@ impl<'a> IngestJob<'a> {
         })
     }
 
-    /// Ingests one index link: resolve, skip non-page URLs, fetch, prefer
-    /// the v2 markdown twin over an HTML body, and buffer the markdown body
-    /// into the corpus (docs/implementation/07 §llms.txt adapter rule 2).
-    /// Segmentation happens after the chrome strip, over the whole buffered
-    /// corpus.
+    /// Ingests one already-resolved page link: skip non-page URLs, fetch,
+    /// prefer the v2 markdown twin over an HTML body, and buffer the
+    /// markdown body into the corpus (docs/implementation/07 §llms.txt
+    /// adapter rule 2). Segmentation happens after the chrome strip, over
+    /// the whole buffered corpus. Returns the page's `rel="describedby"`
+    /// index URL, when the page response or the index hint named one.
     async fn ingest_link(
         &self,
-        ctx: &LinkContext<'_>,
+        page_url: Url,
         link: &crate::llms_txt::LlmsLink,
         docs: &mut Vec<PageDocument>,
         seen: &mut HashSet<String>,
         run: &mut RunState,
-    ) -> Result<(), IngestError> {
-        let page_url =
-            ctx.index_base
-                .join(link.url())
-                .map_err(|e| IngestError::LlmsTxtInvalid {
-                    url: ctx.index_url.to_string(),
-                    reason: format!("link {:?} does not resolve: {e}", link.url()),
-                })?;
-        if !is_page_url(&page_url) {
-            tracing::warn!("skipping non-page link {}", page_url);
-            run.events.skipped_pages += 1;
-            return Ok(());
-        }
+    ) -> Result<Option<Url>, IngestError> {
         if !seen.insert(page_url.to_string()) {
             // The page already reached the corpus through another link;
             // the dedup pass would collapse it anyway.
-            return Ok(());
+            return Ok(None);
         }
         let (body, _, link_headers) = self.fetch(&page_url).await?;
         let response_relations = if is_html_body(&body) {
@@ -258,6 +305,11 @@ impl<'a> IngestJob<'a> {
                 markdown_twin: link.markdown_twin().map(str::to_owned),
                 described_by: link.described_by().map(str::to_owned),
             });
+        let described = relations
+            .described_by
+            .as_deref()
+            .and_then(|named| page_url.join(named).ok())
+            .filter(is_index_url);
 
         if is_html_body(&body) {
             // The markdown twin wins over the HTML page (docs/07 rule 2).
@@ -267,7 +319,7 @@ impl<'a> IngestJob<'a> {
             let Some(twin) = relations.markdown_twin.clone() else {
                 tracing::warn!("html page {} carries no markdown twin; skipping", page_url);
                 run.events.skipped_pages += 1;
-                return Ok(());
+                return Ok(described);
             };
             let twin_url = page_url
                 .join(&twin)
@@ -277,7 +329,7 @@ impl<'a> IngestJob<'a> {
                 })?;
             if !seen.insert(twin_url.to_string()) {
                 // The twin is already in the corpus through another route.
-                return Ok(());
+                return Ok(described);
             }
             let (twin_body, _, _) = self.fetch(&twin_url).await?;
             if is_html_body(&twin_body) {
@@ -287,21 +339,21 @@ impl<'a> IngestJob<'a> {
                     page_url
                 );
                 run.events.skipped_pages += 1;
-                return Ok(());
+                return Ok(described);
             }
             docs.push(PageDocument {
                 path: twin_url.to_string(),
                 body: twin_body,
             });
             run.events.markdown_twins_used += 1;
-            return Ok(());
+            return Ok(described);
         }
 
         docs.push(PageDocument {
             path: page_url.to_string(),
             body,
         });
-        Ok(())
+        Ok(described)
     }
 
     /// Publishes the prepared run outside the total-cap timeout and reports
@@ -400,11 +452,60 @@ struct RunState {
     events: IngestEvents,
 }
 
-/// What one index link needs: the index URL for errors and the
-/// redirect-aware base for joining.
-struct LinkContext<'a> {
-    index_url: &'a Url,
-    index_base: &'a Url,
+/// One parsed llms.txt index and the subtree it covers
+/// (docs/implementation/07 §llms.txt adapter rule 4).
+struct Scope {
+    /// The index URL, for errors and events.
+    index_url: Url,
+    /// The URL the index response actually came from — redirect-aware —
+    /// which the index's relative links join against.
+    join_base: Url,
+    /// The directory the index covers: the most specific index for a page
+    /// is the one whose directory is the longest path prefix of the page.
+    dir: Url,
+    /// The parsed index.
+    index: crate::llms_txt::LlmsTxtIndex,
+}
+
+/// Resolves one index link against its scope's redirect-aware join base.
+fn resolve_link(scope: &Scope, link: &str) -> Result<Url, IngestError> {
+    scope
+        .join_base
+        .join(link)
+        .map_err(|e| IngestError::LlmsTxtInvalid {
+            url: scope.index_url.to_string(),
+            reason: format!("link {link:?} does not resolve: {e}"),
+        })
+}
+
+/// The directory URL of `url`: the path up to and including the last slash.
+fn directory_url(url: &Url) -> Url {
+    let mut dir = url.clone();
+    let path = url.path();
+    let upto = path.rfind('/').map_or(0, |at| at + 1);
+    dir.set_path(&path[..upto]);
+    dir
+}
+
+/// Whether a URL names a subpath index: its file name is `llms.txt`
+/// (`llms-full.txt` is the export, not an index).
+fn is_index_url(url: &Url) -> bool {
+    url.path()
+        .split('/')
+        .next_back()
+        .is_some_and(|file| file.eq_ignore_ascii_case("llms.txt"))
+}
+
+/// The scope covering `page_url` with the longest directory path — the
+/// most specific llms.txt applies (docs/implementation/07 §llms.txt
+/// adapter rule 4).
+fn most_specific_scope(scopes: &[Scope], page_url: &Url) -> Option<usize> {
+    scopes
+        .iter()
+        .enumerate()
+        .filter(|(_index, scope)| page_url.path().starts_with(scope.dir.path()))
+        .max_by_key(|(_index, scope)| scope.dir.path().len())
+        .map(|(index, _scope)| index)
 }
 
 /// Collapses duplicate pages by canonical body hash: the first occurrence
@@ -561,6 +662,45 @@ mod tests {
         assert_eq!(
             paths,
             ["https://x/a.md", "https://x/b.md", "https://x/c.md"]
+        );
+    }
+
+    /// Index URLs are the llms.txt files; the export file is not an index.
+    #[test]
+    fn index_urls_name_llms_txt() {
+        let url = |path: &str| Url::parse(&format!("https://x{path}")).unwrap();
+        assert!(is_index_url(&url("/llms.txt")));
+        assert!(is_index_url(&url("/docs/api/llms.txt")));
+        assert!(!is_index_url(&url("/llms-full.txt")));
+        assert!(!is_index_url(&url("/docs/page.md")));
+    }
+
+    /// The most specific index governs: the deepest directory whose path
+    /// prefixes the page wins
+    /// (docs/implementation/07 §llms.txt adapter rule 4).
+    #[test]
+    fn the_most_specific_scope_governs() {
+        let url = |path: &str| Url::parse(&format!("https://x{path}")).unwrap();
+        let scope = |dir: &str| Scope {
+            index_url: url("/dev/null"),
+            join_base: url("/dev/null"),
+            dir: url(dir),
+            index: parse_llms_txt("# T\n\n- [a](/a.md)\n", "u").unwrap(),
+        };
+        let scopes = vec![scope("/"), scope("/docs/"), scope("/docs/api/")];
+        assert_eq!(most_specific_scope(&scopes, &url("/overview.md")), Some(0));
+        assert_eq!(
+            most_specific_scope(&scopes, &url("/docs/intro.md")),
+            Some(1)
+        );
+        assert_eq!(
+            most_specific_scope(&scopes, &url("/docs/api/auth.md")),
+            Some(2)
+        );
+        // The root covers everything, so nothing is ungoverned.
+        assert_eq!(
+            most_specific_scope(&scopes, &url("/elsewhere/page.md")),
+            Some(0)
         );
     }
 }
