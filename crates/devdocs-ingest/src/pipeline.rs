@@ -209,7 +209,12 @@ impl<'a> IngestJob<'a> {
             // (docs/implementation/07 §llms.txt adapter rule 4).
             for link in scope.index.links() {
                 let link_url = resolve_link(scope, link.url())?;
-                if is_index_url(&link_url) || !is_page_url(&link_url) {
+                if is_index_url(&link_url) {
+                    continue;
+                }
+                if !is_page_url(&link_url) {
+                    tracing::warn!("skipping non-markdown link {}", link_url);
+                    run.events.skipped_pages += 1;
                     continue;
                 }
                 if most_specific_scope(&scopes, &link_url) != Some(scope_index)
@@ -372,10 +377,13 @@ impl<'a> IngestJob<'a> {
             // The markdown twin wins over the HTML page (docs/07 rule 2).
             // Without one, the page falls back to its HTML path, which the
             // media split skips: no HTML extractor exists in this slice
-            // (docs/implementation/07 §Media split).
+            // (docs/implementation/07 §Media split). The page leaves `seen`
+            // so a later, more specific scope listing can re-ingest it with
+            // its twin hint.
             let Some(twin) = relations.markdown_twin.clone() else {
                 tracing::warn!("html page {} carries no markdown twin; skipping", page_url);
                 run.events.skipped_pages += 1;
+                seen.remove(&page_url.to_string());
                 return Ok(described);
             };
             let twin_url = page_url
@@ -396,6 +404,7 @@ impl<'a> IngestJob<'a> {
                     page_url
                 );
                 run.events.skipped_pages += 1;
+                seen.remove(&page_url.to_string());
                 return Ok(described);
             }
             docs.push(PageDocument {

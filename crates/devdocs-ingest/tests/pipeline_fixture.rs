@@ -914,3 +914,90 @@ async fn fixture_replay_rejects_an_unparsable_recorded_status() {
         other => panic!("expected LlmsTxtInvalid, got {other}"),
     }
 }
+
+/// A non-page link in an index — an asset such as an image — is not a page:
+/// the walker counts it as a skipped page and carries on
+/// (docs/implementation/07 §llms.txt adapter rule 2).
+#[tokio::test]
+async fn ingest_counts_a_non_page_link_as_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let index = concat!(
+        "# Acme\n\n> Acme widgets documentation.\n\n",
+        "## Guides\n\n",
+        "- [Intro](https://docs.acme.test/intro.md): Start here\n",
+        "- [Logo](https://docs.acme.test/logo.png): an asset, not a page\n"
+    );
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": index },
+        { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": INTRO },
+    ]);
+    let fixture = write_fixture_set(dir.path(), &responses);
+    let config = config();
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let db = tempfile::tempdir().unwrap();
+    let store = Arc::new(devdocs_testkit::open_migrated(&db.path().join("docs.db")).unwrap());
+
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let outcome = job
+        .run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.pages, 1, "only the markdown page ingested");
+    assert_eq!(outcome.skipped_pages, 1, "the asset link counts as skipped");
+}
+
+/// An HTML page the root listing covers without a markdown twin skips, but
+/// it does not stay in the seen set: a deeper scope its `rel="describedby"`
+/// hint queued can list the same page again with a twin hint, and that
+/// listing ingests it (docs/implementation/07 §llms.txt adapter rules 2, 4).
+#[tokio::test]
+async fn ingest_reingests_a_skipped_html_page_a_deeper_scope_lists_with_a_twin() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = concat!(
+        "# Acme\n\n> Acme widgets documentation.\n\n",
+        "## Guides\n\n",
+        "- [Intro](https://docs.acme.test/api/intro.html) (rel=\"describedby\" /api/llms.txt): no twin at the root\n"
+    );
+    let api_index = concat!(
+        "# Acme API\n\n> The api subtree.\n\n",
+        "## Endpoints\n\n",
+        "- [Intro](https://docs.acme.test/api/intro.html) (rel=\"alternate\" type=\"text/markdown\" https://docs.acme.test/api/intro.md): the deeper listing has the twin\n"
+    );
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": root },
+        { "url": "https://docs.acme.test/api/llms.txt", "status": 200, "headers": {}, "body": api_index },
+        { "url": "https://docs.acme.test/api/intro.html", "status": 200, "headers": {}, "body": INTRO_HTML },
+        { "url": "https://docs.acme.test/api/intro.md", "status": 200, "headers": {}, "body": INTRO },
+    ]);
+    let fixture = write_fixture_set(dir.path(), &responses);
+    let config = config();
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let db = tempfile::tempdir().unwrap();
+    let store = Arc::new(devdocs_testkit::open_migrated(&db.path().join("docs.db")).unwrap());
+
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let outcome = job
+        .run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome.events.subpath_indexes, 1,
+        "the describedby hint queued the api index"
+    );
+    assert_eq!(outcome.pages, 1, "the page ingested through its twin");
+    assert_eq!(
+        outcome.events.markdown_twins_used, 1,
+        "the deeper listing's twin hint ran"
+    );
+    assert_eq!(outcome.skipped_pages, 1, "only the root skip counts");
+    let hits = store
+        .search_fts(&devdocs_store::build_match_query("installer"), 10)
+        .unwrap();
+    assert!(!hits.is_empty(), "the twin body is searchable");
+}
