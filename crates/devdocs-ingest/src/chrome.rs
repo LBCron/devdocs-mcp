@@ -95,9 +95,9 @@ pub fn strip_chrome(pages: &mut [PageDocument]) -> ChromeReport {
             }
             let text = pages[index].body[block.range.clone()].trim();
             let pattern_chrome = if seen_heading {
-                edit_link_text(text) || cookie_banner_text(text)
+                edit_link_text(text) || cookie_banner_text(text, block.link_only)
             } else {
-                block.link_only || edit_link_text(text) || cookie_banner_text(text)
+                block.link_only || edit_link_text(text) || cookie_banner_text(text, block.link_only)
             };
             let frequency_chrome = chrome_texts.contains(text);
             let kind = match (pattern_chrome, frequency_chrome) {
@@ -227,10 +227,15 @@ fn edit_link_text(text: &str) -> bool {
             || lower.contains("suggest an edit"))
 }
 
-/// Whether a block's text is a cookie banner: a short block mentioning
-/// cookies. Content that discusses cookies at length never matches.
-fn cookie_banner_text(text: &str) -> bool {
-    text.len() <= 200 && text.to_ascii_lowercase().contains("cookie")
+/// Whether a block is a cookie banner: a short block mentioning cookies
+/// that also carries a link or the accept/consent call to action. Content
+/// that merely discusses cookies — at any length, without the call to
+/// action — never matches.
+fn cookie_banner_text(text: &str, link_only: bool) -> bool {
+    let lower = text.to_ascii_lowercase();
+    text.len() <= 200
+        && lower.contains("cookie")
+        && (link_only || lower.contains("accept") || lower.contains("consent"))
 }
 
 /// Removes the dropped blocks from the body: each dropped block's bytes
@@ -310,22 +315,29 @@ mod tests {
         assert_eq!(pages[0].body, "# Guide\n\nInstall the widget first.");
     }
 
-    /// A cookie banner drops; a paragraph that discusses cookies at length
-    /// does not.
+    /// A cookie banner drops; a paragraph that discusses cookies — with no
+    /// link and no accept/consent call to action — never does.
     #[test]
     fn cookie_banner_drops_but_content_discussion_survives() {
         let mut pages = vec![
             page(
                 "https://x/a.md",
-                "# Guide\n\nWe use cookies to improve your experience.\n\nInstall the widget first.\n",
+                "# Guide\n\nWe use cookies to improve your experience. [Accept all](/accept)\n\nInstall the widget first.\n",
             ),
             page(
                 "https://x/b.md",
                 "# Storage\n\nCookies are stored in the session jar and expire after the\nlogin flow completes; the cookie jar never persists across\nrestarts of the daemon, the storage format is stable across\nreleases, and the expiry window tracks the license term of the\ndeployment rather than the wall clock of the client session.\n\nUse the jar.\n",
             ),
+            page(
+                "https://x/c.md",
+                "# Privacy\n\nWe use cookies to improve your experience.\n\nMore content.\n",
+            ),
         ];
         let report = strip_chrome(&mut pages);
-        assert_eq!(report.pattern_drops, 1);
+        assert_eq!(
+            report.pattern_drops, 1,
+            "only the banner with the call to action drops"
+        );
         assert!(
             pages[0].body.contains("Install the widget"),
             "the banner dropped"
@@ -337,6 +349,10 @@ mod tests {
         assert!(
             pages[1].body.contains("the cookie jar never persists"),
             "the long cookie paragraph survives"
+        );
+        assert!(
+            pages[2].body.contains("We use cookies"),
+            "a short cookie mention without the call to action survives"
         );
     }
 

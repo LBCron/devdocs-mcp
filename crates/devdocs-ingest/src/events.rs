@@ -19,10 +19,11 @@ pub struct IngestEvents {
     /// Links skipped before or during the media split (non-page URLs, HTML
     /// bodies without a markdown twin, HTML-serving markdown paths).
     pub skipped_pages: usize,
-    /// Blocks dropped by the chrome-strip pattern rules (leading
-    /// navigation, "edit this page" links, cookie banners) plus blocks the
-    /// segmenter skipped for carrying no content.
+    /// Blocks the segmenter skipped for carrying no content.
     pub skipped_blocks: usize,
+    /// Blocks dropped by the chrome-strip pattern rules (leading
+    /// navigation, "edit this page" links, cookie banners).
+    pub chrome_pattern_drops: usize,
     /// Fenced code blocks whose language is named but not in the known set.
     pub unknown_fence_languages: usize,
     /// Blocks dropped by the cross-page chrome frequency rule: a block
@@ -56,8 +57,15 @@ impl IngestEvents {
         if self.skipped_blocks > 0 {
             tracing::info!(
                 skipped_blocks = self.skipped_blocks,
-                "ingest events: {count} blocks skipped by chrome patterns or empty-block skips",
+                "ingest events: {count} blocks skipped for carrying no content",
                 count = self.skipped_blocks
+            );
+        }
+        if self.chrome_pattern_drops > 0 {
+            tracing::info!(
+                chrome_pattern_drops = self.chrome_pattern_drops,
+                "ingest events: {count} blocks dropped by the chrome pattern rules",
+                count = self.chrome_pattern_drops
             );
         }
         if self.unknown_fence_languages > 0 {

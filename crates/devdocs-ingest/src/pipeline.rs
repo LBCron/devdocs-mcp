@@ -281,8 +281,8 @@ impl<'a> IngestJob<'a> {
         .await
         .map_err(|join| IngestError::Join(join.to_string()))?;
         run.events.dedup_dropped_pages = dedup_dropped;
-        run.events.skipped_blocks += chrome_report.pattern_drops;
-        run.events.chrome_drops += chrome_report.frequency_drops;
+        run.events.chrome_pattern_drops = chrome_report.pattern_drops;
+        run.events.chrome_drops = chrome_report.frequency_drops;
 
         // Segment every stripped document (docs/implementation/07
         // §Segmentation algorithm), one spawn_blocking per page.
