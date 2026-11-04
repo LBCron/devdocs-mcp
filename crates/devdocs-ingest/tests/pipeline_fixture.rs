@@ -1061,3 +1061,136 @@ async fn ingest_treats_html_at_the_llms_full_probe_url_as_absent() {
         .unwrap();
     assert!(hits.is_empty(), "the probe HTML must not be searchable");
 }
+
+/// A duplicate listing keeps its `rel="describedby"` hint: the page reached
+/// the corpus through its first listing, but the second listing still names
+/// the index that covers it — that index queues and ingests the deeper page
+/// it lists (docs/implementation/07 §llms.txt adapter rules 2, 4).
+#[tokio::test]
+async fn ingest_returns_the_describedby_hint_of_a_duplicate_listing() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = concat!(
+        "# Acme\n\n> Acme widgets documentation.\n\n",
+        "## Guides\n\n",
+        "- [Page](https://docs.acme.test/sub/page.md): listed plainly at the root\n",
+        "- [Other](https://docs.acme.test/other.html) (rel=\"describedby\" /sub/llms.txt): queues the sub index after the page\n"
+    );
+    let sub_index = concat!(
+        "# Acme Sub\n\n> The sub subtree.\n\n",
+        "## Pages\n\n",
+        "- [Page](https://docs.acme.test/sub/page.md) (rel=\"describedby\" /deep/llms.txt): the same page, listed again with a hint\n"
+    );
+    let deep_index = concat!(
+        "# Acme Deep\n\n> The deep subtree.\n\n",
+        "## Pages\n\n",
+        "- [Extra](https://docs.acme.test/deep/extra.md): the deeper page\n"
+    );
+    let page =
+        "# Page\n\nThe page body carries the installer steps.\n\n## Steps\n\nRun the steps.\n";
+    let extra =
+        "# Extra\n\nThe deep page body carries the cursor rules.\n\n## Cursors\n\nUse cursors.\n";
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": root },
+        { "url": "https://docs.acme.test/sub/llms.txt", "status": 200, "headers": {}, "body": sub_index },
+        { "url": "https://docs.acme.test/deep/llms.txt", "status": 200, "headers": {}, "body": deep_index },
+        { "url": "https://docs.acme.test/sub/page.md", "status": 200, "headers": {}, "body": page },
+        { "url": "https://docs.acme.test/other.html", "status": 200, "headers": {}, "body": FAQ_HTML },
+        { "url": "https://docs.acme.test/deep/extra.md", "status": 200, "headers": {}, "body": extra },
+    ]);
+    let fixture = write_fixture_set(dir.path(), &responses);
+    let config = config();
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let db = tempfile::tempdir().unwrap();
+    let store = Arc::new(devdocs_testkit::open_migrated(&db.path().join("docs.db")).unwrap());
+
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let outcome = job
+        .run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome.events.subpath_indexes, 2,
+        "the describedby hint queued the sub index and the duplicate's hint queued the deep index"
+    );
+    assert_eq!(
+        outcome.pages, 2,
+        "the duplicate page buffered once, the deep page joined"
+    );
+    assert_eq!(
+        outcome.skipped_pages, 1,
+        "only the twin-less hint page skips"
+    );
+    let hits = store
+        .search_fts(&devdocs_store::build_match_query("installer"), 10)
+        .unwrap();
+    assert!(!hits.is_empty(), "the duplicate page is searchable once");
+    let hits = store
+        .search_fts(&devdocs_store::build_match_query("cursors"), 10)
+        .unwrap();
+    assert!(
+        !hits.is_empty(),
+        "the deep page the hint unlocked is searchable"
+    );
+}
+
+/// An HTML page whose markdown twin names the page itself has no markdown
+/// body anywhere: the self-referential twin skips and releases the page, so
+/// a later deeper listing can still ingest it through a real twin
+/// (docs/implementation/07 §llms.txt adapter rule 2).
+#[tokio::test]
+async fn ingest_releases_a_page_whose_markdown_twin_names_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = concat!(
+        "# Acme\n\n> Acme widgets documentation.\n\n",
+        "## Guides\n\n",
+        "- [Self](https://docs.acme.test/deep/self.html) (rel=\"alternate\" type=\"text/markdown\" https://docs.acme.test/deep/self.html): the twin names the page itself\n",
+        "- [Other](https://docs.acme.test/other.html) (rel=\"describedby\" /deep/llms.txt): queues the deep index after the page\n"
+    );
+    let deep_index = concat!(
+        "# Acme Deep\n\n> The deep subtree.\n\n",
+        "## Pages\n\n",
+        "- [Self](https://docs.acme.test/deep/self.html) (rel=\"alternate\" type=\"text/markdown\" https://docs.acme.test/deep/self.md): the deeper listing carries a real twin\n"
+    );
+    let self_md =
+        "# Self\n\nThe self page body carries the key handling.\n\n## Keys\n\nKeys rotate.\n";
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": root },
+        { "url": "https://docs.acme.test/deep/llms.txt", "status": 200, "headers": {}, "body": deep_index },
+        { "url": "https://docs.acme.test/deep/self.html", "status": 200, "headers": {}, "body": FAQ_HTML },
+        { "url": "https://docs.acme.test/deep/self.md", "status": 200, "headers": {}, "body": self_md },
+        { "url": "https://docs.acme.test/other.html", "status": 200, "headers": {}, "body": FAQ_HTML },
+    ]);
+    let fixture = write_fixture_set(dir.path(), &responses);
+    let config = config();
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let db = tempfile::tempdir().unwrap();
+    let store = Arc::new(devdocs_testkit::open_migrated(&db.path().join("docs.db")).unwrap());
+
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let outcome = job
+        .run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome.skipped_pages, 2,
+        "the self-referential twin skips and the twin-less hint page skips"
+    );
+    assert_eq!(
+        outcome.pages, 1,
+        "nothing buffers for the self-twin page itself"
+    );
+    assert_eq!(
+        outcome.events.markdown_twins_used, 1,
+        "the deeper listing's real twin ran after the release"
+    );
+    let hits = store
+        .search_fts(&devdocs_store::build_match_query("rotate"), 10)
+        .unwrap();
+    assert!(!hits.is_empty(), "the deeper twin body is searchable");
+}

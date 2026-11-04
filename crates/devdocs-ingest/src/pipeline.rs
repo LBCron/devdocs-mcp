@@ -380,10 +380,17 @@ impl<'a> IngestJob<'a> {
         seen: &mut HashSet<String>,
         run: &mut RunState,
     ) -> Result<Option<Url>, IngestError> {
+        // The duplicate path returns before any fetch, so the only relation
+        // hint available is the one the listing link itself carries.
+        let hint = link
+            .described_by()
+            .and_then(|named| page_url.join(named).ok())
+            .filter(is_index_url);
         if !seen.insert(page_url.to_string()) {
             // The page already reached the corpus through another link;
-            // the dedup pass would collapse it anyway.
-            return Ok(None);
+            // the dedup pass would collapse it anyway. Its describedby hint
+            // still stands: it names a scope that may open new pages.
+            return Ok(hint);
         }
         let (body, final_url, link_headers) = self.fetch(&page_url).await?;
         let response_relations = if is_html_body(&body) {
@@ -427,6 +434,15 @@ impl<'a> IngestJob<'a> {
                 })?;
             if !seen.insert(twin_url.to_string()) {
                 // The twin is already in the corpus through another route.
+                // A twin that names the page itself resolves to the page's
+                // own URL — the page serves no markdown body, so nothing is
+                // buffered and the page leaves `seen` for a later, more
+                // specific listing. A different twin already seen through
+                // another route leaves the page marked.
+                if twin_url == page_url {
+                    run.events.skipped_pages += 1;
+                    seen.remove(&page_url.to_string());
+                }
                 return Ok(described);
             }
             let (twin_body, _, _) = self.fetch(&twin_url).await?;
