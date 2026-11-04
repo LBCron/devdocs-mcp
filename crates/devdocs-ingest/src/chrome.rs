@@ -302,6 +302,35 @@ mod tests {
         assert_eq!(pages[0].body, "# Guide\n\nInstall the widget first.\n");
     }
 
+    /// A list before the first heading that mixes a link item with a plain
+    /// text item is content, not navigation: one non-link item keeps the
+    /// whole block.
+    #[test]
+    fn mixed_list_before_the_first_heading_survives() {
+        let mut pages = vec![page(
+            "https://x/a.md",
+            "- [Docs](/docs)\n- plain text item\n\n# Guide\n\ncontent\n",
+        )];
+        let report = strip_chrome(&mut pages);
+        assert_eq!(report.pattern_drops, 0);
+        assert!(pages[0].body.contains("plain text item"));
+        assert!(pages[0].body.contains("[Docs](/docs)"));
+    }
+
+    /// A multi-line paragraph of links before the first heading is
+    /// navigation: the soft break between the links does not break the
+    /// link-only block.
+    #[test]
+    fn two_line_link_paragraph_drops_as_navigation() {
+        let mut pages = vec![page(
+            "https://x/a.md",
+            "[Home](/)\n[Docs](/docs)\n\n# Guide\n\ncontent\n",
+        )];
+        let report = strip_chrome(&mut pages);
+        assert_eq!(report.pattern_drops, 1);
+        assert_eq!(pages[0].body, "# Guide\n\ncontent\n");
+    }
+
     /// An "Edit this page" link drops wherever it sits.
     #[test]
     fn edit_link_drops() {
@@ -478,8 +507,10 @@ mod tests {
             );
         }
         // The tail is covered.
-        if let Some(last) = chunks.last() {
-            assert!(last.page_range.end >= stripped.trim_end().len());
-        }
+        assert!(
+            chunks
+                .last()
+                .is_some_and(|last| last.page_range.end >= stripped.trim_end().len())
+        );
     }
 }

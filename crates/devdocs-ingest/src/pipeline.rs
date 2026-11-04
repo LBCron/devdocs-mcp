@@ -654,6 +654,9 @@ fn is_html_body(body: &str) -> bool {
 /// or an extensionless directory-style path. The index and export files
 /// (`llms.txt`, `llms-full.txt`) are not pages.
 fn is_page_url(url: &Url) -> bool {
+    // defensive: `split` always yields at least one element, so the else
+    // branch never runs; the let-else keeps `file` a plain `&str` instead
+    // of an `Option`.
     let Some(file) = url.path().split('/').next_back() else {
         return false;
     };

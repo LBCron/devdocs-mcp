@@ -248,6 +248,79 @@ mod tests {
         assert_eq!(relations.markdown_twin, None);
     }
 
+    /// An unparsable link value — no `<uri>` target — yields no relation
+    /// (docs/implementation/07 §llms.txt adapter rule 2: unparsable values
+    /// are ignored, never a failure).
+    #[test]
+    fn unparsable_link_value_yields_no_relation() {
+        let relations = PageRelations::from_link_headers(&[String::from("bogus")]);
+        assert_eq!(relations.markdown_twin, None);
+        assert_eq!(relations.described_by, None);
+    }
+
+    /// An unterminated `<link` tag — no closing `>` — stops the scan and
+    /// yields no relation.
+    #[test]
+    fn unterminated_link_tag_yields_no_relation() {
+        let relations = PageRelations::from_html(
+            "<link rel=\"alternate\" type=\"text/markdown\" href=\"/x.md\"",
+        );
+        assert_eq!(relations.markdown_twin, None);
+        assert_eq!(relations.described_by, None);
+    }
+
+    /// A `<link>` element without an `href` carries no relation.
+    #[test]
+    fn link_tag_without_href_yields_no_relation() {
+        let relations = PageRelations::from_html("<link rel=\"alternate\" type=\"text/markdown\">");
+        assert_eq!(relations.markdown_twin, None);
+        assert_eq!(relations.described_by, None);
+    }
+
+    /// A link-value parameter other than `rel` or `type` (`title=`) is
+    /// skipped without losing the `rel` that follows it.
+    #[test]
+    fn unknown_link_parameters_are_skipped() {
+        let relations = PageRelations::from_link_headers(&[String::from(
+            "<https://x/llms.txt>; title=\"Docs\"; rel=\"describedby\"",
+        )]);
+        assert_eq!(
+            relations.described_by.as_deref(),
+            Some("https://x/llms.txt")
+        );
+        assert_eq!(relations.markdown_twin, None);
+    }
+
+    /// A `data-href` look-alike never satisfies `href=`: the attribute scan
+    /// rejects a name not at an attribute boundary and keeps scanning to
+    /// the real `href`.
+    #[test]
+    fn data_href_does_not_hide_the_real_href() {
+        let relations = PageRelations::from_html(
+            "<link data-href=\"/decoy\" rel=\"alternate\" type=\"text/markdown\" href=\"/real.md\">",
+        );
+        assert_eq!(relations.markdown_twin.as_deref(), Some("/real.md"));
+    }
+
+    /// Single-quoted attribute values parse.
+    #[test]
+    fn single_quoted_attribute_values_parse() {
+        let relations =
+            PageRelations::from_html("<link rel='alternate' type='text/markdown' href='/y.md'>");
+        assert_eq!(relations.markdown_twin.as_deref(), Some("/y.md"));
+    }
+
+    /// Unquoted attribute values parse up to the next whitespace or tag
+    /// close. The `rel`/`type` stay quoted: an unquoted `text/markdown`
+    /// would truncate at the `/`, an implementation quirk this test does
+    /// not pin.
+    #[test]
+    fn unquoted_attribute_values_parse() {
+        let relations =
+            PageRelations::from_html("<link rel=\"alternate\" type=\"text/markdown\" href=x.md>");
+        assert_eq!(relations.markdown_twin.as_deref(), Some("x.md"));
+    }
+
     /// The response relations win over the index hint where both declare
     /// the same relation kind.
     #[test]

@@ -282,10 +282,7 @@ impl Segmenter {
                 NodeValue::CodeBlock(blocked) if blocked.fenced => {
                     if fence_language_unknown(&blocked.info) {
                         stats.unknown_fence_languages += 1;
-                        tracing::debug!(
-                            language = %blocked.info.trim(),
-                            "fenced code block carries an unknown language"
-                        );
+                        tracing::debug!(language = %blocked.info.trim(), "fenced code block carries an unknown language");
                     }
                     push_block(&mut sections, node, page_body, &offset, &mut stats);
                 }
@@ -348,8 +345,12 @@ impl Segmenter {
                     None => current = Some((range, tokens)),
                 }
             } else {
-                // A zero-token block carries no content: skip it and count
-                // the skip (the ingest events report skipped blocks).
+                // defensive: a zero-token block carries no content; skip it
+                // and count the skip (the ingest events report skipped
+                // blocks). Unreachable with the default chars/4 sizer — it
+                // never scores a non-empty slice zero tokens — and only
+                // reachable under `exact-tokens`, where the BPE may score a
+                // non-empty slice zero tokens.
                 stats.skipped_blocks += 1;
             }
         }
@@ -501,6 +502,10 @@ fn push_block<'a>(
     let (start, end) = block_range(node, offset);
     let end = end.min(page_body.len());
     if start >= end {
+        // defensive: a collapsed range is skipped and counted. Comrak never
+        // produces one for a top-level block — its sourcepos ranges span at
+        // least one byte — so the check stays only as a guard against a
+        // comrak regression.
         stats.skipped_blocks += 1;
         return;
     }

@@ -652,4 +652,56 @@ mod tests {
         assert_eq!(link.markdown_twin(), None);
         assert_eq!(link.url(), "https://x/guide.html");
     }
+
+    /// A hint group whose parentheses nest after the twin URL — as in a
+    /// `(v2)` suffix — closes at the depth-zero `)`, so the URL and the
+    /// description after the group both parse
+    /// (docs/implementation/07 §llms.txt adapter rule 2).
+    #[test]
+    fn nested_parentheses_in_a_hint_group() {
+        let index = parse_llms_txt(
+            concat!(
+                "# T\n\n",
+                "- [Guide](https://x/g.html) (rel=\"alternate\" type=\"text/markdown\" ",
+                "https://x/g.md (v2)): notes\n",
+            ),
+            "u",
+        )
+        .unwrap();
+        let link = index.links().next().unwrap();
+        assert_eq!(link.markdown_twin(), Some("https://x/g.md"), "{link:?}");
+        assert_eq!(link.description(), Some("notes"));
+    }
+
+    /// A `rel="describedby"` hint whose `type=` token sits before the index
+    /// URL: the token is skipped and the next non-parameter token names the
+    /// covering index (docs/implementation/07 §llms.txt adapter rule 2).
+    #[test]
+    fn describedby_hint_skips_a_leading_type_token() {
+        let index = parse_llms_txt(
+            "# T\n\n- [Api](https://x/api.html) (rel=\"describedby\" type=\"text/plain\" /x/api/llms.txt)\n",
+            "u",
+        )
+        .unwrap();
+        let link = index.links().next().unwrap();
+        assert_eq!(link.described_by(), Some("/x/api/llms.txt"), "{link:?}");
+        assert_eq!(link.markdown_twin(), None);
+    }
+
+    /// A hint group naming a relation kind the adapter does not map —
+    /// neither `alternate` nor `describedby` — is ignored, and the link
+    /// itself still parses.
+    #[test]
+    fn unmapped_relation_kind_is_ignored() {
+        let index = parse_llms_txt(
+            "# T\n\n- [X](https://x/x.html) (rel=\"bookmark\" https://x/other.html)\n",
+            "u",
+        )
+        .unwrap();
+        let link = index.links().next().unwrap();
+        assert_eq!(link.markdown_twin(), None);
+        assert_eq!(link.described_by(), None);
+        assert_eq!(link.url(), "https://x/x.html");
+        assert_eq!(link.title(), "X");
+    }
 }

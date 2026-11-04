@@ -164,6 +164,9 @@ pub fn run_add(
     // `warn`, so the lines surface only under `--verbose`
     // (docs/implementation/07 §Normalization pipeline).
     outcome.events.log();
+    // defensive: `IngestEvents` is a plain struct of integer counters, so
+    // `serde_json::to_value` cannot fail on it; the mapping exists only to
+    // fit the `Result`-returning call chain, never to run.
     let events = serde_json::to_value(&outcome.events).map_err(|e| Error::Upstream {
         code: UpstreamCode::UpstreamError,
         detail: format!("cannot serialize the ingest events: {e}"),
