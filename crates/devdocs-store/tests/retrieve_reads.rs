@@ -21,7 +21,7 @@ struct Seeded {
     v15: i64,
     /// The inactive zod 4.6.7 source.
     zod: i64,
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
 }
 
 fn seeded() -> Seeded {
@@ -88,7 +88,7 @@ fn seeded() -> Seeded {
         v16,
         v15,
         zod,
-        _dir: dir,
+        dir,
     }
 }
 
@@ -155,6 +155,32 @@ fn source_chunks_read_in_ordinal_order() {
         assert_eq!(chunk.rank, None);
         assert_eq!(chunk.library, "next.js");
         assert_eq!(chunk.version, "16.2.9");
+    }
+}
+
+/// A `chunks.content_hash` that is not a 32-byte BLOB — only possible
+/// through a hand-corrupted database — surfaces as a
+/// `FromSqlConversionFailure` on the read paths instead of panicking.
+#[test]
+fn corrupted_content_hash_blob_fails_as_from_sql_conversion() {
+    let s = seeded();
+    let conn = Connection::open(s.dir.path().join("docs.db")).unwrap();
+    conn.execute("UPDATE chunks SET content_hash = X'00'", [])
+        .unwrap();
+
+    for err in [
+        s.store
+            .search_fts_source(&build_match_query("routing"), s.v16, 10)
+            .unwrap_err(),
+        s.store.source_chunks(s.v16).unwrap_err(),
+    ] {
+        assert!(
+            matches!(
+                err,
+                devdocs_store::StoreError::Sql(rusqlite::Error::FromSqlConversionFailure(_, _, _))
+            ),
+            "expected FromSqlConversionFailure, got {err:?}"
+        );
     }
 }
 
