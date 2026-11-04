@@ -279,6 +279,42 @@ fn open_bounds_output_and_verifies() {
     assert_eq!(v.content_hash, item.content_hash);
 }
 
+/// `verify` re-derives the SHA-256 and reports `HASH_MISMATCH` when the
+/// stored text drifted (docs/implementation/06 §Hashing policy).
+#[test]
+fn verify_reports_hash_mismatch_on_drift() {
+    let (env, config) = indexed_env();
+    let cfg = ["--config", config.to_str().expect("config path")];
+    let (code, stdout, stderr) =
+        common::output(env.cmd(), &["search", "client", "--json", cfg[0], cfg[1]]);
+    assert_eq!(code, 0, "search failed: {stderr}");
+    let envelope: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
+    let doc_ref = envelope
+        .results
+        .first()
+        .expect("one result")
+        .doc_ref
+        .clone();
+
+    // Tamper with the stored text behind the CLI's back: the index
+    // drifted. DEVDOCS_HOME pins the data root, so the index lives at
+    // <root>/data/docs.db.
+    let db = env.root.join("data/docs.db");
+    let conn = rusqlite::Connection::open(&db).expect("db opens");
+    conn.execute(
+        "UPDATE chunks SET text = text || ' drifted' WHERE chunk_id IN (SELECT chunk_id FROM chunks LIMIT 1)",
+        [],
+    )
+    .expect("tamper");
+    drop(conn);
+
+    let (code, stdout, stderr) =
+        common::output(env.cmd(), &["verify", &doc_ref, "--json", cfg[0], cfg[1]]);
+    assert_eq!(code, 3, "stdout: {stdout} stderr: {stderr}");
+    let error: Value = serde_json::from_str(stderr.trim()).expect("stderr is JSON");
+    assert_eq!(error["error"], "HASH_MISMATCH");
+}
+
 /// `versions` lists the exact available versions.
 #[test]
 fn versions_list_the_exact_available_versions() {

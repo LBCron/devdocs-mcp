@@ -1027,6 +1027,7 @@ dependencies = [
  "devdocs-testkit",
  "insta",
  "predicates",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

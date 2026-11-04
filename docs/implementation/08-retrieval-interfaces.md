@@ -3,7 +3,7 @@ type: guide
 title: Retrieval and Interfaces (L3 + L4)
 description: The hybrid retrieval pipeline, version resolution, budget enforcement, fallback ladder, the result shape, the full CLI contract, and the MCP adapter.
 tags: [devdocs, retrieval, cli, mcp, rrf, max-tokens]
-timestamp: 2026-10-28T00:00:00Z
+timestamp: 2026-11-04T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -48,6 +48,8 @@ Policy (research: retrieval-design.md §3.4): never serve `latest` silently when
 | `fallback` | Requested version absent. Served the nearest available version, named in the result. Counts as a miss for grading |
 | `absent` | Library absent from the index. Exit 2 with `miss_reason` |
 
+The declared rules the implementation applies: the alias rule serves the highest active version, and the highest active version within the requested major for a major alias (`16`); a request with no version at all serves the highest active version under the same alias rule. The fallback rule serves the nearest available version — same major first, closest numeric distance `|Δmajor|·10⁶ + |Δminor|·10³ + |Δpatch|`; when no version shares the major, the highest active version serves.
+
 Migration questions: when the query matches a migration pattern ("upgrade", "migrate", "breaking changes"), the planner retrieves both the served version and the nearest older version and labels them (research: retrieval-design.md §3.4).
 
 ## Rungs
@@ -76,7 +78,7 @@ Entered only on low confidence or an explicit `miss_reason` match (research: ret
 
 A cold miss returns `not_indexed` with a sync hint. An abstention is a valid result (research: retrieval-design.md §3.7).
 
-`miss_reason` values: `not_indexed`, `version_absent`, `license_blocked`, `quarantined_only`, `low_confidence`. The JSON error on exit 2 carries `error = "NO_RESULT"` plus `miss_reason` and a `hint`.
+`miss_reason` values: `not_indexed`, `version_absent`, `license_blocked`, `quarantined_only`, `low_confidence`. The JSON error on exit 2 carries `miss_reason` and a `hint`; a cold miss — the library or the requested version absent — carries `error = "PKG_NOT_INDEXED"`, every other valid-query miss `error = "NO_RESULT"` (docs/implementation/05 §Error model).
 
 ## Result envelope
 
@@ -117,9 +119,9 @@ Commands:
 | `devdocs add <source> [--version V] [--kind K]` | Ingest a source through the ladder |
 | `devdocs sync [library]` | Refresh stale approved sources |
 | `devdocs list [--json]` | List indexed libraries and versions |
-| `devdocs search "query" [--library L] [--version V] [--limit N] [--max-tokens T] [--json]` | Hybrid search |
+| `devdocs search "query" [--library L] [--version V] [--limit N] [--cursor C] [--max-tokens T] [--json]` | Hybrid search |
 | `devdocs symbol <library@version> <symbol> [--json]` | Exact symbol lookup |
-| `devdocs open <ref> [--max-tokens T] [--json]` | Read one section by ref |
+| `devdocs open <ref> [--cursor C] [--max-tokens T] [--json]` | Read one section by ref |
 | `devdocs verify <ref> [--json]` | Re-derive and compare the content hash |
 | `devdocs versions <library> [--json]` | List available versions for a library |
 | `devdocs source approve|deny|list` | License registry operations |
@@ -136,7 +138,8 @@ Contract properties (research: architecture.md §L4, GEM §5 checklist):
 - JSON mode: `--json` prints the result envelope to stdout and nothing else. Logs always go to stderr.
 - Non-TTY auto-detection: no spinners, no colors, no tables when stdout is not a terminal. Progress goes to stderr as plain lines.
 - Bounded output everywhere: `--max-tokens` caps every read path. `--limit` caps result count (default 8).
-- Deterministic ordering: fusion order, ties by chunk id. Identical DB state gives byte-identical `--json` output.
+- Deterministic ordering: fusion order, ties by chunk id. Identical DB state gives byte-identical `--json` output. Byte-identity excludes the `served_at` wall-clock field (the comparison rule for the CLI, the MCP (#12), and the embeddings (#20) tickets).
+- Pagination: `--cursor C` resumes a truncated page — for `search` the cursor is the last served chunk id, for `open` the character offset into the chunk.
 - Exit codes 0/1/2/3/4 per [05](05-architecture.md) (usage errors remap clap's default 2 to 1).
 - Progressive disclosure: `devdocs list --json` is the ~20-token discovery surface. `devdocs versions <lib> --json` the per-library surface. `search` and `open` the full read. No prose man page. `--help` stays short.
 - No secrets in argv or stdout. The tool holds no credentials in v1 (public sources only). A future private-source feature will read tokens from the environment or an OS keystore, never from config files.
