@@ -58,7 +58,6 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::{Scope, fts_rung, symbol_rung};
-    use crate::error::RetrieveError;
 
     /// The symbol rung returns empty until M5.
     #[test]
@@ -80,15 +79,27 @@ mod tests {
         )
         .unwrap();
 
-        let hits = fts_rung(&store, "rout", Scope::All, 32)
-            .map_err(|e| match e {
-                RetrieveError::Store(e) => e,
-                other => panic!("unexpected retrieval error: {other}"),
-            })
-            .unwrap();
+        let hits = fts_rung(&store, "rout", Scope::All, 32).unwrap();
         // The prefix star on "rout" matches "routing".
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].section_path, vec!["Routing"]);
+    }
+
+    /// The `Scope::Library` arm narrows the search to one library.
+    #[test]
+    fn fts_rung_scopes_to_one_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _source) = devdocs_testkit::seeded_store(
+            &dir.path().join("docs.db"),
+            "next.js",
+            "[\"Routing\"]",
+            "The routing layer maps requests.",
+        )
+        .unwrap();
+
+        let hits = fts_rung(&store, "rout", Scope::Library("next.js"), 32).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].library, "next.js");
     }
 
     /// An empty query text produces the no-match expression: a valid query
@@ -104,12 +115,7 @@ mod tests {
         )
         .unwrap();
 
-        let hits = fts_rung(&store, "", Scope::All, 32)
-            .map_err(|e| match e {
-                RetrieveError::Store(e) => e,
-                other => panic!("unexpected retrieval error: {other}"),
-            })
-            .unwrap();
+        let hits = fts_rung(&store, "", Scope::All, 32).unwrap();
         assert_eq!(hits, Vec::new());
     }
 }

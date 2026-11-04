@@ -332,6 +332,9 @@ pub fn verify(store: &Store, doc_ref: &str) -> Result<ResultEnvelope, RetrieveEr
     // (docs/implementation/07 §Normalization pipeline stage 4) and strip
     // it; the hash covers the body alone. A text without the expected
     // header is itself drift and reports the mismatch honestly.
+    // defensive: a chunk with an empty section path has no title and no
+    // symbol, so no parseable ref reaches it (the ref grammar requires a
+    // path); this arm only keeps the header derivation total.
     let header = if chunk.section_path.is_empty() {
         format!("[{} {}]", chunk.library, chunk.version)
     } else {

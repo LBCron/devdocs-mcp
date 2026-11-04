@@ -241,6 +241,37 @@ mod tests {
         assert_eq!(match_ref(&chunks, &nothing), None);
     }
 
+    /// Fragment matching falls back to the symbol, then the title, and the
+    /// last ref segment matches the last section segment.
+    #[test]
+    fn refs_match_by_fragment_then_last_segment() {
+        let mut with_symbol = hit("next.js", "16.2.9", &["Routing"], Some("use_router"));
+        with_symbol.chunk_id = 1;
+        let mut titled = hit("next.js", "16.2.9", &["Storage"], None);
+        titled.chunk_id = 2;
+        let chunks = vec![with_symbol, titled];
+
+        // Step 2: the fragment names the symbol; the path matches no
+        // section path.
+        let by_symbol =
+            devdocs_model::docref::ParsedRef::parse("docs://next.js/v16.2.9/missing#use-router")
+                .unwrap();
+        assert_eq!(match_ref(&chunks, &by_symbol).map(|h| h.chunk_id), Some(1));
+
+        // Step 3: the fragment matches the last section segment (the
+        // title) of a chunk without a symbol.
+        let by_title =
+            devdocs_model::docref::ParsedRef::parse("docs://next.js/v16.2.9/other#storage")
+                .unwrap();
+        assert_eq!(match_ref(&chunks, &by_title).map(|h| h.chunk_id), Some(2));
+
+        // Step 4: only the last segment of a multi-segment path matches.
+        let by_last =
+            devdocs_model::docref::ParsedRef::parse("docs://next.js/v16.2.9/other/storage")
+                .unwrap();
+        assert_eq!(match_ref(&chunks, &by_last).map(|h| h.chunk_id), Some(2));
+    }
+
     /// Hex encoding is lowercase and two digits per byte.
     #[test]
     fn hex_encodes_lowercase() {
