@@ -10,32 +10,9 @@
 
 mod common;
 
-use std::path::PathBuf;
-
+use common::{indexed_doc, indexed_env, output};
 use devdocs_model::ResultEnvelope;
 use serde_json::Value;
-
-/// The index and page bodies the fixture replay serves.
-const INDEX: &str = concat!(
-    "# Acme\n\n> Acme widgets documentation.\n\n",
-    "## Guides\n\n",
-    "- [Intro](https://docs.acme.test/intro.md): Start here\n"
-);
-
-const INTRO_V1: &str = concat!(
-    "# Intro\n\n",
-    "The Acme SDK ships a client for every runtime.\n\n",
-    "## Install\n\n",
-    "Run the installer and export the key. ",
-    "The upgrade guide walks v1 users through the setup.\n"
-);
-
-const INTRO_V2: &str = concat!(
-    "# Intro\n\n",
-    "The Acme SDK v2 ships a widget for every runtime.\n\n",
-    "## Install\n\n",
-    "Upgrade from v1: run the installer and export the key.\n"
-);
 
 /// The bytes of one search run, with `served_at` removed — the byte-identity
 /// comparison excludes the wall-clock field (docs/implementation/13 §M4:
@@ -49,71 +26,13 @@ fn envelope_without_served_at(stdout: &str) -> Value {
     envelope
 }
 
-/// An indexed fixture corpus: acme at versions 1.0 and 2.0.
-fn indexed_env() -> (common::Env, PathBuf) {
-    let env = common::Env::new();
-    let dir = env.root.join("fixture");
-    std::fs::create_dir_all(&dir).expect("fixture dir");
-    let responses_v1 = serde_json::json!([
-        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": INDEX },
-        { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": INTRO_V1 },
-    ]);
-    let responses_v2 = serde_json::json!([
-        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": INDEX },
-        { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": INTRO_V2 },
-    ]);
-    std::fs::write(
-        dir.join("manifest.json"),
-        serde_json::to_string(&responses_v1).expect("manifest serializes"),
-    )
-    .expect("manifest written");
-    let config = env.root.join("devdocs.toml");
-    std::fs::write(
-        &config,
-        concat!(
-            "[sources.acme]\n",
-            "kind = \"llms_txt\"\n",
-            "url = \"https://docs.acme.test/llms.txt\"\n",
-            "license = \"MIT\"\n",
-            "status = \"approved_index\"\n"
-        ),
-    )
-    .expect("config written");
-
-    let add = |version: &str, responses: &Value| {
-        std::fs::write(
-            dir.join("manifest.json"),
-            serde_json::to_string(responses).expect("manifest serializes"),
-        )
-        .expect("manifest written");
-        let (code, _stdout, stderr) = common::output(
-            env.cmd(),
-            &[
-                "add",
-                "https://docs.acme.test/llms.txt",
-                "--fixture",
-                dir.to_str().expect("fixture path"),
-                "--version",
-                version,
-                "--json",
-                "--config",
-                config.to_str().expect("config path"),
-            ],
-        );
-        assert_eq!(code, 0, "add {version} failed: {stderr}");
-    };
-    add("1.0", &responses_v1);
-    add("2.0", &responses_v2);
-    (env, config)
-}
-
 /// One fixture query snapshots to the exact `--json` envelope
 /// (docs/implementation/13 §M4: "Snapshot the exact JSON for one fixture
 /// query").
 #[test]
 fn search_snapshots_the_result_envelope() {
     let (env, config) = indexed_env();
-    let (code, stdout, stderr) = common::output(
+    let (code, stdout, stderr) = output(
         env.cmd(),
         &[
             "search",
@@ -145,8 +64,8 @@ fn identical_db_state_gives_byte_identical_output() {
         "--config",
         config.to_str().expect("config path"),
     ];
-    let (code1, out1, _e1) = common::output(env.cmd(), &args);
-    let (code2, out2, _e2) = common::output(env.cmd(), &args);
+    let (code1, out1, _e1) = output(env.cmd(), &args);
+    let (code2, out2, _e2) = output(env.cmd(), &args);
     assert_eq!(code1, 0);
     assert_eq!(code2, 0);
     assert_eq!(
@@ -165,7 +84,7 @@ fn cold_misses_exit_two() {
     let cfg = ["--config", config.to_str().expect("config path")];
 
     // A query the corpus cannot match.
-    let (code, stdout, stderr) = common::output(
+    let (code, stdout, stderr) = output(
         env.cmd(),
         &["search", "zzz-nonexistent-thing", "--json", cfg[0], cfg[1]],
     );
@@ -180,7 +99,7 @@ fn cold_misses_exit_two() {
 #[test]
 fn an_absent_library_exits_two_with_the_add_hint() {
     let (env, config) = indexed_env();
-    let (code, stdout, stderr) = common::output(
+    let (code, stdout, stderr) = output(
         env.cmd(),
         &[
             "search",
@@ -204,23 +123,15 @@ fn an_absent_library_exits_two_with_the_add_hint() {
     );
 }
 
-/// `open` bounds the output by `max_tokens` and continues through the
-/// cursor; the served content hash matches `verify`'s re-derivation.
+/// `open` bounds the output by `max_tokens`: a tiny budget truncates and
+/// carries the resume cursor.
 #[test]
-fn open_bounds_output_and_verifies() {
+fn open_under_a_tiny_budget_truncates_and_carries_a_cursor() {
     let (env, config) = indexed_env();
+    let doc_ref = indexed_doc(&env, &config).doc_ref;
     let cfg = ["--config", config.to_str().expect("config path")];
 
-    // Search for the ref.
-    let (code, stdout, stderr) =
-        common::output(env.cmd(), &["search", "client", "--json", cfg[0], cfg[1]]);
-    assert_eq!(code, 0, "search failed: {stderr}");
-    let envelope: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
-    let item = envelope.results.first().expect("one result");
-    let doc_ref = item.doc_ref.clone();
-
-    // open with a tiny budget truncates and carries the cursor.
-    let (code, stdout, stderr) = common::output(
+    let (code, stdout, stderr) = output(
         env.cmd(),
         &[
             "open",
@@ -235,10 +146,37 @@ fn open_bounds_output_and_verifies() {
     assert_eq!(code, 0, "open failed: {stderr}");
     let open1: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
     assert!(open1.truncated, "a tiny budget truncates");
-    let cursor = open1.next_cursor.clone().expect("cursor present");
+    open1.next_cursor.expect("cursor present");
+}
+
+/// Resuming through the cursor tiles the chunk: page 1 opens the served
+/// text and page 2 carries the rest.
+#[test]
+fn cursor_resume_tiles_the_whole_chunk() {
+    let (env, config) = indexed_env();
+    let doc_ref = indexed_doc(&env, &config).doc_ref;
+    let cfg = ["--config", config.to_str().expect("config path")];
+
+    // open with a tiny budget: page 1 and the cursor.
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "open",
+            &doc_ref,
+            "--max-tokens",
+            "1",
+            "--json",
+            cfg[0],
+            cfg[1],
+        ],
+    );
+    assert_eq!(code, 0, "open failed: {stderr}");
+    let open1: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
+    let page1 = open1.results.first().expect("page 1").snippet.clone();
+    let cursor = open1.next_cursor.expect("cursor present");
 
     // Resume through the cursor: the pages tile the chunk.
-    let (code, stdout, stderr) = common::output(
+    let (code, stdout, stderr) = output(
         env.cmd(),
         &[
             "open",
@@ -254,10 +192,8 @@ fn open_bounds_output_and_verifies() {
     );
     assert_eq!(code, 0, "open resume failed: {stderr}");
     let open2: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
-    let page1 = open1.results.first().expect("page 1").snippet.clone();
     let page2 = open2.results.first().expect("page 2").snippet.clone();
-    let (code, stdout, _stderr) =
-        common::output(env.cmd(), &["open", &doc_ref, "--json", cfg[0], cfg[1]]);
+    let (code, stdout, _stderr) = output(env.cmd(), &["open", &doc_ref, "--json", cfg[0], cfg[1]]);
     assert_eq!(code, 0);
     let full: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
     let whole = full.results.first().expect("full page").snippet.clone();
@@ -269,10 +205,18 @@ fn open_bounds_output_and_verifies() {
         whole.contains(page2.trim_end_matches('\n')),
         "page 2 is the rest"
     );
+}
 
-    // verify re-derives the stored hash.
-    let (code, stdout, stderr) =
-        common::output(env.cmd(), &["verify", &doc_ref, "--json", cfg[0], cfg[1]]);
+/// `verify` re-derives the stored hash: it matches the search result's
+/// `content_hash`.
+#[test]
+fn verify_re_derives_the_search_hash() {
+    let (env, config) = indexed_env();
+    let item = indexed_doc(&env, &config);
+    let doc_ref = item.doc_ref.clone();
+    let cfg = ["--config", config.to_str().expect("config path")];
+
+    let (code, stdout, stderr) = output(env.cmd(), &["verify", &doc_ref, "--json", cfg[0], cfg[1]]);
     assert_eq!(code, 0, "verify failed: {stderr}");
     let verified: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
     let v = verified.results.first().expect("verify result");
@@ -285,24 +229,14 @@ fn open_bounds_output_and_verifies() {
 fn verify_reports_hash_mismatch_on_drift() {
     let (env, config) = indexed_env();
     let cfg = ["--config", config.to_str().expect("config path")];
-    let (code, stdout, stderr) =
-        common::output(env.cmd(), &["search", "client", "--json", cfg[0], cfg[1]]);
-    assert_eq!(code, 0, "search failed: {stderr}");
-    let envelope: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
-    let doc_ref = envelope
-        .results
-        .first()
-        .expect("one result")
-        .doc_ref
-        .clone();
+    let doc_ref = indexed_doc(&env, &config).doc_ref;
 
     // Tamper with the stored text behind the CLI's back: the index
     // drifted. DEVDOCS_HOME pins the data root, so the index lives at
     // <root>/data/docs.db.
     devdocs_testkit::corrupt_one_chunk_text(&env.root.join("data/docs.db")).expect("tamper");
 
-    let (code, stdout, stderr) =
-        common::output(env.cmd(), &["verify", &doc_ref, "--json", cfg[0], cfg[1]]);
+    let (code, stdout, stderr) = output(env.cmd(), &["verify", &doc_ref, "--json", cfg[0], cfg[1]]);
     assert_eq!(code, 3, "stdout: {stdout} stderr: {stderr}");
     let error: Value = serde_json::from_str(stderr.trim()).expect("stderr is JSON");
     assert_eq!(error["error"], "HASH_MISMATCH");
@@ -312,7 +246,7 @@ fn verify_reports_hash_mismatch_on_drift() {
 #[test]
 fn versions_list_the_exact_available_versions() {
     let (env, config) = indexed_env();
-    let (code, stdout, stderr) = common::output(
+    let (code, stdout, stderr) = output(
         env.cmd(),
         &[
             "versions",
@@ -340,7 +274,7 @@ fn versions_list_the_exact_available_versions() {
 #[test]
 fn an_absent_version_serves_nearest_as_fallback() {
     let (env, config) = indexed_env();
-    let (code, stdout, stderr) = common::output(
+    let (code, stdout, stderr) = output(
         env.cmd(),
         &[
             "search",
@@ -361,7 +295,7 @@ fn an_absent_version_serves_nearest_as_fallback() {
     assert_eq!(results[0]["version_status"], "fallback");
 
     // Without any version request, the alias default labels the results.
-    let (code, stdout, stderr) = common::output(
+    let (code, stdout, stderr) = output(
         env.cmd(),
         &[
             "search",
@@ -382,7 +316,7 @@ fn an_absent_version_serves_nearest_as_fallback() {
 #[test]
 fn search_without_json_prints_summary_lines() {
     let (env, config) = indexed_env();
-    let (code, stdout, stderr) = common::output(
+    let (code, stdout, stderr) = output(
         env.cmd(),
         &[
             "search",
@@ -410,7 +344,7 @@ fn search_without_json_prints_the_truncation_notice_under_a_tiny_budget() {
     env.set("DEVDOCS_SEARCH_MAX_TOKENS_DEFAULT", "1");
     // "upgrade installer" matches chunks in both versions, so rank 2 must
     // fall off the one-token budget.
-    let (code, stdout, stderr) = common::output(
+    let (code, stdout, stderr) = output(
         env.cmd(),
         &[
             "search",
@@ -436,18 +370,9 @@ fn search_without_json_prints_the_truncation_notice_under_a_tiny_budget() {
 fn open_without_json_prints_the_text_and_the_truncation_notice() {
     let (env, config) = indexed_env();
     let cfg = ["--config", config.to_str().expect("config path")];
-    let (code, stdout, stderr) =
-        common::output(env.cmd(), &["search", "client", "--json", cfg[0], cfg[1]]);
-    assert_eq!(code, 0, "search failed: {stderr}");
-    let envelope: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
-    let doc_ref = envelope
-        .results
-        .first()
-        .expect("one result")
-        .doc_ref
-        .clone();
+    let doc_ref = indexed_doc(&env, &config).doc_ref;
 
-    let (code, stdout, stderr) = common::output(
+    let (code, stdout, stderr) = output(
         env.cmd(),
         &["open", &doc_ref, "--max-tokens", "1", cfg[0], cfg[1]],
     );
@@ -471,7 +396,7 @@ fn open_without_json_prints_the_text_and_the_truncation_notice() {
     assert_ne!(cursor, "");
 
     // A full budget prints the served text with no notice.
-    let (code, stdout, stderr) = common::output(env.cmd(), &["open", &doc_ref, cfg[0], cfg[1]]);
+    let (code, stdout, stderr) = output(env.cmd(), &["open", &doc_ref, cfg[0], cfg[1]]);
     assert_eq!(code, 0, "open failed: {stderr}");
     assert!(!stdout.contains("…truncated"), "stdout: {stdout:?}");
     assert!(stdout.contains("Intro"), "served text: {stdout:?}");
@@ -482,15 +407,11 @@ fn open_without_json_prints_the_text_and_the_truncation_notice() {
 fn verify_without_json_prints_the_verified_line() {
     let (env, config) = indexed_env();
     let cfg = ["--config", config.to_str().expect("config path")];
-    let (code, stdout, stderr) =
-        common::output(env.cmd(), &["search", "client", "--json", cfg[0], cfg[1]]);
-    assert_eq!(code, 0, "search failed: {stderr}");
-    let envelope: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
-    let item = envelope.results.first().expect("one result");
+    let item = indexed_doc(&env, &config);
     let doc_ref = item.doc_ref.clone();
     let hash = item.content_hash.clone();
 
-    let (code, stdout, stderr) = common::output(env.cmd(), &["verify", &doc_ref, cfg[0], cfg[1]]);
+    let (code, stdout, stderr) = output(env.cmd(), &["verify", &doc_ref, cfg[0], cfg[1]]);
     assert_eq!(code, 0, "verify failed: {stderr}");
     assert_eq!(
         stdout.trim(),
@@ -503,7 +424,7 @@ fn verify_without_json_prints_the_verified_line() {
 #[test]
 fn versions_without_json_print_the_discovery_lines() {
     let (env, config) = indexed_env();
-    let (code, stdout, stderr) = common::output(
+    let (code, stdout, stderr) = output(
         env.cmd(),
         &[
             "versions",
@@ -529,7 +450,7 @@ fn versions_without_json_print_the_discovery_lines() {
 #[test]
 fn open_with_a_malformed_ref_exits_one() {
     let (env, config) = indexed_env();
-    let (code, stdout, stderr) = common::output(
+    let (code, stdout, stderr) = output(
         env.cmd(),
         &[
             "open",
@@ -558,7 +479,7 @@ fn a_search_on_a_broken_index_exits_three() {
     env.without_home();
     env.set("DEVDOCS_INDEX_PATH", broken.to_str().expect("index path"));
 
-    let (code, stdout, stderr) = common::output(
+    let (code, stdout, stderr) = output(
         env.cmd(),
         &[
             "search",
@@ -578,7 +499,7 @@ fn a_search_on_a_broken_index_exits_three() {
 #[test]
 fn migration_questions_retrieve_both_versions() {
     let (env, config) = indexed_env();
-    let (code, stdout, stderr) = common::output(
+    let (code, stdout, stderr) = output(
         env.cmd(),
         &[
             "search",

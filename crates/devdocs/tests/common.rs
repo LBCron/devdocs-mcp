@@ -7,9 +7,11 @@
 #![allow(clippy::must_use_candidate)]
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
+use devdocs_model::{ResultEnvelope, ResultItem};
+use serde_json::Value;
 
 /// Every `DEVDOCS_*` layer variable the host may carry; the tests remove
 /// them so only the layers under test apply. `DEVDOCS_HOME` is absent: the
@@ -110,4 +112,111 @@ impl Default for Env {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The index and page bodies the acme fixture replay serves.
+const INDEX: &str = concat!(
+    "# Acme\n\n> Acme widgets documentation.\n\n",
+    "## Guides\n\n",
+    "- [Intro](https://docs.acme.test/intro.md): Start here\n"
+);
+
+const INTRO_V1: &str = concat!(
+    "# Intro\n\n",
+    "The Acme SDK ships a client for every runtime.\n\n",
+    "## Install\n\n",
+    "Run the installer and export the key. ",
+    "The upgrade guide walks v1 users through the setup.\n"
+);
+
+const INTRO_V2: &str = concat!(
+    "# Intro\n\n",
+    "The Acme SDK v2 ships a widget for every runtime.\n\n",
+    "## Install\n\n",
+    "Upgrade from v1: run the installer and export the key.\n"
+);
+
+/// The replay responses one acme version serves through `--fixture`.
+fn acme_responses(intro: &str) -> Value {
+    serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": INDEX },
+        { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": intro },
+    ])
+}
+
+/// Write one replay manifest: the responses the `--fixture` fetch serves.
+fn write_manifest(dir: &Path, responses: &Value) {
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string(responses).expect("manifest serializes"),
+    )
+    .expect("manifest written");
+}
+
+/// Write the devdocs.toml pointing at the acme `llms.txt` source; return
+/// its path.
+fn write_config(root: &Path) -> PathBuf {
+    let config = root.join("devdocs.toml");
+    std::fs::write(
+        &config,
+        concat!(
+            "[sources.acme]\n",
+            "kind = \"llms_txt\"\n",
+            "url = \"https://docs.acme.test/llms.txt\"\n",
+            "license = \"MIT\"\n",
+            "status = \"approved_index\"\n"
+        ),
+    )
+    .expect("config written");
+    config
+}
+
+/// Run one versioned `add --fixture` against the replay manifest.
+fn add_fixture_version(env: &Env, dir: &Path, config: &Path, version: &str, responses: &Value) {
+    write_manifest(dir, responses);
+    let (code, _stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "add",
+            "https://docs.acme.test/llms.txt",
+            "--fixture",
+            dir.to_str().expect("fixture path"),
+            "--version",
+            version,
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+        ],
+    );
+    assert_eq!(code, 0, "add {version} failed: {stderr}");
+}
+
+/// An indexed fixture corpus: acme at versions 1.0 and 2.0. Returns the
+/// environment and the config path every CLI run needs.
+pub fn indexed_env() -> (Env, PathBuf) {
+    let env = Env::new();
+    let dir = env.root.join("fixture");
+    std::fs::create_dir_all(&dir).expect("fixture dir");
+    let config = write_config(&env.root);
+    add_fixture_version(&env, &dir, &config, "1.0", &acme_responses(INTRO_V1));
+    add_fixture_version(&env, &dir, &config, "2.0", &acme_responses(INTRO_V2));
+    (env, config)
+}
+
+/// Search the indexed corpus and return the first result: the doc the
+/// open/verify surfaces exercise.
+pub fn indexed_doc(env: &Env, config: &Path) -> ResultItem {
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "search",
+            "client",
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+        ],
+    );
+    assert_eq!(code, 0, "search failed: {stderr}");
+    let envelope: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
+    envelope.results.into_iter().next().expect("one result")
 }
