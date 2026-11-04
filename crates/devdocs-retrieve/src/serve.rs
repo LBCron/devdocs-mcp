@@ -69,102 +69,28 @@ pub fn search(
     // Plan the rungs from the resolution. The headroom is 4× the requested
     // hits (docs/08 §Rungs, rung 2).
     let headroom = plan.limit.saturating_mul(4).max(1);
-    let mut rung_hits: Vec<Vec<devdocs_store::Hit>> =
-        vec![symbol_rung(store, scope_for(&resolved))];
+    let mut rung_hits: Vec<Vec<Hit>> = vec![symbol_rung(store, scope_for(&resolved))];
+    let (pick_status, served_version, requested_text) =
+        version_rung_hits(store, query, &resolved, headroom, &mut rung_hits)?;
 
-    let (pick_status, served_version, requested_text): (
-        VersionStatus,
-        Option<String>,
-        Option<String>,
-    ) = if let Some(library) = &resolved.library {
-        let available: Vec<Version> = store
-            .library_versions(library)?
-            .into_iter()
-            .map(Version::from)
-            .collect();
-        if available.is_empty() {
-            return Err(MissReason::NotIndexed.into());
-        }
-        let pick = pick(&available, resolved.version.as_deref());
-        let served = pick.version.clone().ok_or(MissReason::NotIndexed)?;
-        let source_id = store
-            .find_source(library, served.as_str())?
-            .ok_or(MissReason::NotIndexed)?;
-        let scope = Scope::Source(source_id);
-        rung_hits.push(fts_rung(store, &query.text, scope, headroom)?);
-
-        // The migration-question path: retrieve the served version and
-        // the nearest older version, both labeled through their own
-        // served_version (docs/08 §Version resolution).
-        if is_migration_query(&query.text)
-            && let Some(older) = nearest_older(&available, &served)
-            && let Some(older_id) = store.find_source(library, older.as_str())?
-        {
-            rung_hits.push(fts_rung(
-                store,
-                &query.text,
-                Scope::Source(older_id),
-                headroom,
-            )?);
-        }
-        (
-            pick.status,
-            Some(served.as_str().to_owned()),
-            resolved.version.clone(),
-        )
-    } else {
-        // Unfiltered fallback: search all approved sources. Per-item
-        // status is the alias default (no version requested).
-        rung_hits.push(fts_rung(store, &query.text, Scope::All, headroom)?);
-        (VersionStatus::Alias, None, resolved.version.clone())
-    };
-
+    // Fuse the rungs and pack within the token budget.
     let fused = fuse(plan.rrf_k, &rung_hits);
     if fused.is_empty() {
-        // A valid query that serves nothing is a miss (exit 2). The
-        // reason distinguishes an empty index from a query that simply
-        // matched nothing (docs/08 §Error codes).
-        let has_active = store
-            .list_sources()
-            .is_ok_and(|sources| sources.iter().any(|s| s.active));
-        let reason = if has_active {
-            MissReason::LowConfidence
-        } else {
-            MissReason::NotIndexed
-        };
-        return Err(reason.into());
+        return Err(empty_fusion_miss(store));
     }
-
-    // Cursor resume: continue after the last served chunk id in the same
-    // fusion order.
-    let fused: Vec<_> = match plan.cursor {
-        None => fused,
-        Some(cursor) => {
-            let position = fused
-                .iter()
-                .position(|(hit, _)| hit.chunk_id == i64::try_from(cursor).unwrap_or(-1))
-                .ok_or_else(|| UsageError::UnknownCursor(cursor.to_string()))?;
-            fused[position + 1..].to_vec()
-        }
-    };
+    let fused = resume_after_cursor(fused, plan.cursor)?;
 
     let packed = pack(fused, plan.max_tokens);
     let results: Vec<ResultItem> = packed
         .items
         .iter()
         .map(|(hit, score)| {
-            // Per-item status: the picked version carries the request's
-            // status. Without a picked version (the unfiltered fallback),
-            // an exact-request hit verifies and everything else is the
-            // alias default — or a near version served.
-            let status = match (&served_version, &requested_text) {
-                (Some(served), _) if hit.version == *served => pick_status,
-                (None, Some(requested)) if hit.version == *requested => VersionStatus::Verified,
-                (None, None) => VersionStatus::Alias,
-                // A near version served, or an exact request on the
-                // unfiltered path that another version answered.
-                _ => VersionStatus::Fallback,
-            };
+            let status = item_status(
+                &hit.version,
+                served_version.as_deref(),
+                requested_text.as_deref(),
+                pick_status,
+            );
             to_result_item(hit, requested_text.as_deref(), status, *score)
         })
         .collect();
@@ -175,6 +101,144 @@ pub fn search(
         next_cursor: packed.next_cursor,
         served_at: now_rfc3339(),
     })
+}
+
+/// The version-resolution rungs (docs/08 §Version resolution): with a
+/// resolved library, the served source's FTS rung plus the
+/// migration-question rung via [`nearest_older`]; without one, the
+/// unfiltered fallback over all approved sources. Appends the rungs to
+/// `rung_hits` and returns the per-item status inputs — the pick status,
+/// the served version, and the requested version.
+///
+/// # Errors
+/// [`RetrieveError::Miss`] with `not_indexed` when the library has no
+/// sources or the pick serves none, [`RetrieveError::Store`] for store
+/// failures.
+fn version_rung_hits(
+    store: &Store,
+    query: &Query,
+    resolved: &crate::resolver::Resolved,
+    headroom: u32,
+    rung_hits: &mut Vec<Vec<Hit>>,
+) -> Result<(VersionStatus, Option<String>, Option<String>), RetrieveError> {
+    let Some(library) = &resolved.library else {
+        // Unfiltered fallback: search all approved sources. Per-item
+        // status is the alias default (no version requested).
+        rung_hits.push(fts_rung(store, &query.text, Scope::All, headroom)?);
+        return Ok((VersionStatus::Alias, None, resolved.version.clone()));
+    };
+    let available: Vec<Version> = store
+        .library_versions(library)?
+        .into_iter()
+        .map(Version::from)
+        .collect();
+    if available.is_empty() {
+        return Err(MissReason::NotIndexed.into());
+    }
+    let pick = pick(&available, resolved.version.as_deref());
+    let served = pick.version.clone().ok_or(MissReason::NotIndexed)?;
+    let source_id = store
+        .find_source(library, served.as_str())?
+        .ok_or(MissReason::NotIndexed)?;
+    rung_hits.push(fts_rung(
+        store,
+        &query.text,
+        Scope::Source(source_id),
+        headroom,
+    )?);
+    if let Some(migration) = migration_rung(store, query, library, &served, &available, headroom)? {
+        rung_hits.push(migration);
+    }
+    Ok((
+        pick.status,
+        Some(served.as_str().to_owned()),
+        resolved.version.clone(),
+    ))
+}
+
+/// The migration-question rung: retrieve the served version and the
+/// nearest older version, both labeled through their own `served_version`
+/// (docs/08 §Version resolution). `None` when the query is not a
+/// migration question or no older version is indexed.
+///
+/// # Errors
+/// [`RetrieveError::Store`] for store failures.
+fn migration_rung(
+    store: &Store,
+    query: &Query,
+    library: &str,
+    served: &Version,
+    available: &[Version],
+    headroom: u32,
+) -> Result<Option<Vec<Hit>>, RetrieveError> {
+    if !is_migration_query(&query.text) {
+        return Ok(None);
+    }
+    let Some(older) = nearest_older(available, served) else {
+        return Ok(None);
+    };
+    let Some(older_id) = store.find_source(library, older.as_str())? else {
+        return Ok(None);
+    };
+    Ok(Some(fts_rung(
+        store,
+        &query.text,
+        Scope::Source(older_id),
+        headroom,
+    )?))
+}
+
+/// The miss reason for a valid query that serves nothing (exit 2): the
+/// reason distinguishes an empty index from a query that simply matched
+/// nothing (docs/08 §Error codes).
+fn empty_fusion_miss(store: &Store) -> RetrieveError {
+    let has_active = store
+        .list_sources()
+        .is_ok_and(|sources| sources.iter().any(|s| s.active));
+    if has_active {
+        MissReason::LowConfidence.into()
+    } else {
+        MissReason::NotIndexed.into()
+    }
+}
+
+/// Cursor resume: continue after the last served chunk id in the same
+/// fusion order. No cursor serves the fusion from the top.
+///
+/// # Errors
+/// [`RetrieveError::Usage`] for a cursor that names no served chunk.
+fn resume_after_cursor(
+    fused: Vec<(Hit, f64)>,
+    cursor: Option<u64>,
+) -> Result<Vec<(Hit, f64)>, RetrieveError> {
+    let Some(cursor) = cursor else {
+        return Ok(fused);
+    };
+    let position = fused
+        .iter()
+        .position(|(hit, _)| hit.chunk_id == i64::try_from(cursor).unwrap_or(-1))
+        .ok_or_else(|| UsageError::UnknownCursor(cursor.to_string()))?;
+    Ok(fused[position + 1..].to_vec())
+}
+
+/// Per-item status: the picked version carries the request's status.
+/// Without a picked version (the unfiltered fallback), an exact-request
+/// hit verifies and everything else is the alias default — or a near
+/// version served.
+fn item_status(
+    hit_version: &str,
+    served_version: Option<&str>,
+    requested_text: Option<&str>,
+    pick_status: VersionStatus,
+) -> VersionStatus {
+    match (served_version, requested_text) {
+        (Some(served), _) if hit_version == served => pick_status,
+        (None, Some(requested)) if hit_version == requested => VersionStatus::Verified,
+        (None, None) => VersionStatus::Alias,
+        // A near version served, or an exact request on the
+        // unfiltered path that another version answered.
+        _ => VersionStatus::Fallback,
+    }
 }
 
 /// The rung scope for a resolution before the version policy narrows it.
