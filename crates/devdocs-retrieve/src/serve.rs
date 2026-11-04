@@ -353,7 +353,8 @@ pub fn verify(store: &Store, doc_ref: &str) -> Result<ResultEnvelope, RetrieveEr
 
 /// Lists the exact versions one library serves (docs/08 §CLI contract:
 /// `devdocs versions <library> --json` is the per-library discovery
-/// surface).
+/// surface). Only active sources list — a withdrawn or replaced
+/// generation is not an available version.
 ///
 /// # Errors
 /// [`RetrieveError::Miss`] with `not_indexed` when the library has no
@@ -368,7 +369,7 @@ pub fn versions(
     let results: Vec<SourceSummary> = store
         .list_sources()?
         .into_iter()
-        .filter(|s| s.library.eq_ignore_ascii_case(library))
+        .filter(|s| s.active && s.library.eq_ignore_ascii_case(library))
         .collect();
     Ok(ResultEnvelope {
         results,

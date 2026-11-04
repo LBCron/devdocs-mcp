@@ -125,7 +125,7 @@ Commands:
 | `devdocs symbol <library@version> <symbol> [--json]` | Exact symbol lookup |
 | `devdocs open <ref> [--cursor C] [--max-tokens T] [--json]` | Read one section by ref |
 | `devdocs verify <ref> [--json]` | Re-derive and compare the content hash |
-| `devdocs versions <library> [--json]` | List available versions for a library |
+| `devdocs versions <library> [--json]` | List the active versions a library serves |
 | `devdocs source approve|deny|list` | License registry operations |
 | `devdocs skill install [--path P]` | Write the SKILL.md companion file |
 | `devdocs mcp [--transport stdio]` | Start the MCP server on stdio |
