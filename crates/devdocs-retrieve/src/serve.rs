@@ -112,6 +112,20 @@ pub fn search(
     };
 
     let fused = fuse(plan.rrf_k, &rung_hits);
+    if fused.is_empty() {
+        // A valid query that serves nothing is a miss (exit 2). The
+        // reason distinguishes an empty index from a query that simply
+        // matched nothing (docs/08 §Error codes).
+        let has_active = store
+            .list_sources()
+            .is_ok_and(|sources| sources.iter().any(|s| s.active));
+        let reason = if has_active {
+            MissReason::LowConfidence
+        } else {
+            MissReason::NotIndexed
+        };
+        return Err(reason.into());
+    }
 
     // Cursor resume: continue after the last served chunk id in the same
     // fusion order.
@@ -132,11 +146,16 @@ pub fn search(
         .iter()
         .map(|(hit, score)| {
             // Per-item status: the picked version carries the request's
-            // status; anything else is a near version served (fallback).
-            let status = if Some(hit.version.as_str()) == served_version.as_deref() {
-                pick_status
-            } else {
-                VersionStatus::Fallback
+            // status. Without a picked version (the unfiltered fallback),
+            // an exact-request hit verifies and everything else is the
+            // alias default — or a near version served.
+            let status = match (&served_version, &requested_text) {
+                (Some(served), _) if hit.version == *served => pick_status,
+                (None, Some(requested)) if hit.version == *requested => VersionStatus::Verified,
+                (None, None) => VersionStatus::Alias,
+                // A near version served, or an exact request on the
+                // unfiltered path that another version answered.
+                _ => VersionStatus::Fallback,
             };
             to_result_item(hit, requested_text.as_deref(), status, *score)
         })

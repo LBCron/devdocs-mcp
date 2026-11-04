@@ -5,6 +5,7 @@
 //! docs/08 example exactly; placeholder commands print the empty envelope.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -22,6 +23,18 @@ pub enum VersionStatus {
     Fallback,
     /// The library is absent from the index.
     Absent,
+}
+
+impl fmt::Display for VersionStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            Self::Verified => "verified",
+            Self::Alias => "alias",
+            Self::Fallback => "fallback",
+            Self::Absent => "absent",
+        };
+        f.write_str(text)
+    }
 }
 
 /// One search/open/symbol result in the docs/08 result envelope.
