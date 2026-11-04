@@ -41,14 +41,14 @@ impl PageRelations {
                 let Some((uri, params)) = parse_link_value(&link_value) else {
                     continue;
                 };
-                if params.rel != "alternate" {
-                    if params.rel == "describedby" {
-                        relations.described_by = Some(uri);
-                    }
-                    continue;
+                // RFC 8288: the rel value is a space-separated token list,
+                // so one link can carry both relations.
+                let rels: Vec<&str> = params.rel.split_ascii_whitespace().collect();
+                if rels.contains(&"alternate") && params.type_ == "text/markdown" {
+                    relations.markdown_twin = Some(uri.clone());
                 }
-                if params.type_ == "text/markdown" {
-                    relations.markdown_twin = Some(uri);
+                if rels.contains(&"describedby") {
+                    relations.described_by = Some(uri);
                 }
             }
         }
@@ -62,6 +62,7 @@ impl PageRelations {
     #[must_use]
     pub fn from_html(body: &str) -> PageRelations {
         let mut relations = PageRelations::default();
+        let body = strip_html_comments(body);
         let lower = body.to_ascii_lowercase();
         let mut cursor = 0usize;
         while let Some(found) = lower[cursor..].find("<link") {
@@ -79,9 +80,11 @@ impl PageRelations {
                 .unwrap_or_default()
                 .to_ascii_lowercase();
             if let Some(href) = href {
-                if rel == "alternate" && type_ == "text/markdown" {
-                    relations.markdown_twin = Some(href);
-                } else if rel == "describedby" {
+                let rels: Vec<&str> = rel.split_ascii_whitespace().collect();
+                if rels.contains(&"alternate") && type_ == "text/markdown" {
+                    relations.markdown_twin = Some(href.clone());
+                }
+                if rels.contains(&"describedby") {
                     relations.described_by = Some(href);
                 }
             }
@@ -148,13 +151,30 @@ fn parse_link_value(link_value: &str) -> Option<(String, LinkParams)> {
     Some((uri, LinkParams { rel, type_ }))
 }
 
+/// Drops HTML comments from the body: `<!-- ... -->` is removed; an
+/// unterminated comment drops the rest of the input.
+fn strip_html_comments(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 4..];
+        match after.find("-->") {
+            Some(end) => rest = &after[end + 3..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// One HTML attribute value from a tag text; the name matches
-/// case-insensitively.
+/// case-insensitively, and whitespace may surround the `=`.
 fn attribute(tag: &str, name: &str) -> Option<String> {
     let lower = tag.to_ascii_lowercase();
-    let pattern = format!("{name}=");
+    let needle = name.to_ascii_lowercase();
     let mut search = 0usize;
-    while let Some(found) = lower[search..].find(&pattern) {
+    while let Some(found) = lower[search..].find(&needle) {
         let at = search + found;
         // Only an attribute position: the start of the tag or whitespace
         // before the name, so `data-href=` never matches `href=`.
@@ -164,22 +184,27 @@ fn attribute(tag: &str, name: &str) -> Option<String> {
                 .next_back()
                 .is_some_and(char::is_whitespace);
         if !boundary {
-            search = at + pattern.len();
+            search = at + needle.len();
             continue;
         }
-        let rest = tag[at + pattern.len()..].trim_start();
-        if let Some(quoted) = rest.strip_prefix('"') {
+        let rest = &tag[at + needle.len()..];
+        let Some(value) = rest.trim_start().strip_prefix('=') else {
+            search = at + needle.len();
+            continue;
+        };
+        let value = value.trim_start();
+        if let Some(quoted) = value.strip_prefix('"') {
             let end = quoted.find('"')?;
             return Some(quoted[..end].to_owned());
         }
-        if let Some(quoted) = rest.strip_prefix('\'') {
+        if let Some(quoted) = value.strip_prefix('\'') {
             let end = quoted.find('\'')?;
             return Some(quoted[..end].to_owned());
         }
-        let end = rest
-            .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
-            .unwrap_or(rest.len());
-        return Some(rest[..end].to_owned());
+        let end = value
+            .find(|c: char| c.is_whitespace() || c == '>')
+            .unwrap_or(value.len());
+        return Some(value[..end].to_owned());
     }
     None
 }
@@ -311,14 +336,60 @@ mod tests {
     }
 
     /// Unquoted attribute values parse up to the next whitespace or tag
-    /// close. The `rel`/`type` stay quoted: an unquoted `text/markdown`
-    /// would truncate at the `/`, an implementation quirk this test does
-    /// not pin.
+    /// close; a `/` in the value never ends it.
     #[test]
     fn unquoted_attribute_values_parse() {
         let relations =
-            PageRelations::from_html("<link rel=\"alternate\" type=\"text/markdown\" href=x.md>");
-        assert_eq!(relations.markdown_twin.as_deref(), Some("x.md"));
+            PageRelations::from_html("<link rel=alternate type=text/markdown href=/docs/page.md>");
+        assert_eq!(relations.markdown_twin.as_deref(), Some("/docs/page.md"));
+    }
+
+    /// The rel value is a space-separated token list (RFC 8288): one link
+    /// carrying `alternate describedby` sets both relations.
+    #[test]
+    fn rel_token_list_carries_both_relations() {
+        let relations = PageRelations::from_link_headers(&[String::from(
+            "</docs/page.html.md>; rel=\"alternate describedby\"; type=\"text/markdown\"",
+        )]);
+        assert_eq!(
+            relations.markdown_twin.as_deref(),
+            Some("/docs/page.html.md")
+        );
+        assert_eq!(
+            relations.described_by.as_deref(),
+            Some("/docs/page.html.md")
+        );
+
+        let relations = PageRelations::from_html(
+            "<link rel=\"alternate describedby\" type=\"text/markdown\" href=\"/x.md\">",
+        );
+        assert_eq!(relations.markdown_twin.as_deref(), Some("/x.md"));
+        assert_eq!(relations.described_by.as_deref(), Some("/x.md"));
+    }
+
+    /// A commented-out twin is ignored; the active one after it is found.
+    #[test]
+    fn commented_out_links_are_ignored() {
+        let relations = PageRelations::from_html(
+            "<!-- <link rel=\"alternate\" type=\"text/markdown\" href=\"/old.md\"> -->\
+             <link rel=\"alternate\" type=\"text/markdown\" href=\"/new.md\">",
+        );
+        assert_eq!(relations.markdown_twin.as_deref(), Some("/new.md"));
+
+        let relations = PageRelations::from_html(
+            "<!-- <link rel=\"alternate\" type=\"text/markdown\" href=\"/old.md\"",
+        );
+        assert_eq!(relations.markdown_twin, None);
+    }
+
+    /// Whitespace may surround the `=` between an attribute name and its
+    /// value.
+    #[test]
+    fn whitespace_around_the_equals_sign_parses() {
+        let relations = PageRelations::from_html(
+            "<link rel=\"alternate\" type=\"text/markdown\" href = \"/x.md\">",
+        );
+        assert_eq!(relations.markdown_twin.as_deref(), Some("/x.md"));
     }
 
     /// The response relations win over the index hint where both declare
