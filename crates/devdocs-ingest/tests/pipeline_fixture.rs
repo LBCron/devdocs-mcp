@@ -693,3 +693,224 @@ async fn ingest_rejects_a_run_that_segments_to_zero_chunks() {
     assert_eq!(sources.len(), 1);
     assert!(sources[0].active, "the old generation stays active");
 }
+
+/// A `rel="describedby"` hint names the index that covers the page: that
+/// llms.txt joins the scope queue, is counted as a subpath index, and its
+/// own listing ingests the pages it governs
+/// (docs/implementation/07 §llms.txt adapter rule 2).
+#[tokio::test]
+async fn ingest_queues_the_index_a_describedby_hint_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = concat!(
+        "# Acme\n\n> Acme widgets documentation.\n\n",
+        "## Guides\n\n",
+        "- [Api](https://docs.acme.test/api/intro.html) (rel=\"describedby\" /api/llms.txt): covered by the api index\n",
+        "- [Guide](https://docs.acme.test/guide/intro.html) (rel=\"describedby\" /guide/llms.txt): covered by the guide index\n"
+    );
+    let api_index = concat!(
+        "# Acme API\n\n> The api subtree.\n\n",
+        "## Endpoints\n\n",
+        "- [Intro](https://docs.acme.test/api/intro.md): the api page\n"
+    );
+    let guide_index = concat!(
+        "# Acme Guide\n\n> The guide subtree.\n\n",
+        "## Walkthrough\n\n",
+        "- [Intro](https://docs.acme.test/guide/intro.md): the guide page\n"
+    );
+    let api_md =
+        "# Api intro\n\nAuthenticate with an API key.\n\n## Scopes\n\nKeys carry scopes.\n";
+    let guide_md =
+        "# Guide intro\n\nFollow the guided tour.\n\n## Steps\n\nEvery step is listed.\n";
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": root },
+        { "url": "https://docs.acme.test/api/llms.txt", "status": 200, "headers": {}, "body": api_index },
+        { "url": "https://docs.acme.test/guide/llms.txt", "status": 200, "headers": {}, "body": guide_index },
+        { "url": "https://docs.acme.test/api/intro.html", "status": 200, "headers": {}, "body": FAQ_HTML },
+        { "url": "https://docs.acme.test/guide/intro.html", "status": 200, "headers": {}, "body": FAQ_HTML },
+        { "url": "https://docs.acme.test/api/intro.md", "status": 200, "headers": {}, "body": api_md },
+        { "url": "https://docs.acme.test/guide/intro.md", "status": 200, "headers": {}, "body": guide_md },
+    ]);
+    let fixture = write_fixture_set(dir.path(), &responses);
+    let config = config();
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let db = tempfile::tempdir().unwrap();
+    let store = Arc::new(devdocs_testkit::open_migrated(&db.path().join("docs.db")).unwrap());
+
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let outcome = job
+        .run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome.events.subpath_indexes, 2,
+        "each describedby hint queued its index"
+    );
+    assert_eq!(outcome.pages, 2, "each queued index ingested its page");
+    assert_eq!(
+        outcome.skipped_pages, 2,
+        "the hint-carrying HTML pages themselves skip"
+    );
+    let hits = store
+        .search_fts(&devdocs_store::build_match_query("scopes"), 10)
+        .unwrap();
+    assert!(!hits.is_empty(), "the api page is searchable");
+}
+
+/// A link the seen set already holds short-circuits before any fetch: the
+/// page reached the corpus through its first listing and the duplicate
+/// listing is dropped (docs/implementation/07 §Normalization pipeline).
+#[tokio::test]
+async fn ingest_short_circuits_a_link_listed_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let index = concat!(
+        "# Acme\n\n> Acme widgets documentation.\n\n",
+        "## Guides\n\n",
+        "- [Intro](https://docs.acme.test/intro.md): Start here\n",
+        "- [Intro again](https://docs.acme.test/intro.md): the same page, listed twice\n"
+    );
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": index },
+        { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": INTRO },
+    ]);
+    let fixture = write_fixture_set(dir.path(), &responses);
+    let config = config();
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let db = tempfile::tempdir().unwrap();
+    let store = Arc::new(devdocs_testkit::open_migrated(&db.path().join("docs.db")).unwrap());
+
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let outcome = job
+        .run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.pages, 1, "the duplicate listing ingested nothing");
+    let hits = store
+        .search_fts(&devdocs_store::build_match_query("installer"), 10)
+        .unwrap();
+    assert!(!hits.is_empty(), "the page is searchable exactly once");
+}
+
+/// A markdown twin hint whose URL cannot join against the page is invalid:
+/// the run fails with `LLMS_TXT_INVALID` instead of fetching
+/// (docs/implementation/07 §llms.txt adapter rule 2).
+#[tokio::test]
+async fn ingest_fails_when_a_markdown_twin_does_not_resolve() {
+    let dir = tempfile::tempdir().unwrap();
+    let index = concat!(
+        "# Acme\n\n> Acme widgets documentation.\n\n",
+        "## Guides\n\n",
+        "- [Intro](https://docs.acme.test/intro.html) (rel=\"alternate\" type=\"text/markdown\" http://[): broken twin hint\n"
+    );
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": index },
+        { "url": "https://docs.acme.test/intro.html", "status": 200, "headers": {}, "body": INTRO_HTML },
+    ]);
+    let fixture = write_fixture_set(dir.path(), &responses);
+    let config = config();
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let db = tempfile::tempdir().unwrap();
+    let store = Arc::new(devdocs_testkit::open_migrated(&db.path().join("docs.db")).unwrap());
+
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let error = job
+        .run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap_err();
+    match error {
+        devdocs_ingest::IngestError::LlmsTxtInvalid { url, reason } => {
+            assert_eq!(url, "https://docs.acme.test/intro.html");
+            assert!(reason.contains("does not resolve"), "{reason}");
+        }
+        other => panic!("expected LlmsTxtInvalid, got {other}"),
+    }
+}
+
+/// A twin the seen set already holds is skipped without a fetch: the first
+/// HTML page's twin reached the corpus, the second page pointing at the
+/// same twin neither fetches it again nor counts as skipped
+/// (docs/implementation/07 §llms.txt adapter rule 2).
+#[tokio::test]
+async fn ingest_skips_a_twin_the_seen_set_already_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let index = concat!(
+        "# Acme\n\n> Acme widgets documentation.\n\n",
+        "## Guides\n\n",
+        "- [Alpha](https://docs.acme.test/a.html) (rel=\"alternate\" type=\"text/markdown\" https://docs.acme.test/t.md): first listing\n",
+        "- [Beta](https://docs.acme.test/b.html) (rel=\"alternate\" type=\"text/markdown\" https://docs.acme.test/t.md): same twin\n"
+    );
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": index },
+        { "url": "https://docs.acme.test/a.html", "status": 200, "headers": {}, "body": FAQ_HTML },
+        { "url": "https://docs.acme.test/b.html", "status": 200, "headers": {}, "body": FAQ_HTML },
+        { "url": "https://docs.acme.test/t.md", "status": 200, "headers": {}, "body": ADVANCED },
+    ]);
+    let fixture = write_fixture_set(dir.path(), &responses);
+    let config = config();
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let db = tempfile::tempdir().unwrap();
+    let store = Arc::new(devdocs_testkit::open_migrated(&db.path().join("docs.db")).unwrap());
+
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let outcome = job
+        .run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.pages, 1, "the twin ingested once");
+    assert_eq!(
+        outcome.events.markdown_twins_used, 1,
+        "the twin ran through the first listing only"
+    );
+    assert_eq!(
+        outcome.skipped_pages, 0,
+        "a shared twin is not a skipped page"
+    );
+}
+
+/// A fixture that records a status outside the HTTP status range fails the
+/// replay the same way an invalid fetch would: the recorded status cannot
+/// be read as a success, so the run fails closed
+/// (docs/implementation/04 §Fixtures, docs/implementation/09 invariant 5).
+#[tokio::test]
+async fn fixture_replay_rejects_an_unparsable_recorded_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 9999, "headers": {}, "body": INDEX },
+    ]);
+    let fixture = write_fixture_set(dir.path(), &responses);
+    let config = config();
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let error = job
+        .run(
+            Arc::new(
+                devdocs_testkit::open_migrated(
+                    &tempfile::tempdir().unwrap().path().join("docs.db"),
+                )
+                .unwrap(),
+            ),
+            &index_url,
+            "acme",
+            "1.0",
+        )
+        .await
+        .unwrap_err();
+    match error {
+        devdocs_ingest::IngestError::LlmsTxtInvalid { reason, .. } => {
+            assert!(reason.contains("fixture records status 9999"), "{reason}");
+        }
+        other => panic!("expected LlmsTxtInvalid, got {other}"),
+    }
+}
