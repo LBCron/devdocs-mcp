@@ -3,7 +3,7 @@ type: guide
 title: Ingest Pipeline (L1 + L2)
 description: The source adapters, the fetch guard, the license gate, the normalization and segmentation pipeline, dedup, the injection filter, and the refresh policy for devdocs.
 tags: [devdocs, ingest, llms-txt, git, openapi, html, segmentation]
-timestamp: 2026-11-04T12:00:00Z
+timestamp: 2026-11-05T12:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -65,7 +65,7 @@ Implemented shape (M3b): the rules above land as follows.
 - **Page shapes.** An index link is a page when its path ends in `.md`, `.mdx`, `.html`, `.htm`, `.xhtml`, or carries no extension at all (directory-style URLs). `llms.txt` and `llms-full.txt` are never pages.
 - **Link relations.** The relations arrive three ways: the parenthesized per-page hints of a link line (`- [Page](url) (rel="alternate" type="text/markdown" twin-url): notes`), the page response's `Link:` headers (an RFC 8288 subset), and `<link>` elements scanned from an HTML body. A response relation wins over the index hint.
 - **Twin preference.** An HTML page with a markdown twin ingests the twin (a markdown-twin event counts it). A page without a twin falls back to its HTML path; the media split skips it, because no HTML extractor exists in this slice. The same page never buffers twice: routes and twins dedup by URL, and the corpus dedup collapses equal bodies.
-- **Subpath scoping.** The walk is a FIFO queue of scopes: a link naming an `llms.txt` opens a deeper scope, a page's `rel="describedby"` response can open one, and the queue drains breadth-first. A page ingests under the scope with the longest directory path prefix — the most specific index wins; a page listed by a shallower scope defers to the deeper scope's turn. Each scope joins its links against the redirect-aware base its index response came from.
+- **Subpath scoping.** The walk is a FIFO queue of scopes: a link naming an `llms.txt` opens a deeper scope, a page's `rel="describedby"` response can open one, and the queue drains breadth-first. A page ingests under the scope with the longest directory path prefix — the most specific index wins; a page listed by a shallower scope defers to the deeper scope's turn. A page the shallower turn already buffered is re-fetched at that turn, and the deeper listing's document — with its own twin hints — replaces the buffered one in place, so the corpus keeps one document per page and the most specific listing governs it. Each scope joins its links against the redirect-aware base its index response came from.
 - **llms-full probe.** Every scope probes `llms-full.txt` at its directory. Absence is an expected outcome: a 404 or 410 on the wire, a missing replay response, or a non-UTF-8 body all read as "not there"; every other fetch error still fails the run and the guard policy still applies. When present, the export is one pre-built document that joins the corpus and is segmented like any other markdown body.
 - **Ingest events.** The run reports pages, skipped pages, skipped blocks (content-less blocks), unknown fence languages (a named language outside the known set; unnamed fences never count), chrome pattern drops, chrome drops (frequency-rule drops), dedup dropped pages, markdown twins used, subpath indexes, and llms-full exports. The counts surface as stderr log lines under `--verbose` and as the `events` object of the `--json` add envelope; they carry provenance only, never chunk text.
 

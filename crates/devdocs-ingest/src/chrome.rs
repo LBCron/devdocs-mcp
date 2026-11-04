@@ -53,60 +53,18 @@ pub fn strip_chrome(pages: &mut [PageDocument]) -> ChromeReport {
     if pages.is_empty() {
         return ChromeReport::default();
     }
-    let total_pages = pages.len();
-
     // Per page: the top-level blocks with their byte ranges. Classification
     // comes from the parsed node; both rules match on the body slice.
     let page_blocks: Vec<Vec<PageBlock>> = pages
         .iter()
         .map(|page| top_level_blocks(&page.body))
         .collect();
-
-    // Frequency rule: normalized text → the distinct pages carrying it. The
-    // set of chrome texts is collected before any body is mutated.
-    let mut occurrences: HashMap<&str, HashSet<usize>> = HashMap::new();
-    for (page_index, (page, blocks)) in pages.iter().zip(&page_blocks).enumerate() {
-        for block in blocks {
-            let text = page.body[block.range.clone()].trim();
-            if text.is_empty() {
-                continue;
-            }
-            occurrences.entry(text).or_default().insert(page_index);
-        }
-    }
-    let chrome_texts: HashSet<String> = if total_pages < 2 {
-        HashSet::new()
-    } else {
-        occurrences
-            .into_iter()
-            .filter(|(_text, page_set)| page_set.len() * 10 > total_pages * 6)
-            .map(|(text, _)| text.to_owned())
-            .collect()
-    };
+    // The set of chrome texts is collected before any body is mutated.
+    let chrome_texts = frequency_chrome_texts(pages, &page_blocks);
 
     let mut report = ChromeReport::default();
     for index in 0..pages.len() {
-        let blocks = &page_blocks[index];
-        let mut dropped: Vec<(Range<usize>, DropKind)> = Vec::new();
-        let mut seen_heading = false;
-        for block in blocks {
-            if block.is_heading {
-                seen_heading = true;
-            }
-            let text = pages[index].body[block.range.clone()].trim();
-            let pattern_chrome = if seen_heading {
-                edit_link_text(text) || cookie_banner_text(text, block.link_only)
-            } else {
-                block.link_only || edit_link_text(text) || cookie_banner_text(text, block.link_only)
-            };
-            let frequency_chrome = chrome_texts.contains(text);
-            let kind = match (pattern_chrome, frequency_chrome) {
-                (true, _) => DropKind::Pattern,
-                (false, true) => DropKind::Frequency,
-                (false, false) => continue,
-            };
-            dropped.push((block.range.clone(), kind));
-        }
+        let dropped = classify_drops(&pages[index].body, &page_blocks[index], &chrome_texts);
         if dropped.is_empty() {
             continue;
         }
@@ -120,6 +78,65 @@ pub fn strip_chrome(pages: &mut [PageDocument]) -> ChromeReport {
         remove_blocks(&mut pages[index].body, ranges);
     }
     report
+}
+
+/// The chrome texts of the corpus under the frequency rule: normalized
+/// block texts carried by more than 60% of the pages. With fewer than two
+/// pages there is nothing to compare, so nothing is chrome.
+fn frequency_chrome_texts(
+    pages: &[PageDocument],
+    page_blocks: &[Vec<PageBlock>],
+) -> HashSet<String> {
+    let total_pages = pages.len();
+    if total_pages < 2 {
+        return HashSet::new();
+    }
+    // Normalized text → the distinct pages carrying it.
+    let mut occurrences: HashMap<&str, HashSet<usize>> = HashMap::new();
+    for (page_index, (page, blocks)) in pages.iter().zip(page_blocks).enumerate() {
+        for block in blocks {
+            let text = page.body[block.range.clone()].trim();
+            if text.is_empty() {
+                continue;
+            }
+            occurrences.entry(text).or_default().insert(page_index);
+        }
+    }
+    occurrences
+        .into_iter()
+        .filter(|(_text, page_set)| page_set.len() * 10 > total_pages * 6)
+        .map(|(text, _)| text.to_owned())
+        .collect()
+}
+
+/// Classifies the top-level blocks of one page: why each block drops
+/// (`DropKind`) and where it sits in the body. The pattern rules match on
+/// the body slice; the leading-nav rule stops at the first heading.
+fn classify_drops(
+    body: &str,
+    blocks: &[PageBlock],
+    chrome_texts: &HashSet<String>,
+) -> Vec<(Range<usize>, DropKind)> {
+    let mut dropped: Vec<(Range<usize>, DropKind)> = Vec::new();
+    let mut seen_heading = false;
+    for block in blocks {
+        if block.is_heading {
+            seen_heading = true;
+        }
+        let text = body[block.range.clone()].trim();
+        let pattern_chrome = if seen_heading {
+            edit_link_text(text) || cookie_banner_text(text, block.link_only)
+        } else {
+            block.link_only || edit_link_text(text) || cookie_banner_text(text, block.link_only)
+        };
+        let kind = match (pattern_chrome, chrome_texts.contains(text)) {
+            (true, _) => DropKind::Pattern,
+            (false, true) => DropKind::Frequency,
+            (false, false) => continue,
+        };
+        dropped.push((block.range.clone(), kind));
+    }
+    dropped
 }
 
 /// Why one block was dropped by the strip.
