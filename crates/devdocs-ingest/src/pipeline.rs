@@ -140,34 +140,46 @@ impl<'a> IngestJob<'a> {
         })
     }
 
-    /// The fetch-and-segment phase, inside the total-cap timeout: fetch and
-    /// parse the root index, walk the scopes breadth-first, fetch every
-    /// governed page, and buffer the corpus. Publishes nothing.
-    async fn prepare(
-        &self,
-        index_url: &Url,
-        library: &str,
-        version: &str,
-        grant: &crate::license::LicenseGrant,
-    ) -> Result<Prepared, IngestError> {
-        // Relative links resolve against the URL the index actually came
-        // from: a redirect can move it to another directory, and the
-        // pre-redirect URL would join every link to the wrong base.
-        let root = self.load_scope(index_url).await?;
-        let segmenter = Segmenter::new()?;
-        let mut run = RunState::default();
-        let mut docs: Vec<PageDocument> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
+    /// Probes one URL: absence is an expected outcome, not a failure — a
+    /// 404 or 410 on the wire, a missing replay response, or a non-UTF-8
+    /// body all read as "not there" (docs/implementation/07 §llms.txt
+    /// adapter rule 3: detection is a probe, not an assumption). The guard
+    /// policy still applies, and every other fetch error fails the run.
+    async fn probe(&self, url: &Url) -> Result<Option<String>, IngestError> {
+        self.guard.check(url)?;
+        if let Some(fixture) = self.fixture {
+            return Ok(fixture.serve(url).map(|recorded| recorded.body.clone()));
+        }
+        match self.guard.get_with_link_headers(url).await {
+            Ok((bytes, _, _)) => Ok(String::from_utf8(bytes.to_vec()).ok()),
+            Err(crate::guard::GuardError::Http { status, .. })
+                if matches!(status.as_u16(), 404 | 410) =>
+            {
+                tracing::debug!(status = status.as_u16(), %url, "probe found nothing");
+                Ok(None)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
 
-        // The scope walk (docs/implementation/07 §llms.txt adapter rule 4):
-        // a FIFO queue is breadth-first — the root scope drains before the
-        // subpath scopes it discovered, so the most specific llms.txt
-        // governs every page it covers. A page linked by a shallower scope
-        // but covered by a deeper one waits for the deeper scope.
+    /// Walks the scope queue breadth-first and buffers every governed page
+    /// and every found export into `docs`
+    /// (docs/implementation/07 §llms.txt adapter rule 4). A FIFO queue is
+    /// breadth-first — the root scope drains before the subpath scopes it
+    /// discovered, so the most specific llms.txt governs every page it
+    /// covers. A page linked by a shallower scope but covered by a deeper
+    /// one waits for the deeper scope.
+    async fn walk_scopes(
+        &self,
+        root: Scope,
+        docs: &mut Vec<PageDocument>,
+        seen: &mut HashSet<String>,
+        run: &mut RunState,
+    ) -> Result<(), IngestError> {
         let mut scopes: Vec<Scope> = Vec::new();
         let mut pending: std::collections::VecDeque<Scope> = std::collections::VecDeque::new();
         let mut scope_urls: HashSet<String> = HashSet::new();
-        scope_urls.insert(index_url.to_string());
+        scope_urls.insert(root.index_url.to_string());
         pending.push_back(root);
         while let Some(scope) = pending.pop_front() {
             let scope_index = scopes.len();
@@ -196,9 +208,7 @@ impl<'a> IngestJob<'a> {
                 if most_specific_scope(&scopes, &link_url) != Some(scope_index) {
                     continue;
                 }
-                let described = self
-                    .ingest_link(link_url, link, &mut docs, &mut seen, &mut run)
-                    .await?;
+                let described = self.ingest_link(link_url, link, docs, seen, run).await?;
                 // A `rel="describedby"` response names the index that
                 // covers the page; an unseen one joins the queue
                 // (docs/implementation/07 §llms.txt adapter rule 2).
@@ -210,7 +220,45 @@ impl<'a> IngestJob<'a> {
                     pending.push_back(sub);
                 }
             }
+
+            // (c) The llms-full probe (docs/implementation/07 §llms.txt
+            // adapter rule 3): detection is a probe, never an assumption —
+            // absence is an expected outcome. When present, the export is
+            // one pre-built document and is segmented like any other
+            // markdown body.
+            let export_url = resolve_link(scope, "llms-full.txt")?;
+            if let Some(body) = self.probe(&export_url).await? {
+                tracing::info!(export = %export_url, "ingesting the llms-full export");
+                docs.push(PageDocument {
+                    path: export_url.to_string(),
+                    body,
+                });
+                run.events.full_exports += 1;
+            }
         }
+        Ok(())
+    }
+
+    /// The fetch-and-segment phase, inside the total-cap timeout: load the
+    /// root scope, walk the scopes breadth-first, fetch every governed
+    /// page, and buffer the corpus. Publishes nothing.
+    async fn prepare(
+        &self,
+        index_url: &Url,
+        library: &str,
+        version: &str,
+        grant: &crate::license::LicenseGrant,
+    ) -> Result<Prepared, IngestError> {
+        // Relative links resolve against the URL the index actually came
+        // from: a redirect can move it to another directory, and the
+        // pre-redirect URL would join every link to the wrong base.
+        let root = self.load_scope(index_url).await?;
+        let segmenter = Segmenter::new()?;
+        let mut run = RunState::default();
+        let mut docs: Vec<PageDocument> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        self.walk_scopes(root, &mut docs, &mut seen, &mut run)
+            .await?;
 
         // Normalization runs off the async path over the whole corpus:
         // comrak parsing and hashing are CPU work. Dedup first, so a

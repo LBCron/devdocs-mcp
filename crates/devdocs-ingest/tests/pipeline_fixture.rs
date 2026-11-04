@@ -485,6 +485,62 @@ async fn ingest_scopes_pages_to_the_most_specific_subpath_index() {
     assert!(!hits.is_empty(), "the api page is searchable");
 }
 
+/// The llms-full probe: when the export exists at the index's directory it
+/// becomes one pre-built document, segmented like any other markdown body;
+/// when absent, the run proceeds without one
+/// (docs/implementation/07 §llms.txt adapter rule 3).
+#[tokio::test]
+async fn ingest_probes_llms_full_and_ingests_it_as_one_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let index = concat!(
+        "# Acme\n\n> Acme widgets documentation.\n\n",
+        "## Guides\n\n",
+        "- [Intro](https://docs.acme.test/intro.md): Start here\n"
+    );
+    let intro = concat!(
+        "# Intro\n\nThe Acme SDK ships a client for every runtime.\n\n",
+        "## Install\n\nRun the installer.\n"
+    );
+    let export = concat!(
+        "# Intro\n\nThe Acme SDK ships a client for every runtime.\n\n",
+        "## Install\n\nRun the installer.\n\n",
+        "# Advanced\n\nPagination follows cursors across pages of widgets.\n\n",
+        "## Cursors\n\nPass the cursor to walk the whole list.\n"
+    );
+    let responses = serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": index },
+        { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": intro },
+        { "url": "https://docs.acme.test/llms-full.txt", "status": 200, "headers": {}, "body": export },
+    ]);
+    std::fs::write(
+        dir.path().join("manifest.json"),
+        serde_json::to_string(&responses).unwrap(),
+    )
+    .unwrap();
+    let fixture = FixtureSet::load(dir.path()).unwrap();
+    let config = config();
+    let guard = FetchGuard::from_fetch_config(&config.fetch);
+
+    let db = tempfile::tempdir().unwrap();
+    let store = Arc::new(devdocs_testkit::open_migrated(&db.path().join("docs.db")).unwrap());
+
+    let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+    let job = IngestJob::new(&config, &guard, Some(&fixture));
+    let outcome = job
+        .run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.events.full_exports, 1, "the probe found the export");
+    assert_eq!(outcome.pages, 2, "the page and the export both ingest");
+    // The export's content is searchable: it was segmented like any other
+    // markdown body.
+    let hits = store
+        .search_fts(&devdocs_store::build_match_query("cursors"), 10)
+        .unwrap();
+    assert!(!hits.is_empty(), "the export content is searchable");
+}
+
 /// A run whose only content page carries no content blocks segments to zero
 /// chunks and fails closed: the active generation stays untouched
 /// (docs/implementation/07 §Atomic publish).
