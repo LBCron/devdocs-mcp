@@ -87,6 +87,9 @@ impl ProjectContext {
             }
             let mut deps = Vec::new();
             for path in &present {
+                // defensive: unreadable lockfiles must not abort detection;
+                // not portably triggerable in a test (needs a race or
+                // platform-specific permission failure).
                 let Ok(content) = std::fs::read_to_string(path) else {
                     continue;
                 };
@@ -97,6 +100,9 @@ impl ProjectContext {
                     Some("uv.lock") => parse_uv_lock(&content),
                     Some("pyproject.toml") => parse_pyproject(&content),
                     Some("go.mod") => parse_go_mod(&content),
+                    // defensive: unreachable — `present` only holds names
+                    // from the LOCKFILES const above, so every match arm is
+                    // covered; the wildcard keeps the match total.
                     _ => Vec::new(),
                 };
                 deps.extend(parsed);
@@ -648,6 +654,22 @@ mod tests {
         );
     }
 
+    /// A one-line `require ( mod vX )` form parses, and a require whose
+    /// version lacks the leading `v` yields no entry.
+    #[test]
+    fn go_mod_one_line_block_and_unversioned_require() {
+        let content = "module example.test/app\n\n\
+                       require (github.com/spf13/cobra v1.9.1)\n\n\
+                       require golang.org/x/mod 0.17.0\n";
+        assert_eq!(
+            parse_go_mod(content),
+            vec![Dep {
+                library: "github.com/spf13/cobra".to_owned(),
+                version: Some("1.9.1".to_owned()),
+            }]
+        );
+    }
+
     /// Flags win over lockfiles; lockfiles win over query mentions.
     #[test]
     fn precedence_flag_over_lockfile_over_mention() {
@@ -716,5 +738,118 @@ mod tests {
         assert_eq!(resolved.library.as_deref(), Some("next.js"));
         assert_eq!(resolved.version.as_deref(), Some("15.0.0"));
         assert_eq!(resolved.source, ResolutionSource::Flag);
+    }
+
+    /// `detect` finds each lockfile kind in a project directory and
+    /// parses its entries.
+    #[test]
+    fn detect_reads_each_lockfile_kind() {
+        let cases: [(&str, &str, Dep); 6] = [
+            (
+                "Cargo.lock",
+                "[[package]]\nname = \"serde\"\nversion = \"1.0.229\"\n",
+                Dep {
+                    library: "serde".to_owned(),
+                    version: Some("1.0.229".to_owned()),
+                },
+            ),
+            (
+                "package-lock.json",
+                r#"{"packages": {"node_modules/next": {"version": "16.2.9"}}}"#,
+                Dep {
+                    library: "next".to_owned(),
+                    version: Some("16.2.9".to_owned()),
+                },
+            ),
+            (
+                "pnpm-lock.yaml",
+                "packages:\n  'next@16.2.9': {}\n",
+                Dep {
+                    library: "next".to_owned(),
+                    version: Some("16.2.9".to_owned()),
+                },
+            ),
+            (
+                "uv.lock",
+                "[[package]]\nname = \"click\"\nversion = \"8.1.8\"\n",
+                Dep {
+                    library: "click".to_owned(),
+                    version: Some("8.1.8".to_owned()),
+                },
+            ),
+            (
+                "pyproject.toml",
+                "[project]\nname = \"app\"\ndependencies = [\"uvicorn\"]\n",
+                Dep {
+                    library: "uvicorn".to_owned(),
+                    version: None,
+                },
+            ),
+            (
+                "go.mod",
+                "module example.test/app\n\nrequire github.com/spf13/cobra v1.9.1\n",
+                Dep {
+                    library: "github.com/spf13/cobra".to_owned(),
+                    version: Some("1.9.1".to_owned()),
+                },
+            ),
+        ];
+        for (name, content, expected) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(name), content).unwrap();
+            let ctx = ProjectContext::detect(dir.path());
+            assert_eq!(ctx.deps, vec![expected], "lockfile: {name}");
+            assert_eq!(ctx.files, vec![dir.path().join(name)]);
+        }
+    }
+
+    /// `detect` keeps walking when the present lockfiles parse to
+    /// nothing — a garbage Cargo.lock is a weak signal, not a hit.
+    #[test]
+    fn detect_continues_when_lockfiles_parse_to_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.lock"), "garbage {").unwrap();
+        assert_eq!(ProjectContext::detect(dir.path()), ProjectContext::empty());
+    }
+
+    /// A mention needs a version-shaped token; tokens that exist but
+    /// match nothing resolve unfiltered.
+    #[test]
+    fn mentions_that_match_nothing_stay_unfiltered() {
+        let empty = ProjectContext::empty();
+        let resolved = resolve(&Query::new("2x 4y", None, None), &empty);
+        assert_eq!(resolved.source, ResolutionSource::Unfiltered);
+        // No tokens at all: the mention scan runs off the end of its loop.
+        let blank = resolve(&Query::new("   ", None, None), &empty);
+        assert_eq!(blank.source, ResolutionSource::Unfiltered);
+    }
+
+    /// An empty crate name in a Cargo.lock row is skipped.
+    #[test]
+    fn cargo_lock_rows_with_empty_names_are_skipped() {
+        assert_eq!(
+            parse_cargo_lock("[[package]]\nname = \"\"\nversion = \"1.0\"\n"),
+            Vec::new()
+        );
+    }
+
+    /// package-lock.json content that is not JSON parses to nothing.
+    #[test]
+    fn package_lock_json_errors_parse_to_nothing() {
+        assert_eq!(parse_package_lock("not json"), Vec::new());
+    }
+
+    /// pnpm-lock.yaml content that is not YAML parses to nothing.
+    #[test]
+    fn pnpm_lock_yaml_errors_parse_to_nothing() {
+        assert_eq!(parse_pnpm_lock("packages: {"), Vec::new());
+        // A key without a version yields no entry.
+        assert_eq!(parse_pnpm_lock("packages:\n  'next@': {}\n"), Vec::new());
+    }
+
+    /// pyproject.toml content that is not TOML parses to nothing.
+    #[test]
+    fn pyproject_toml_errors_parse_to_nothing() {
+        assert_eq!(parse_pyproject("garbage ["), Vec::new());
     }
 }

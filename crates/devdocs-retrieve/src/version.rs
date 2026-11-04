@@ -29,12 +29,6 @@ use devdocs_model::VersionStatus;
 pub struct Version(String);
 
 impl Version {
-    /// Wraps a bare version string.
-    #[must_use]
-    pub fn new(s: String) -> Self {
-        Self(s)
-    }
-
     /// The version string as the store and the refs spell it.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -100,6 +94,10 @@ pub fn version_cmp(a: &str, b: &str) -> Ordering {
                     let l_suffix = &l[ln.to_string().len()..];
                     let r_suffix = &r[rn.to_string().len()..];
                     return match (l_suffix.is_empty(), r_suffix.is_empty()) {
+                        // defensive: unreachable — equal numeric heads with
+                        // both suffixes empty implies `l == r`, excluded by
+                        // the `l != r` check above; the arm keeps the match
+                        // total.
                         (true, true) => l.cmp(r),
                         (true, false) => Ordering::Greater,
                         (false, true) => Ordering::Less,
@@ -282,10 +280,13 @@ mod tests {
     #[test]
     fn version_comparison_is_numeric() {
         assert_eq!(version_cmp("16", "16.2.9"), Ordering::Less);
+        assert_eq!(version_cmp("16.2.9", "16"), Ordering::Greater);
         assert_eq!(version_cmp("16.2.9", "16.10.0"), Ordering::Less);
         assert_eq!(version_cmp("16.2.9", "16.2.9"), Ordering::Equal);
         assert_eq!(version_cmp("2.0", "10.0"), Ordering::Less);
         assert_eq!(version_cmp("1.0.0-beta", "1.0.0"), Ordering::Less);
+        assert_eq!(version_cmp("1.0.0-beta", "1.0.0-rc"), Ordering::Less);
+        assert_eq!(version_cmp("1.0.0-rc", "1.0.0-beta"), Ordering::Greater);
     }
 
     /// The newtype compares through the same rule as [`version_cmp`].
@@ -381,6 +382,34 @@ mod tests {
             Served {
                 version: None,
                 status: VersionStatus::Absent,
+            }
+        );
+    }
+
+    /// A major alias with no version in that major falls through to the
+    /// nearest version as `fallback`.
+    #[test]
+    fn major_aliases_without_that_major_fall_back() {
+        let available = versions(&["15.0.0"]);
+        assert_eq!(
+            pick(&available, Some("16")),
+            Served {
+                version: Some(Version::from("15.0.0")),
+                status: VersionStatus::Fallback,
+            }
+        );
+    }
+
+    /// A request that is not even a numeric head falls back across the
+    /// whole index — no available version shares its major.
+    #[test]
+    fn non_numeric_requests_fall_back_to_the_nearest() {
+        let available = versions(&["1.0.0"]);
+        assert_eq!(
+            pick(&available, Some("beta")),
+            Served {
+                version: Some(Version::from("1.0.0")),
+                status: VersionStatus::Fallback,
             }
         );
     }
