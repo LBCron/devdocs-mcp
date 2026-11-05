@@ -316,7 +316,14 @@ impl GitPlan {
                     &["fetch", "--depth", "1", "origin", &self.pin],
                     extra_config,
                 );
-                if direct.is_err() {
+                if let Err(direct_error) = direct {
+                    // The direct error is the likely root cause when the
+                    // fallback also fails, so it surfaces here, not only
+                    // in the discarded result.
+                    tracing::warn!(
+                        "the SHA fetch of {} failed; falling back to a full clone: {direct_error}",
+                        self.pin
+                    );
                     // The server rejected the SHA fetch (no
                     // allowReachableSHA1InWant): fall back to a full clone
                     // and report it (docs/implementation/07 §Git adapter).
@@ -455,12 +462,14 @@ fn verify_private_dir(_path: &Path) -> Result<(), IngestError> {
     Ok(())
 }
 
-/// Runs one `git` invocation from `cwd` and returns trimmed stdout.
-///
-/// The command is an argv vector: `git`, the per-command `-c` config
-/// (base plus extras), then `args`. The child env comes from
-/// [`pin_env`] (docs/implementation/09 §Git subprocess safety).
-fn run_git(cwd: &Path, args: &[&str], extra_config: &[&str]) -> Result<String, IngestError> {
+/// Builds the command one `git` invocation runs: `git`, the per-command
+/// `-c` config (base plus extras), then `args`, from `cwd`. The child env
+/// is hardened here: the prompt and system config pins, then the removal
+/// of every [`STRIPPED_ENV`] variable so an ambient value cannot reach
+/// the git child (docs/implementation/09 §Git subprocess safety).
+/// Extracted so tests assert on the exact command `run_git` executes,
+/// not on a seam beside it.
+fn build_git_command(cwd: &Path, args: &[&str], extra_config: &[&str]) -> Command {
     let mut command = Command::new("git");
     for config in BASE_CONFIG
         .iter()
@@ -470,13 +479,28 @@ fn run_git(cwd: &Path, args: &[&str], extra_config: &[&str]) -> Result<String, I
         command.arg("-c").arg(config);
     }
     command.args(args).current_dir(cwd);
-    pin_env(&mut command);
-    let output = command.output().map_err(|error| match error.kind() {
-        io::ErrorKind::NotFound => IngestError::GitBinaryMissing,
-        _ => IngestError::GitSpawn {
-            message: error.to_string(),
-        },
-    })?;
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    command.env("GIT_CONFIG_NOSYSTEM", "1");
+    for key in STRIPPED_ENV {
+        command.env_remove(key);
+    }
+    command
+}
+
+/// Runs one `git` invocation from `cwd` and returns trimmed stdout.
+///
+/// The command is an argv vector against the system binary — no shell, no
+/// interpolated command line — built by [`build_git_command`]
+/// (docs/implementation/09 §Git subprocess safety).
+fn run_git(cwd: &Path, args: &[&str], extra_config: &[&str]) -> Result<String, IngestError> {
+    let output = build_git_command(cwd, args, extra_config)
+        .output()
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::NotFound => IngestError::GitBinaryMissing,
+            _ => IngestError::GitSpawn {
+                message: error.to_string(),
+            },
+        })?;
     if !output.status.success() {
         return Err(IngestError::GitCommand {
             command: format!("git {}", args.join(" ")),
@@ -484,19 +508,6 @@ fn run_git(cwd: &Path, args: &[&str], extra_config: &[&str]) -> Result<String, I
         });
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
-}
-
-/// Applies the child env every invocation carries: the prompt and system
-/// config pins, then the removal of every [`STRIPPED_ENV`] variable so an
-/// ambient value cannot reach the git child (docs/implementation/09 §Git
-/// subprocess safety). Extracted so tests assert on the builder's env
-/// handling exactly as `run_git` applies it.
-fn pin_env(command: &mut Command) {
-    command.env("GIT_TERMINAL_PROMPT", "0");
-    command.env("GIT_CONFIG_NOSYSTEM", "1");
-    for key in STRIPPED_ENV {
-        command.env_remove(key);
-    }
 }
 
 /// The bounded stderr tail for an error: the last 512 characters, cut on
@@ -526,6 +537,9 @@ fn stderr_tail(stderr: &[u8]) -> String {
 /// UTF-8 are skipped and counted.
 fn walk_docs(dir: &Path, extensions: &[String]) -> Result<(Vec<PageDocument>, usize), IngestError> {
     let allowlist: Vec<String> = extensions.iter().map(|e| e.to_ascii_lowercase()).collect();
+    // The walker keeps the `ignore` default of skipping hidden entries:
+    // dot files and dot directories (`.github/`, `.config/mkdocs.yml`)
+    // never reach the allowlist (docs/implementation/07 §Git adapter).
     let walker = ignore::WalkBuilder::new(dir)
         .require_git(true)
         .follow_links(false)
@@ -866,27 +880,14 @@ mod tests {
         assert!(!path.exists());
     }
 
-    /// Planted ambient `GIT_*` control and location variables never reach
-    /// the git child: the builder removes them the way `run_git` applies
-    /// the env (docs/implementation/09 §Git subprocess safety).
+    /// The builder `run_git` executes hardens the child env: every
+    /// ambient `GIT_*` control and location variable is removed, the
+    /// prompt and system config pins are set — what an operator shell may
+    /// carry into the process never reaches the git child
+    /// (docs/implementation/09 §Git subprocess safety).
     #[test]
-    fn planted_ambient_git_env_never_reaches_the_child() {
-        let mut command = StdCommand::new("git");
-        // What an operator shell may carry into the process.
-        for (key, value) in [
-            ("GIT_CONFIG_COUNT", "1"),
-            ("GIT_CONFIG_KEY_0", "core.fsmonitor"),
-            ("GIT_CONFIG_VALUE_0", "/evil/fsmonitor"),
-            ("GIT_ASKPASS", "/evil/askpass"),
-            ("GIT_SSH_COMMAND", "evil-ssh"),
-            ("GIT_SSH_VARIANT", "evil"),
-            ("GIT_STDERR", "/evil/stderr"),
-            ("GIT_DIR", "/evil/dir"),
-        ] {
-            command.env(key, value);
-        }
-
-        super::pin_env(&mut command);
+    fn the_git_builder_strips_the_ambient_git_env_from_the_child() {
+        let command = super::build_git_command(Path::new("."), &["status"], &[]);
 
         let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
         for key in [

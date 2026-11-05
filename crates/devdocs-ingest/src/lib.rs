@@ -21,7 +21,6 @@ pub use chrome::{ChromeReport, PageDocument, strip_chrome};
 pub use error::IngestError;
 pub use events::IngestEvents;
 pub use fixture::{FixtureSet, RecordedResponse};
-pub use git::{GitFetch, GitPlan, PinKind, TempClone, install_signal_cleanup, plan as plan_git};
 pub use guard::{FetchGuard, GuardError};
 pub use license::{LicenseGrant, gate_fetch, refused_status};
 pub use llms_txt::{LlmsLink, LlmsSection, LlmsTxtIndex, parse_llms_txt};
