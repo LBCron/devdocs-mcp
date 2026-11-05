@@ -21,6 +21,8 @@ devdocs-testkit.workspace = true
 insta.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
+time.workspace = true
+url.workspace = true
 
 [lints]
 workspace = true

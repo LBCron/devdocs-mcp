@@ -68,9 +68,14 @@ pub fn search(
     let resolved = resolve(query, &ctx);
 
     // Plan the rungs from the resolution. The headroom is 4× the requested
-    // hits (docs/08 §Rungs, rung 2).
+    // hits (docs/08 §Rungs, rungs 1 and 2).
     let headroom = plan.limit.saturating_mul(4).max(1);
-    let mut rung_hits: Vec<Vec<Hit>> = vec![symbol_rung(store, scope_for(&resolved))];
+    let mut rung_hits: Vec<Vec<Hit>> = vec![symbol_rung(
+        store,
+        &query.text,
+        scope_for(&resolved),
+        headroom,
+    )?];
     let (pick_status, served_version, requested_text) =
         version_rung_hits(store, query, &resolved, headroom, &mut rung_hits)?;
 

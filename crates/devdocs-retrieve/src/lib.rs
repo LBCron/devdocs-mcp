@@ -22,6 +22,6 @@ pub use resolver::{
     Dep, ProjectContext, Query, ResolutionSource, Resolved, parse_cargo_lock, parse_go_mod,
     parse_package_lock, parse_pnpm_lock, parse_pyproject, parse_uv_lock, resolve,
 };
-pub use rung::{Scope, fts_rung, symbol_rung};
+pub use rung::{Scope, fts_rung, normalize_symbol, symbol_rung};
 pub use serve::Plan;
 pub use version::{Version, version_cmp};
