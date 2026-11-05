@@ -228,6 +228,129 @@ const SYMBOL_FROM: &str = "symbols sym \
 const SYMBOL_CLAUSE: &str =
     "sym.symbol = ?1 AND c.source_id = ?2 AND s.active = 1 {license_clause}";
 
+/// How a symbol query matches the stored `symbols.symbol` values, from the
+/// strongest shape down (docs/implementation/08 §Retrieval ladder, the
+/// symbol exact step).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolMatch {
+    /// The whole identifier, byte-exact.
+    Exact,
+    /// The identifier starts with the query, case-sensitively — the
+    /// completion shape (`useR` does not match `useRouter`).
+    CaseSensitivePrefix,
+    /// The identifier equals the query or starts with it,
+    /// case-insensitively; exact matches rank before prefixes.
+    CaseInsensitive,
+}
+
+/// The source narrowing of a symbol query, the
+/// [`Store::search_fts_library`]/[`Store::search_fts_source`] shapes
+/// carried as one argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymbolScope {
+    /// Every active source.
+    All,
+    /// Active sources of one library, case-insensitive on the name.
+    Library(String),
+    /// One exact source id.
+    Source(i64),
+}
+
+/// Escapes `prefix` for a SQLite `GLOB` pattern head, so the identifier
+/// characters `[`, `*`, and `?` match themselves.
+fn glob_escape(prefix: &str) -> String {
+    prefix
+        .replace('[', "[[]")
+        .replace('*', "[*]")
+        .replace('?', "[?]")
+}
+
+/// Escapes `prefix` for a SQLite `LIKE` pattern head under the `\` escape,
+/// so `%` and `_` in an identifier match themselves.
+fn like_escape(prefix: &str) -> String {
+    prefix
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+impl Store {
+    /// The symbol-lookup ladder over active sources: matches `symbol` per
+    /// `mode`, narrowed to `scope`, best match quality first with ties in
+    /// the lower chunk id. Returns at most `limit` hits, and the
+    /// terminal-license clause drops refused sources at query time
+    /// (docs/implementation/09 §License gate enforcement points, point 3).
+    pub fn search_symbols(
+        &self,
+        symbol: &str,
+        mode: SymbolMatch,
+        scope: SymbolScope,
+        limit: u32,
+    ) -> Result<Vec<Hit>, StoreError> {
+        // `?1` is always the raw identifier (equality and match quality),
+        // `?2` the limit; the escaped match pattern sits at `?3` in the
+        // prefix modes, and the scope value takes the next index.
+        let (predicate, order, uses_pattern) = match mode {
+            SymbolMatch::Exact => (String::from("sym.symbol = ?1"), String::new(), false),
+            SymbolMatch::CaseSensitivePrefix => (
+                String::from("sym.symbol GLOB (?3 || '*')"),
+                String::from("(sym.symbol = ?1) DESC, "),
+                true,
+            ),
+            SymbolMatch::CaseInsensitive => (
+                String::from(
+                    "sym.symbol = ?1 COLLATE NOCASE \
+                     OR sym.symbol LIKE (?3 || '%') ESCAPE '\\'",
+                ),
+                String::from("(sym.symbol = ?1 COLLATE NOCASE) DESC, "),
+                true,
+            ),
+        };
+        let mut bind = vec![
+            rusqlite::types::Value::from(symbol.to_owned()),
+            rusqlite::types::Value::from(i64::from(limit)),
+        ];
+        if uses_pattern {
+            let pattern = match mode {
+                SymbolMatch::CaseSensitivePrefix => glob_escape(symbol),
+                SymbolMatch::CaseInsensitive => like_escape(symbol),
+                SymbolMatch::Exact => unreachable!("uses_pattern is false for Exact"),
+            };
+            bind.push(rusqlite::types::Value::from(pattern));
+        }
+        let scope_idx = if uses_pattern { 4 } else { 3 };
+        // Deterministic in the mode and scope only, so `prepare_cached`
+        // keeps one entry per mode and scope variant.
+        let (scope_clause, scope_value) = match scope {
+            SymbolScope::All => (String::new(), None),
+            SymbolScope::Library(library) => (
+                format!(" AND s.library = ?{scope_idx} COLLATE NOCASE"),
+                Some(rusqlite::types::Value::from(library)),
+            ),
+            SymbolScope::Source(source_id) => (
+                format!(" AND s.source_id = ?{scope_idx}"),
+                Some(rusqlite::types::Value::from(source_id)),
+            ),
+        };
+        let sql = format!(
+            "SELECT {BASE_COLUMNS}, sym.kind \
+             FROM {SYMBOL_FROM} \
+             WHERE ({predicate}) AND s.active = 1 {LICENSE_PLACEHOLDER}{scope_clause} \
+             ORDER BY {order}c.chunk_id \
+             LIMIT ?2"
+        )
+        .replace(LICENSE_PLACEHOLDER, TERMINAL_LICENSE_CLAUSE);
+        let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
+        let mut stmt = conn.prepare_cached(&sql)?;
+        if let Some(value) = scope_value {
+            bind.push(value);
+        }
+        let rows = stmt.query_map(rusqlite::params_from_iter(bind), plain_hit)?;
+        rows.collect::<Result<Vec<Hit>, _>>()
+            .map_err(StoreError::Sql)
+    }
+}
+
 /// The FROM/JOIN of the full-chunk read: chunk and source, no symbol table.
 const SOURCE_CHUNKS_FROM: &str = "chunks c \
      JOIN sources s ON s.source_id = c.source_id";

@@ -7,7 +7,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use devdocs_model::SourceId;
-use devdocs_store::{Store, build_match_query};
+use devdocs_store::{Store, SymbolMatch, SymbolScope, build_match_query};
 use rusqlite::Connection;
 use tempfile::tempdir;
 
@@ -167,4 +167,221 @@ fn lookup_symbol_is_scoped_to_the_source() {
     let s = seeded();
     let hits = s.store.lookup_symbol("use_router", SourceId(999)).unwrap();
     assert_eq!(hits, Vec::<devdocs_store::Hit>::new());
+}
+
+/// One symbol row on a seeded chunk.
+fn symbol(conn: &Connection, chunk_id: i64, name: &str, kind: &str) {
+    conn.execute(
+        "INSERT INTO symbols(symbol, chunk_id, kind) VALUES (?1, ?2, ?3)",
+        rusqlite::params![name, chunk_id, kind],
+    )
+    .unwrap();
+}
+
+/// The ladder fixture: two sources, several chunks per source, and symbol
+/// rows that exercise every mode, scope, the limit, and the tie order:
+///
+/// - source 1 `next.js` (active): chunk A carries `use_router` and
+///   `useRoute`, chunk B carries `use_router` and `use_router_polyfill`.
+/// - source 2 `vue` (active): chunk C carries `use_router`.
+struct Ladder {
+    store: Store,
+    conn: Connection,
+    next_source: i64,
+    vue_source: i64,
+    chunk_a: i64,
+    chunk_b: i64,
+    vue_chunk: i64,
+    _dir: tempfile::TempDir,
+}
+
+fn ladder() -> Ladder {
+    let dir = tempdir().unwrap();
+    let store = devdocs_testkit::open_migrated(&dir.path().join("docs.db")).unwrap();
+    let conn = Connection::open(dir.path().join("docs.db")).unwrap();
+    let next_source = devdocs_testkit::seed_source(&conn, "next.js", true).unwrap();
+    let vue_source = devdocs_testkit::seed_source(&conn, "vue", true).unwrap();
+    let chunk_a = devdocs_testkit::seed_chunk(
+        &conn,
+        next_source,
+        0,
+        "[\"Routing\"]",
+        None,
+        "Router hooks.",
+    )
+    .unwrap();
+    let chunk_b = devdocs_testkit::seed_chunk(
+        &conn,
+        next_source,
+        1,
+        "[\"Routing\"]",
+        None,
+        "Router polyfills.",
+    )
+    .unwrap();
+    let vue_chunk = devdocs_testkit::seed_chunk(
+        &conn,
+        vue_source,
+        0,
+        "[\"Routing\"]",
+        None,
+        "Vue router hooks.",
+    )
+    .unwrap();
+    symbol(&conn, chunk_a, "use_router", "function");
+    symbol(&conn, chunk_a, "useRoute", "function");
+    symbol(&conn, chunk_b, "use_router", "function");
+    symbol(&conn, chunk_b, "use_router_polyfill", "function");
+    symbol(&conn, vue_chunk, "use_router", "function");
+    Ladder {
+        store,
+        conn,
+        next_source,
+        vue_source,
+        chunk_a,
+        chunk_b,
+        vue_chunk,
+        _dir: dir,
+    }
+}
+
+/// The chunk ids of a hit list.
+fn ids(hits: &[devdocs_store::Hit]) -> Vec<i64> {
+    hits.iter().map(|hit| hit.chunk_id).collect()
+}
+
+/// The exact mode returns the whole-identifier matches of every active
+/// source, ties in the lower chunk id.
+#[test]
+fn symbol_exact_matches_all_sources_in_chunk_id_order() {
+    let s = ladder();
+    let hits = s
+        .store
+        .search_symbols("use_router", SymbolMatch::Exact, SymbolScope::All, 10)
+        .unwrap();
+    assert_eq!(ids(&hits), vec![s.chunk_a, s.chunk_b, s.vue_chunk]);
+    assert_eq!(hits[0].symbol_kind.as_deref(), Some("function"));
+}
+
+/// The case-sensitive prefix does not fold case or punctuation: `useR`
+/// matches `useRoute` only, never `use_router` or `useRouter`.
+#[test]
+fn symbol_case_sensitive_prefix_respects_case() {
+    let s = ladder();
+    let hits = s
+        .store
+        .search_symbols(
+            "useR",
+            SymbolMatch::CaseSensitivePrefix,
+            SymbolScope::All,
+            10,
+        )
+        .unwrap();
+    assert_eq!(ids(&hits), vec![s.chunk_a], "useRoute only");
+}
+
+/// The case-insensitive mode falls back across case: `USE_ROUTER` matches
+/// the stored `use_router` rows; prefix matches of the same head trail the
+/// exact ones, ties in the lower chunk id.
+#[test]
+fn symbol_case_insensitive_fallback_matches() {
+    let s = ladder();
+    let hits = s
+        .store
+        .search_symbols(
+            "USE_ROUTER",
+            SymbolMatch::CaseInsensitive,
+            SymbolScope::All,
+            10,
+        )
+        .unwrap();
+    assert_eq!(
+        ids(&hits),
+        vec![s.chunk_a, s.chunk_b, s.vue_chunk, s.chunk_b]
+    );
+
+    // A prefix query in the same mode matches every identifier head, with
+    // exact matches ranking before prefixes.
+    let hits = s
+        .store
+        .search_symbols(
+            "use_router",
+            SymbolMatch::CaseInsensitive,
+            SymbolScope::All,
+            10,
+        )
+        .unwrap();
+    assert_eq!(
+        ids(&hits),
+        vec![s.chunk_a, s.chunk_b, s.vue_chunk, s.chunk_b],
+        "use_router_polyfill trails the exact matches"
+    );
+}
+
+/// The scope narrows to one library or one source id.
+#[test]
+fn symbol_scope_narrows_the_search() {
+    let s = ladder();
+    let hits = s
+        .store
+        .search_symbols(
+            "use_router",
+            SymbolMatch::Exact,
+            SymbolScope::Library(String::from("NEXT.JS")),
+            10,
+        )
+        .unwrap();
+    assert_eq!(ids(&hits), vec![s.chunk_a, s.chunk_b]);
+
+    let hits = s
+        .store
+        .search_symbols(
+            "use_router",
+            SymbolMatch::Exact,
+            SymbolScope::Library(String::from("vue")),
+            10,
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 1, "only the vue chunk");
+    assert_eq!(hits[0].library, "vue");
+
+    let hits = s
+        .store
+        .search_symbols(
+            "use_router",
+            SymbolMatch::Exact,
+            SymbolScope::Source(s.vue_source),
+            10,
+        )
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].source_id, s.vue_source);
+}
+
+/// The limit caps the result set.
+#[test]
+fn symbol_limit_caps_the_results() {
+    let s = ladder();
+    let hits = s
+        .store
+        .search_symbols("use_router", SymbolMatch::Exact, SymbolScope::All, 1)
+        .unwrap();
+    assert_eq!(ids(&hits), vec![s.chunk_a], "the lower chunk id wins");
+}
+
+/// Inactive sources drop out of the ladder, like every serving query.
+#[test]
+fn symbol_ladder_skips_inactive_sources() {
+    let s = ladder();
+    s.conn
+        .execute(
+            "UPDATE sources SET active = 0 WHERE source_id = ?1",
+            rusqlite::params![s.next_source],
+        )
+        .unwrap();
+    let hits = s
+        .store
+        .search_symbols("use_router", SymbolMatch::Exact, SymbolScope::All, 10)
+        .unwrap();
+    assert_eq!(hits.len(), 1, "only the vue chunk stays");
 }
