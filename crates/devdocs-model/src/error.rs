@@ -26,6 +26,8 @@ pub enum MissReason {
     QuarantinedOnly,
     /// Matches existed, but none cleared the confidence floor.
     LowConfidence,
+    /// The symbol lookup resolved its target, but no symbol matched.
+    SymbolAbsent,
 }
 
 impl fmt::Display for MissReason {
@@ -36,6 +38,7 @@ impl fmt::Display for MissReason {
             Self::LicenseBlocked => "license_blocked",
             Self::QuarantinedOnly => "quarantined_only",
             Self::LowConfidence => "low_confidence",
+            Self::SymbolAbsent => "symbol_absent",
         };
         f.write_str(text)
     }
@@ -123,7 +126,8 @@ impl Error {
                 MissReason::NotIndexed | MissReason::VersionAbsent => "PKG_NOT_INDEXED",
                 MissReason::LicenseBlocked
                 | MissReason::QuarantinedOnly
-                | MissReason::LowConfidence => "NO_RESULT",
+                | MissReason::LowConfidence
+                | MissReason::SymbolAbsent => "NO_RESULT",
             },
             Self::Upstream { code, .. } => match code {
                 UpstreamCode::FetchBlocked => "FETCH_BLOCKED",
@@ -148,6 +152,7 @@ impl Error {
                 MissReason::QuarantinedOnly | MissReason::LowConfidence => {
                     Some("run: devdocs sync [library]")
                 }
+                MissReason::SymbolAbsent => Some("run: devdocs search <symbol>"),
             },
             Self::Upstream { .. } => Some("run: devdocs sync [library]"),
             Self::BudgetExceeded => Some("raise --max-tokens"),
@@ -269,6 +274,9 @@ mod tests {
             Error::NoResult {
                 reason: MissReason::LowConfidence,
             },
+            Error::NoResult {
+                reason: MissReason::SymbolAbsent,
+            },
             Error::Upstream {
                 code: UpstreamCode::FetchBlocked,
                 detail: String::new(),
@@ -289,6 +297,7 @@ mod tests {
             "PKG_NOT_INDEXED",
             "PKG_NOT_INDEXED",
             "NO_RESULT",
+            "NO_RESULT",
             "FETCH_BLOCKED",
             "UPSTREAM_ERROR",
             "HASH_MISMATCH",
@@ -297,7 +306,7 @@ mod tests {
         for (error, code) in codes.iter().zip(expected) {
             assert_eq!(error.code(), code);
         }
-        assert_eq!(codes.iter().map(Error::code).collect::<Vec<_>>().len(), 9);
+        assert_eq!(codes.iter().map(Error::code).collect::<Vec<_>>().len(), 10);
     }
 
     /// The exit-2 envelope carries `miss_reason`; the others do not. A
@@ -330,6 +339,22 @@ mod tests {
         assert_eq!(
             json,
             r#"{"error":"PKG_NOT_INDEXED","hint":"run: devdocs add <source> --version <V>","detail":null,"miss_reason":"not_indexed"}"#
+        );
+    }
+
+    /// A symbol miss is a `NO_RESULT` carrying `symbol_absent` and the
+    /// search hint — the target resolved, the identifier did not.
+    #[test]
+    fn symbol_absent_maps_to_no_result_with_the_search_hint() {
+        let error = Error::NoResult {
+            reason: MissReason::SymbolAbsent,
+        };
+        assert_eq!(error.exit_code(), 2);
+        assert_eq!(error.code(), "NO_RESULT");
+        let json = error.to_envelope().to_json_string().unwrap();
+        assert_eq!(
+            json,
+            r#"{"error":"NO_RESULT","hint":"run: devdocs search <symbol>","detail":null,"miss_reason":"symbol_absent"}"#
         );
     }
 

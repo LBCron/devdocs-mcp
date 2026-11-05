@@ -3,7 +3,7 @@ type: guide
 title: Retrieval and Interfaces (L3 + L4)
 description: The hybrid retrieval pipeline, version resolution, budget enforcement, fallback ladder, the result shape, the full CLI contract, and the MCP adapter.
 tags: [devdocs, retrieval, cli, mcp, rrf, max-tokens]
-timestamp: 2026-11-05T12:00:00Z
+timestamp: 2026-11-06T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -82,7 +82,7 @@ Entered only on low confidence or an explicit `miss_reason` match (research: ret
 
 A cold miss returns `not_indexed` with a sync hint. An abstention is a valid result (research: retrieval-design.md §3.7).
 
-`miss_reason` values: `not_indexed`, `version_absent`, `license_blocked`, `quarantined_only`, `low_confidence`. The JSON error on exit 2 carries `miss_reason` and a `hint`; a cold miss — the library or the requested version absent — carries `error = "PKG_NOT_INDEXED"`, every other valid-query miss `error = "NO_RESULT"` (docs/implementation/05 §Error model).
+`miss_reason` values: `not_indexed`, `version_absent`, `license_blocked`, `quarantined_only`, `low_confidence`, `symbol_absent` — the last one the exact symbol lookup's miss when the target resolved but no symbol matched (hint names `devdocs search <symbol>`). The JSON error on exit 2 carries `miss_reason` and a `hint`; a cold miss — the library or the requested version absent — carries `error = "PKG_NOT_INDEXED"`, every other valid-query miss `error = "NO_RESULT"` (docs/implementation/05 §Error model).
 
 ## Result envelope
 

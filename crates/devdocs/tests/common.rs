@@ -203,6 +203,32 @@ pub fn indexed_env() -> (Env, PathBuf) {
     (env, config)
 }
 
+/// The intro page carrying a fenced JavaScript definition the symbol pass
+/// extracts (docs/implementation/13 §M5): acme 1.0 defines `makeWidget`.
+const INTRO_SYMBOL: &str = concat!(
+    "# Intro\n\n",
+    "The Acme SDK ships a client for every runtime.\n\n",
+    "## Widgets\n\n",
+    "Create a widget with the factory.\n\n",
+    "```js\n",
+    "export function makeWidget(name) {\n",
+    "  return { name };\n",
+    "}\n",
+    "```\n"
+);
+
+/// An indexed fixture corpus whose page carries an extractable symbol:
+/// acme at 1.0 defines `makeWidget`. Returns the environment and the
+/// config path every CLI run needs.
+pub fn symbol_env() -> (Env, PathBuf) {
+    let env = Env::new();
+    let dir = env.root.join("fixture");
+    std::fs::create_dir_all(&dir).expect("fixture dir");
+    let config = write_config(&env.root);
+    add_fixture_version(&env, &dir, &config, "1.0", &acme_responses(INTRO_SYMBOL));
+    (env, config)
+}
+
 /// Search the indexed corpus and return the first result: the doc the
 /// open/verify surfaces exercise.
 pub fn indexed_doc(env: &Env, config: &Path) -> ResultItem {

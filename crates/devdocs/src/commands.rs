@@ -118,6 +118,48 @@ pub fn run_search(
     devdocs_retrieve::serve::search(&store, &query, &project, &plan).map_err(map_retrieve_error)
 }
 
+/// Splits a `devdocs symbol` target into its `(library, version)` pair:
+/// `library@version` pins the version, a bare `library` keeps the library
+/// scope (docs/implementation/08 §CLI contract).
+///
+/// # Errors
+/// [`Error::Usage`] for an empty or malformed target.
+fn split_symbol_target(target: &str) -> Result<(&str, Option<&str>), Error> {
+    match target.split_once('@') {
+        Some((library, version)) if !library.is_empty() && !version.is_empty() => {
+            Ok((library, Some(version)))
+        }
+        Some(_) => Err(Error::Usage(format!(
+            "bad symbol target `{target}`: expected library@version"
+        ))),
+        None if !target.is_empty() => Ok((target, None)),
+        None => Err(Error::Usage("symbol target must not be empty".to_owned())),
+    }
+}
+
+/// Runs `devdocs symbol <target> <symbol>` (docs/implementation/08 §CLI
+/// contract): the exact symbol lookup over the resolved target. The limit
+/// is the documented search default — docs/08 defines no `--limit` flag
+/// for the symbol command.
+///
+/// # Errors
+/// [`Error::NoResult`] on the miss paths (exit 2: `PKG_NOT_INDEXED` for an
+/// absent target, `NO_RESULT`/`symbol_absent` for an identifier the target
+/// does not carry), [`Error::Usage`] for a malformed target,
+/// [`Error::Upstream`] for store failures.
+pub fn run_symbol(config: &Config, target: &str, symbol: &str) -> Result<ResultEnvelope, Error> {
+    let (library, version) = split_symbol_target(target)?;
+    let store = open_store(config, false)?;
+    let plan = devdocs_retrieve::Plan {
+        limit: config.search.limit_default,
+        max_tokens: config.search.max_tokens_default,
+        rrf_k: config.search.rrf_k,
+        cursor: None,
+    };
+    devdocs_retrieve::serve::symbol(&store, library, version, symbol, &plan)
+        .map_err(map_retrieve_error)
+}
+
 /// Runs `devdocs open <ref>`.
 ///
 /// # Errors

@@ -113,6 +113,89 @@ pub fn search(
     })
 }
 
+/// The exact symbol lookup (docs/08 §CLI contract: `devdocs symbol
+/// <library@version> <symbol>`). The target resolves first — a library the
+/// index lacks is [`MissReason::NotIndexed`], a version it lacks is
+/// [`MissReason::VersionAbsent`] — then the symbol rung runs alone through
+/// the same fusion-and-pack path (docs/implementation/08 §Retrieval ladder:
+/// cheap, decisive). A pinned version scopes the rung to that version's
+/// sources; without one the rung keeps the library scope. A resolved
+/// target whose lookup serves nothing is the [`MissReason::SymbolAbsent`]
+/// miss (docs/implementation/13 §M5).
+///
+/// # Errors
+/// [`RetrieveError::Miss`] on the miss paths (exit 2) and
+/// [`RetrieveError::Store`] for store failures.
+pub fn symbol(
+    store: &Store,
+    library: &str,
+    version: Option<&str>,
+    symbol: &str,
+    plan: &Plan,
+) -> Result<ResultEnvelope, RetrieveError> {
+    if store.library_versions(library)?.is_empty() {
+        return Err(MissReason::NotIndexed.into());
+    }
+    let headroom = plan.limit.saturating_mul(4).max(1);
+    let (rung_hits, served_version) = match version {
+        Some(version) => {
+            let source_ids = store.find_sources(library, version)?;
+            if source_ids.is_empty() {
+                return Err(MissReason::VersionAbsent.into());
+            }
+            let rungs = source_ids
+                .iter()
+                .map(|id| symbol_rung(store, symbol, Scope::Source(*id), headroom))
+                .collect::<Result<Vec<_>, _>>()?;
+            (rungs, Some(version.to_owned()))
+        }
+        None => (
+            vec![symbol_rung(
+                store,
+                symbol,
+                Scope::Library(library),
+                headroom,
+            )?],
+            None,
+        ),
+    };
+    // A single rung fuses as identity; several pinned sources rank their
+    // best hits equally, ties by chunk id.
+    let fused = fuse(plan.rrf_k, &rung_hits);
+    if fused.is_empty() {
+        return Err(MissReason::SymbolAbsent.into());
+    }
+    let pick_status = if served_version.is_some() {
+        VersionStatus::Verified
+    } else {
+        VersionStatus::Alias
+    };
+    let packed = pack(
+        fused,
+        usize::try_from(plan.limit).unwrap_or(usize::MAX),
+        plan.max_tokens,
+    );
+    let results: Vec<ResultItem> = packed
+        .items
+        .iter()
+        .map(|(hit, score)| {
+            let status = item_status(
+                &hit.version,
+                served_version.as_deref(),
+                version,
+                pick_status,
+            );
+            to_result_item(hit, version, status, *score)
+        })
+        .collect();
+    Ok(ResultEnvelope {
+        results,
+        truncated: packed.truncated,
+        next_cursor: packed.next_cursor,
+        served_at: now_rfc3339(),
+    })
+}
+
 /// The fallback rungs (docs/08 §Version resolution, step 4): search every
 /// approved source. A version that the index carries narrows the fallback
 /// to it — the flags carry top precedence (docs/08 §Version resolution,

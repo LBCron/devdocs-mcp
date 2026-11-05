@@ -336,8 +336,8 @@ pub fn run(cli: &Cli) -> Result<(), Error> {
         Command::Open { doc_ref, cursor } => run_open_command(cli, doc_ref, *cursor),
         Command::Verify { doc_ref } => run_verify_command(cli, doc_ref),
         Command::Versions { library } => run_versions_command(cli, library),
+        Command::Symbol { target, symbol } => run_symbol_command(cli, target, symbol),
         Command::Sync { .. }
-        | Command::Symbol { .. }
         | Command::Source { .. }
         | Command::Skill { .. }
         | Command::Mcp { .. }
@@ -357,6 +357,17 @@ fn run_search_command(
 ) -> Result<(), Error> {
     let config = Config::load(&overrides(cli))?;
     let envelope = crate::commands::run_search(&config, query, library, version, limit, cursor)?;
+    if cli.json {
+        print_line(&envelope)
+    } else {
+        write_stdout_text(&summarize_search(&envelope))
+    }
+}
+
+/// Runs `devdocs symbol` and prints the exact-lookup envelope.
+fn run_symbol_command(cli: &Cli, target: &str, symbol: &str) -> Result<(), Error> {
+    let config = Config::load(&overrides(cli))?;
+    let envelope = crate::commands::run_symbol(&config, target, symbol)?;
     if cli.json {
         print_line(&envelope)
     } else {
