@@ -59,7 +59,13 @@ pub mod env_vars {
     pub const SEARCH_LIMIT: &str = "DEVDOCS_SEARCH_LIMIT_DEFAULT";
     /// Maps to `search.rrf_k`.
     pub const SEARCH_RRF_K: &str = "DEVDOCS_SEARCH_RRF_K";
+    /// Maps to `ingest.git_extensions` as a comma-separated list.
+    pub const INGEST_GIT_EXTENSIONS: &str = "DEVDOCS_INGEST_GIT_EXTENSIONS";
 }
+
+/// The built-in default for `ingest.git_extensions`.
+pub const DEFAULT_GIT_EXTENSIONS: &[&str] =
+    &["md", "mdx", "rst", "adoc", "txt", "json", "yaml", "yml"];
 
 /// The resolved paths [`Config::load`] reports.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -84,6 +90,8 @@ pub struct Config {
     pub index: IndexConfig,
     /// Search behavior.
     pub search: SearchConfig,
+    /// Ingest behavior.
+    pub ingest: IngestConfig,
     /// The license registry.
     pub sources: BTreeMap<String, SourceConfig>,
 }
@@ -121,6 +129,22 @@ pub struct SearchConfig {
     pub limit_default: u32,
     /// The RRF fusion constant. Default 60.
     pub rrf_k: u32,
+}
+
+/// Ingest behavior.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct IngestConfig {
+    /// The file extensions the git adapter may ingest. Default
+    /// [`DEFAULT_GIT_EXTENSIONS`].
+    pub git_extensions: Vec<String>,
+}
+
+/// Partial `[ingest]`.
+#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct PartialIngest {
+    /// The file extensions the git adapter may ingest.
+    pub git_extensions: Option<Vec<String>>,
 }
 
 /// One license-registry entry under `[sources.<name>]`.
@@ -168,6 +192,8 @@ pub struct PartialConfig {
     pub index: PartialIndex,
     /// Search section.
     pub search: PartialSearch,
+    /// Ingest section.
+    pub ingest: PartialIngest,
     /// License-registry entries.
     pub sources: BTreeMap<String, SourceConfig>,
 }
@@ -251,6 +277,14 @@ impl PartialSearch {
     }
 }
 
+impl PartialIngest {
+    /// Fold a higher-precedence layer over this one.
+    fn merge(&mut self, over: Self) {
+        let Self { git_extensions } = over;
+        self.git_extensions = git_extensions.or(self.git_extensions.take());
+    }
+}
+
 impl PartialConfig {
     /// Fold a higher-precedence layer over this one. Source entries merge
     /// per name: the higher layer wins whole entries.
@@ -259,11 +293,13 @@ impl PartialConfig {
             fetch,
             index,
             search,
+            ingest,
             sources,
         } = over;
         self.fetch.merge(fetch);
         self.index.merge(index);
         self.search.merge(search);
+        self.ingest.merge(ingest);
         self.sources.extend(sources);
     }
 
@@ -284,6 +320,7 @@ impl PartialConfig {
                 "fetch" => partial.fetch = parse_section("fetch", value)?,
                 "index" => partial.index = parse_section("index", value)?,
                 "search" => partial.search = parse_section("search", value)?,
+                "ingest" => partial.ingest = parse_section("ingest", value)?,
                 "sources" => {
                     let toml::Value::Table(entries) = value else {
                         return Err(leaf_error(
@@ -300,7 +337,7 @@ impl PartialConfig {
                     return Err(Error::ConfigInvalid {
                         key_path: other.to_owned(),
                         reason: format!(
-                            "unknown section `{other}`; expected fetch, index, search, or sources"
+                            "unknown section `{other}`; expected fetch, index, search, ingest, or sources"
                         ),
                     });
                 }
@@ -317,13 +354,14 @@ impl PartialConfig {
     pub fn from_env() -> Result<Self, Error> {
         use env_vars::{
             FETCH_CONCURRENCY, FETCH_MAX_BYTES, FETCH_MAX_REDIRECTS, FETCH_TIMEOUT_MS,
-            FETCH_USER_AGENT, INDEX_EMBEDDINGS, INDEX_PATH, SEARCH_LIMIT, SEARCH_MAX_TOKENS,
-            SEARCH_RRF_K,
+            FETCH_USER_AGENT, INDEX_EMBEDDINGS, INDEX_PATH, INGEST_GIT_EXTENSIONS, SEARCH_LIMIT,
+            SEARCH_MAX_TOKENS, SEARCH_RRF_K,
         };
         let mut layer = Self::default();
         let mut fetch = PartialFetch::default();
         let mut index = PartialIndex::default();
         let mut search = PartialSearch::default();
+        let mut ingest = PartialIngest::default();
 
         for (var, target) in [
             (FETCH_CONCURRENCY, EnvTarget::U32(&mut fetch.concurrency)),
@@ -359,9 +397,20 @@ impl PartialConfig {
             apply_num(var, target)?;
         }
 
+        if let Some(raw) = env_string(INGEST_GIT_EXTENSIONS)? {
+            ingest.git_extensions = Some(
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|ext| !ext.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            );
+        }
+
         layer.fetch = fetch;
         layer.index = index;
         layer.search = search;
+        layer.ingest = ingest;
         Ok(layer)
     }
 
@@ -656,6 +705,14 @@ impl Config {
                 limit_default: partial.search.limit_default.unwrap_or(8),
                 rrf_k: partial.search.rrf_k.unwrap_or(60),
             },
+            ingest: IngestConfig {
+                git_extensions: partial.ingest.git_extensions.clone().unwrap_or_else(|| {
+                    DEFAULT_GIT_EXTENSIONS
+                        .iter()
+                        .map(|ext| (*ext).to_owned())
+                        .collect()
+                }),
+            },
             sources,
         })
     }
@@ -720,6 +777,9 @@ max_tokens_default = 2000
 limit_default = 8
 rrf_k = 60
 
+[ingest]
+git_extensions = ["md", "adoc"]
+
 [sources.nextjs]
 kind = "llms_txt"
 url = "https://nextjs.org/docs/llms.txt"
@@ -730,6 +790,10 @@ refresh_days = 2
         let partial = PartialConfig::parse(text).unwrap();
         assert_eq!(partial.fetch.concurrency, Some(4));
         assert_eq!(partial.search.rrf_k, Some(60));
+        assert_eq!(
+            partial.ingest.git_extensions,
+            Some(vec!["md".to_owned(), "adoc".to_owned()])
+        );
         assert_eq!(partial.sources["nextjs"].license.as_deref(), Some("MIT"));
         partial.sources["nextjs"]
             .parsed_url("sources.nextjs")
@@ -852,6 +916,35 @@ refresh_days = 2
         assert!(!config.index.embeddings);
         assert!(config.index.path.ends_with("docs.db"));
         assert!(config.fetch.user_agent.contains("devdocs/"));
+        assert_eq!(config.ingest.git_extensions, super::DEFAULT_GIT_EXTENSIONS);
+    }
+
+    /// A `[ingest]` section in a config file overrides the default
+    /// extensions and leaves every other section on its default.
+    #[test]
+    fn ingest_file_layer_overrides_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("ingest.toml");
+        std::fs::write(&file, "[ingest]\ngit_extensions = [\"md\"]\n").unwrap();
+        let over = Overrides {
+            config_path: Some(file),
+            ..Overrides::default()
+        };
+        let config = Config::load(&over).unwrap();
+        assert_eq!(config.ingest.git_extensions, ["md"]);
+        assert_eq!(config.fetch.concurrency, 4);
+    }
+
+    /// An unknown key under `[ingest]` fails validation and names the key.
+    #[test]
+    fn unknown_ingest_key_fails_with_a_key_path() {
+        let error = PartialConfig::parse("[ingest]\ngit_extensionz = [\"md\"]\n").unwrap_err();
+        match error {
+            Error::ConfigInvalid { key_path, .. } => {
+                assert_eq!(key_path, "ingest.git_extensionz");
+            }
+            other => panic!("expected ConfigInvalid, got {other:?}"),
+        }
     }
 
     /// The `--db` flag layer wins over every file layer.
@@ -952,6 +1045,7 @@ refresh_days = 2
             env_vars::SEARCH_MAX_TOKENS,
             env_vars::SEARCH_LIMIT,
             env_vars::SEARCH_RRF_K,
+            env_vars::INGEST_GIT_EXTENSIONS,
         ] {
             assert!(name.starts_with("DEVDOCS_"), "{name}");
         }

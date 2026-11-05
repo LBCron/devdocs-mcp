@@ -15,6 +15,18 @@ expression: shown
     "embeddings": false,
     "path": "[DB_PATH]"
   },
+  "ingest": {
+    "git_extensions": [
+      "md",
+      "mdx",
+      "rst",
+      "adoc",
+      "txt",
+      "json",
+      "yaml",
+      "yml"
+    ]
+  },
   "search": {
     "limit_default": 8,
     "max_tokens_default": 2000,

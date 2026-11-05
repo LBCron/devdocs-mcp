@@ -64,6 +64,12 @@ fn config(index_url: &str) -> Config {
             limit_default: 8,
             rrf_k: 60,
         },
+        ingest: devdocs_model::config::IngestConfig {
+            git_extensions: devdocs_model::config::DEFAULT_GIT_EXTENSIONS
+                .iter()
+                .map(|ext| (*ext).to_owned())
+                .collect(),
+        },
         sources,
     }
 }
