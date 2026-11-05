@@ -75,4 +75,56 @@ pub enum IngestError {
         /// The index URL.
         index: String,
     },
+    /// The `git` executable is not on `PATH`; git sources cannot ingest
+    /// (docs/implementation/07 §Git adapter).
+    #[error("GIT_BINARY_MISSING: the git executable was not found on PATH")]
+    GitBinaryMissing,
+    /// A git pin starts with `-`, which would read as a git option on the
+    /// argv vector (docs/implementation/09 §Git subprocess safety).
+    #[error("GIT_INVALID_PIN: pin `{pin}` starts with `-`")]
+    GitInvalidPin {
+        /// The rejected pin.
+        pin: String,
+    },
+    /// The URL at fetch differs from the planned URL; a changed URL aborts
+    /// the run (docs/implementation/09 §Git subprocess safety).
+    #[error("GIT_URL_MISMATCH: fetch URL `{actual}` does not match the planned URL `{planned}`")]
+    GitUrlMismatch {
+        /// The URL the plan pinned.
+        planned: String,
+        /// The URL the caller passed to fetch.
+        actual: String,
+    },
+    /// A git invocation exited non-zero; the error carries a bounded
+    /// stderr tail, never a full dump (docs/implementation/07 §Git
+    /// adapter).
+    #[error("GIT_COMMAND_FAILED: `{command}` failed: {stderr}")]
+    GitCommand {
+        /// The argv of the failed invocation (without the config args).
+        command: String,
+        /// The bounded stderr tail.
+        stderr: String,
+    },
+    /// Spawning git failed for a reason other than a missing binary.
+    #[error("git spawn: {message}")]
+    GitSpawn {
+        /// What failed.
+        message: String,
+    },
+    /// The private temp clone directory could not be created or does not
+    /// carry mode 0700 (docs/implementation/09 §Local storage controls).
+    #[error("git temp dir: {message}")]
+    GitTempDir {
+        /// What failed.
+        message: String,
+    },
+    /// The docs walk over the clone failed.
+    #[error("git docs walk: {message}")]
+    GitWalk {
+        /// What failed.
+        message: String,
+    },
+    /// `git rev-parse HEAD` did not return a 40-hex commit SHA.
+    #[error("GIT_COMMIT_SHA_INVALID: rev-parse returned `{0}`")]
+    GitCommitShaInvalid(String),
 }

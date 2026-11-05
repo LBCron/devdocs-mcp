@@ -3,7 +3,7 @@ type: guide
 title: Ingest Pipeline (L1 + L2)
 description: The source adapters, the fetch guard, the license gate, the normalization and segmentation pipeline, dedup, the injection filter, and the refresh policy for devdocs.
 tags: [devdocs, ingest, llms-txt, git, openapi, html, segmentation]
-timestamp: 2026-11-05T12:30:00Z
+timestamp: 2026-11-06T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -80,6 +80,15 @@ Clone and checkout shell out to the system `git` binary. This matches cargo, uv,
 - Commit pin: shallow clone the default branch, then `git fetch --depth 1 origin <sha>` and `git checkout --detach <sha>`. If the server rejects a reachable-SHA fetch, fall back to a full clone. Record the fallback in the ingest event log.
 - Extract docs content with the `ignore` crate walk (respects `.gitignore`) filtered by an extension allowlist: `md, mdx, rst, adoc, txt, json, yaml, yml`. The config can extend the list.
 - Record `commit_sha` from `git rev-parse HEAD` in the temp clone. It becomes the provenance commit for every chunk of that source.
+
+Implemented shape (M6): the rules above land as follows.
+
+- **Module.** `devdocs-ingest::git` exposes `plan` → `GitPlan`, `GitPlan::fetch` → `GitFetch`, and the `TempClone` guard; the adapter is synchronous and the ingest pipeline wraps it in `spawn_blocking`.
+- **Plan.** `plan(url, pin, data_root)` validates the pin, classifies it (exactly 40 hex characters, case-insensitive, normalized lowercase → commit; anything else → tag), and creates the private clone directory. A pin starting with `-` fails as `GIT_INVALID_PIN` before any git invocation. The plan carries the URL as the single source of truth; a fetch whose URL differs from the planned one fails as `GIT_URL_MISMATCH`.
+- **Command layer.** One builder runs every invocation: `Command::new("git")` with an argv vector only — no shell, no interpolated command line. The child env strips `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, and `GIT_COMMON_DIR`, and pins `GIT_TERMINAL_PROMPT=0` and `GIT_CONFIG_NOSYSTEM=1`. Per-command config: `core.hooksPath=/dev/null`, the LFS filters blanked, and `protocol.file.allow=user`. A missing binary maps to `GIT_BINARY_MISSING`; a non-zero exit carries a bounded stderr tail (last 512 characters).
+- **Fetch.** Tag pins clone shallowly: `clone --depth 1 --branch <tag> --single-branch --filter=blob:none`. Commit pins clone the default branch shallowly (with `--filter=blob:none`), then `fetch --depth 1 origin <sha>`, then `checkout --detach <sha>`; when the SHA fetch fails — a server without `allowReachableSHA1InWant` — the fetch falls back to a full clone (no `--depth`, no `--filter`) and reports `fallback_used: true` to the caller. `commit_sha` comes from `git rev-parse HEAD` and must be 40 hex (`GIT_COMMIT_SHA_INVALID` otherwise).
+- **Docs walk.** The `ignore` walker runs with `require_git(true)` and `follow_links(false)`, so the clone's `.gitignore` rules apply. The extension allowlist (config `ingest.git_extensions`) filters in the walk loop, not through an override whitelist: the `ignore` crate gives overrides the highest precedence, so an override would re-admit `.gitignore`d files whose extension is allowlisted. Files that fail to read as UTF-8 are skipped and counted. The walk yields the pipeline's `PageDocument` shape (path relative to the clone root), so the git corpus enters the same dedup/chrome/segment stages as the llms.txt corpus.
+- **Temp dir and cleanup.** The clone lives under `<data_root>/tmp/devdocs-git-<random>`, both directories created with mode 0700 and verified. The `TempClone` guard removes the directory on drop and registers its path in a one-slot process registry; the SIGINT/SIGTERM handler (installed once, idempotently, when the first temp dir is created) removes the registered path and exits 130.
 
 ## OpenAPI adapter
 

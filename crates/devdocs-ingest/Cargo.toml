@@ -18,11 +18,14 @@ exact-tokens = ["dep:tiktoken-rs", "text-splitter/tiktoken-rs"]
 [dependencies]
 bytes.workspace = true
 comrak.workspace = true
+ctrlc.workspace = true
 devdocs-model.workspace = true
 devdocs-store.workspace = true
+ignore.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 text-splitter.workspace = true
 tiktoken-rs = { workspace = true, optional = true }
 thiserror.workspace = true

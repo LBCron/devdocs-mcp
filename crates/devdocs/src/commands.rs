@@ -366,5 +366,33 @@ fn map_ingest_error(error: devdocs_ingest::IngestError) -> Error {
             code: UpstreamCode::UpstreamError,
             detail: format!("no ingestable markdown pages linked from {index}"),
         },
+        E::GitBinaryMissing => Error::Upstream {
+            code: UpstreamCode::UpstreamError,
+            detail: "GIT_BINARY_MISSING: the git executable was not found on PATH".to_owned(),
+        },
+        E::GitInvalidPin { pin } => Error::Upstream {
+            code: UpstreamCode::UpstreamError,
+            detail: format!("GIT_INVALID_PIN: pin `{pin}` starts with `-`"),
+        },
+        E::GitUrlMismatch { planned, actual } => Error::Upstream {
+            code: UpstreamCode::UpstreamError,
+            detail: format!(
+                "GIT_URL_MISMATCH: fetch URL `{actual}` does not match the planned URL `{planned}`"
+            ),
+        },
+        E::GitCommand { command, stderr } => Error::Upstream {
+            code: UpstreamCode::UpstreamError,
+            detail: format!("GIT_COMMAND_FAILED: `{command}` failed: {stderr}"),
+        },
+        E::GitSpawn { message } | E::GitTempDir { message } | E::GitWalk { message } => {
+            Error::Upstream {
+                code: UpstreamCode::UpstreamError,
+                detail: message,
+            }
+        }
+        E::GitCommitShaInvalid(sha) => Error::Upstream {
+            code: UpstreamCode::UpstreamError,
+            detail: format!("GIT_COMMIT_SHA_INVALID: rev-parse returned `{sha}`"),
+        },
     }
 }
