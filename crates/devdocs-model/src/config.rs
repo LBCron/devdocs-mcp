@@ -512,6 +512,29 @@ fn leaf_error(section: &str, message: String) -> Error {
     }
 }
 
+/// Normalizes the extension allowlist: a leading `.` on an entry is
+/// dropped (`.md` names the same extension as `md`, which is what the
+/// walk matches against), blank entries go, and an empty result — an
+/// empty `DEVDOCS_INGEST_GIT_EXTENSIONS` value or config array — falls
+/// back to the defaults instead of a silent zero-document ingest
+/// (docs/implementation/07 §Git adapter).
+fn normalize_git_extensions(provided: Option<Vec<String>>) -> Vec<String> {
+    let trimmed: Vec<String> = provided
+        .unwrap_or_default()
+        .into_iter()
+        .map(|ext| ext.trim().trim_start_matches('.').to_owned())
+        .filter(|ext| !ext.is_empty())
+        .collect();
+    if trimmed.is_empty() {
+        DEFAULT_GIT_EXTENSIONS
+            .iter()
+            .map(|ext| (*ext).to_owned())
+            .collect()
+    } else {
+        trimmed
+    }
+}
+
 /// A config error for malformed TOML syntax; no key path applies.
 fn syntax_error(message: String) -> Error {
     Error::ConfigInvalid {
@@ -706,12 +729,7 @@ impl Config {
                 rrf_k: partial.search.rrf_k.unwrap_or(60),
             },
             ingest: IngestConfig {
-                git_extensions: partial.ingest.git_extensions.clone().unwrap_or_else(|| {
-                    DEFAULT_GIT_EXTENSIONS
-                        .iter()
-                        .map(|ext| (*ext).to_owned())
-                        .collect()
-                }),
+                git_extensions: normalize_git_extensions(partial.ingest.git_extensions.clone()),
             },
             sources,
         })
@@ -1049,6 +1067,36 @@ refresh_days = 2
         ] {
             assert!(name.starts_with("DEVDOCS_"), "{name}");
         }
+    }
+
+    /// The extension allowlist normalizes: a leading `.` drops (`.md`
+    /// names the same extension the walk matches against), blank entries
+    /// go, and an empty value — e.g. `DEVDOCS_INGEST_GIT_EXTENSIONS=""` —
+    /// resolves to the defaults, never to a silent zero-document
+    /// allowlist (docs/implementation/07 §Git adapter).
+    #[test]
+    fn git_extensions_normalize_to_a_usable_allowlist() {
+        let defaults: Vec<String> = super::DEFAULT_GIT_EXTENSIONS
+            .iter()
+            .map(|ext| (*ext).to_owned())
+            .collect();
+        // Unset and empty resolve to the defaults.
+        assert_eq!(super::normalize_git_extensions(None), defaults);
+        assert_eq!(
+            super::normalize_git_extensions(Some(vec![])),
+            defaults,
+            "an empty value counts as unset"
+        );
+        assert_eq!(
+            super::normalize_git_extensions(Some(vec![String::new(), "  ".to_owned()])),
+            defaults,
+            "blank entries never survive"
+        );
+        // A leading `.` drops; real entries pass through.
+        assert_eq!(
+            super::normalize_git_extensions(Some(vec![".md".to_owned(), "rst".to_owned(),])),
+            ["md".to_owned(), "rst".to_owned()]
+        );
     }
 
     /// The paths struct serializes with the resolved locations.

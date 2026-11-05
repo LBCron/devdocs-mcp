@@ -477,12 +477,18 @@ fn map_ingest_error(error: devdocs_ingest::IngestError) -> Error {
             code: UpstreamCode::UpstreamError,
             detail: format!("GIT_COMMAND_FAILED: `{command}` failed: {stderr}"),
         },
-        E::GitSpawn { message } | E::GitTempDir { message } | E::GitWalk { message } => {
-            Error::Upstream {
-                code: UpstreamCode::UpstreamError,
-                detail: message,
-            }
-        }
+        E::GitSpawn { message } => Error::Upstream {
+            code: UpstreamCode::UpstreamError,
+            detail: format!("GIT_SPAWN_FAILED: {message}"),
+        },
+        E::GitTempDir { message } => Error::Upstream {
+            code: UpstreamCode::UpstreamError,
+            detail: format!("GIT_TEMP_DIR: {message}"),
+        },
+        E::GitWalk { message } => Error::Upstream {
+            code: UpstreamCode::UpstreamError,
+            detail: format!("GIT_WALK_FAILED: {message}"),
+        },
         E::GitCommitShaInvalid(sha) => Error::Upstream {
             code: UpstreamCode::UpstreamError,
             detail: format!("GIT_COMMIT_SHA_INVALID: rev-parse returned `{sha}`"),

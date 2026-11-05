@@ -106,20 +106,20 @@ pub enum IngestError {
         stderr: String,
     },
     /// Spawning git failed for a reason other than a missing binary.
-    #[error("git spawn: {message}")]
+    #[error("GIT_SPAWN_FAILED: {message}")]
     GitSpawn {
         /// What failed.
         message: String,
     },
     /// The private temp clone directory could not be created or does not
     /// carry mode 0700 (docs/implementation/09 §Local storage controls).
-    #[error("git temp dir: {message}")]
+    #[error("GIT_TEMP_DIR: {message}")]
     GitTempDir {
         /// What failed.
         message: String,
     },
     /// The docs walk over the clone failed.
-    #[error("git docs walk: {message}")]
+    #[error("GIT_WALK_FAILED: {message}")]
     GitWalk {
         /// What failed.
         message: String,
@@ -127,4 +127,37 @@ pub enum IngestError {
     /// `git rev-parse HEAD` did not return a 40-hex commit SHA.
     #[error("GIT_COMMIT_SHA_INVALID: rev-parse returned `{0}`")]
     GitCommitShaInvalid(String),
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::IngestError;
+
+    /// Every git error kind renders its documented `GIT_*` code prefix, so
+    /// the CLI edge cannot surface a bare message
+    /// (docs/implementation/08 §Error codes).
+    #[test]
+    fn git_errors_carry_their_code_prefix() {
+        let message = "boom".to_owned();
+        assert_eq!(
+            IngestError::GitSpawn {
+                message: message.clone()
+            }
+            .to_string(),
+            "GIT_SPAWN_FAILED: boom"
+        );
+        assert_eq!(
+            IngestError::GitTempDir {
+                message: message.clone()
+            }
+            .to_string(),
+            "GIT_TEMP_DIR: boom"
+        );
+        assert_eq!(
+            IngestError::GitWalk { message }.to_string(),
+            "GIT_WALK_FAILED: boom"
+        );
+    }
 }
