@@ -86,7 +86,7 @@ A cold miss returns `not_indexed` with a sync hint. An abstention is a valid res
 
 ## Result envelope
 
-The unified shape for CLI JSON and MCP structured output (research: retrieval-design.md §3.8):
+The unified shape for CLI JSON and MCP structured output (research: retrieval-design.md §3.8). `source_url` is the chunk's page URL when the chunk carries one, else the source origin URL (docs/implementation/07 §llms.txt adapter):
 
 ```json
 {
