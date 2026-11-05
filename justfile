@@ -124,11 +124,15 @@ msrv:
         exit 1; \
     fi
 
-# Compile the binary in every feature state CI checks.
+# Compile the binary and the ingest crate in every feature state CI checks.
+# The ingest crate is checked, not built: only its feature resolution is
+# at stake, and the grammar-less state must stay compilable.
 features:
     cargo build --locked -p devdocs --no-default-features
     cargo build --locked -p devdocs --no-default-features --features exact-tokens
     cargo build --locked -p devdocs --no-default-features --features embeddings
+    cargo check --locked -p devdocs-ingest --no-default-features
+    cargo check --locked -p devdocs-ingest --features symbols
 
 # Run the default eval suite and print the gate table (docs/implementation/14).
 # A gate that is not PASS exits 2 — the honest state until the retrieval
