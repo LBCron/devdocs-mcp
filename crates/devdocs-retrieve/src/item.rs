@@ -9,6 +9,11 @@ use devdocs_model::docref::ParsedRef;
 use devdocs_model::envelope::ResultItem;
 use devdocs_store::Hit;
 
+/// The path segment for a chunk without a section path (content before
+/// the first heading). The ref grammar requires a path, so head content
+/// serves under this name.
+const HEAD_SEGMENT: &str = "index";
+
 /// Maps a store hit onto the envelope result item.
 ///
 /// `confidence` is the fusion score; `status` comes from the version
@@ -40,11 +45,16 @@ pub fn to_result_item(
 }
 
 /// Derives the `docs://` ref for one chunk: the library, the `v`-prefixed
-/// version, the slugified section path, and the slugified symbol as the
-/// fragment when one applies.
+/// version, the slugified section path (the placeholder segment when the
+/// chunk has no section path), and the slugified symbol as the fragment
+/// when one applies.
 #[must_use]
 pub fn derive_ref(hit: &Hit) -> String {
-    let segments: Vec<String> = hit.section_path.iter().map(|s| slug(s)).collect();
+    let segments: Vec<String> = if hit.section_path.is_empty() {
+        vec![HEAD_SEGMENT.to_owned()]
+    } else {
+        hit.section_path.iter().map(|s| slug(s)).collect()
+    };
     let mut ref_ = format!(
         "docs://{}/v{}/{}",
         hit.library,
@@ -93,19 +103,23 @@ pub fn hex(bytes: &[u8]) -> String {
 
 /// Finds the chunk that serves a parsed ref: the full slugified section
 /// path first, then the last segment, then the fragment (symbol or title
-/// match). `None` when nothing matches.
+/// match). The placeholder segment matches a chunk without a section
+/// path. When several candidates remain, the lowest chunk id serves.
+/// `None` when nothing matches.
 #[must_use]
 pub fn match_ref<'a>(chunks: &'a [Hit], parsed: &ParsedRef) -> Option<&'a Hit> {
     let want: Vec<String> = parsed.segments.iter().map(|s| slug(s)).collect();
-    // 1. The full section path matches the ref path exactly.
+    // 1. The full section path matches the ref path exactly. The
+    //    placeholder path also matches a chunk without a section path.
     let full: Vec<&Hit> = chunks
         .iter()
         .filter(|c| {
-            c.section_path.len() == want.len()
-                && c.section_path
-                    .iter()
-                    .map(|s| slug(s))
-                    .eq(want.iter().cloned())
+            (want.len() == 1 && want[0] == HEAD_SEGMENT && c.section_path.is_empty())
+                || (c.section_path.len() == want.len()
+                    && c.section_path
+                        .iter()
+                        .map(|s| slug(s))
+                        .eq(want.iter().cloned()))
         })
         .collect();
     if full.len() == 1 {
@@ -130,16 +144,19 @@ pub fn match_ref<'a>(chunks: &'a [Hit], parsed: &ParsedRef) -> Option<&'a Hit> {
             return by_title.first().copied();
         }
     }
-    // 4. The last segment matches the chunk's last section segment.
+    // 4. The last segment matches the chunk's last section segment; the
+    //    placeholder names a chunk without a section path. When several
+    //    candidates remain — two pages can share a section title — the
+    //    lowest chunk id serves, so one ref always serves one chunk.
     let last = want.last()?;
     let by_last: Vec<&Hit> = chunks
         .iter()
-        .filter(|c| c.section_path.last().is_some_and(|t| slug(t) == *last))
+        .filter(|c| {
+            (last == HEAD_SEGMENT && c.section_path.is_empty())
+                || c.section_path.last().is_some_and(|t| slug(t) == *last)
+        })
         .collect();
-    if by_last.len() == 1 {
-        return by_last.first().copied();
-    }
-    None
+    by_last.iter().min_by_key(|hit| hit.chunk_id).copied()
 }
 
 #[cfg(test)]
@@ -270,6 +287,46 @@ mod tests {
             devdocs_model::docref::ParsedRef::parse("docs://next.js/v16.2.9/other/storage")
                 .unwrap();
         assert_eq!(match_ref(&chunks, &by_last).map(|h| h.chunk_id), Some(2));
+    }
+
+    /// A chunk without a section path derives the placeholder ref, and
+    /// that ref matches the chunk back.
+    #[test]
+    fn headerless_chunks_derive_and_match_the_placeholder_ref() {
+        let headless = hit("next.js", "16.2.9", &[], None);
+        assert_eq!(derive_ref(&headless), "docs://next.js/v16.2.9/index");
+
+        let parsed =
+            devdocs_model::docref::ParsedRef::parse("docs://next.js/v16.2.9/index").unwrap();
+        assert_eq!(match_ref(&[headless], &parsed).map(|h| h.chunk_id), Some(1));
+    }
+
+    /// Two chunks that share a section path (or two headless chunks that
+    /// share the placeholder path) collide on one ref; the lowest chunk
+    /// id serves, so one ref always serves one chunk.
+    #[test]
+    fn colliding_refs_serve_the_lowest_chunk_id() {
+        let mut titled_later = hit("acme", "1.0.0", &["Overview"], None);
+        titled_later.chunk_id = 7;
+        let mut titled_earlier = hit("acme", "1.0.0", &["Overview"], None);
+        titled_earlier.chunk_id = 3;
+        let parsed =
+            devdocs_model::docref::ParsedRef::parse("docs://acme/v1.0.0/overview").unwrap();
+        assert_eq!(
+            match_ref(&[titled_later, titled_earlier], &parsed).map(|h| h.chunk_id),
+            Some(3)
+        );
+
+        let mut headless_later = hit("acme", "1.0.0", &[], None);
+        headless_later.chunk_id = 9;
+        let mut headless_earlier = hit("acme", "1.0.0", &[], None);
+        headless_earlier.chunk_id = 4;
+        let placeholder =
+            devdocs_model::docref::ParsedRef::parse("docs://acme/v1.0.0/index").unwrap();
+        assert_eq!(
+            match_ref(&[headless_later, headless_earlier], &placeholder).map(|h| h.chunk_id),
+            Some(4)
+        );
     }
 
     /// Hex encoding is lowercase and two digits per byte.
