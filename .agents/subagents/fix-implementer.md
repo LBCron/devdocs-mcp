@@ -15,7 +15,7 @@ You get one or more issues. A code-review issue carries a severity, a cause, and
 
 - Touch only the files the issue names; flag anything the fix forces you to change outside them.
 - Keep every commit green: it compiles and `just test` passes. Commit per AGENTS.md §Git commits.
-- Format only the Rust files your change touched (`cargo fmt -- <files>`) and run `just lint` before you report. Workspace-wide `just fmt` rewrites every unformatted file — a hazard when fix subagents run in parallel.
+- Format only the Rust files your change touched (`cargo fmt -p <crate> -- <files>`, so rustfmt picks up the crate edition) and run `just lint` before you report. Workspace-wide `just fmt` rewrites every unformatted file — a hazard when fix subagents run in parallel.
 
 ## Report back
 
