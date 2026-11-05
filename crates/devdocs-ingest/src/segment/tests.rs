@@ -341,17 +341,29 @@ proptest::proptest! {
 fn merge_pass_merges_fence_crossing_boundaries_in_order() {
     // The unclosed fence at byte 3 covers every offset from 3 on.
     let text = "a\n```\ncode\n";
-    let merge = |spans: Vec<std::ops::Range<usize>>| super::merge_until_fence_safe(spans, text);
+    let merge = |spans: Vec<std::ops::Range<usize>>| {
+        let candidates: Vec<super::Candidate> = spans
+            .into_iter()
+            .map(|span| super::Candidate {
+                span,
+                symbols: Vec::new(),
+            })
+            .collect();
+        super::merge_until_fence_safe(candidates, text)
+    };
     // A single span returns untouched.
+    let spans = |candidates: Vec<super::Candidate>| -> Vec<std::ops::Range<usize>> {
+        candidates.into_iter().map(|c| c.span).collect()
+    };
     let single: Vec<std::ops::Range<usize>> = std::iter::once(0..2).collect();
-    assert_eq!(merge(single.clone()), single);
+    assert_eq!(spans(merge(single.clone())), single);
     // Boundaries 4 and 8 sit inside the fence: the chain merges into one
     // span, one merge per boundary.
-    assert_eq!(merge(vec![0..4, 4..8, 8..12]), vec![0..12]);
+    assert_eq!(spans(merge(vec![0..4, 4..8, 8..12])), vec![0..12]);
     // Boundary 2 sits outside (before the fence), boundary 4 inside: the
     // last span absorbs into its predecessor; its own end, also inside
     // the fence, merges nothing once it is the final span.
-    assert_eq!(merge(vec![0..2, 2..4, 8..12]), vec![0..2, 2..12]);
+    assert_eq!(spans(merge(vec![0..2, 2..4, 8..12])), vec![0..2, 2..12]);
 }
 
 /// The segmenter debug shape names its limits.
@@ -449,4 +461,61 @@ fn unknown_fence_languages_are_counted() {
         "# T\n\n```language-python\nx\n```\n\nbody\n",
     );
     assert_eq!(stats.unknown_fence_languages, 0);
+}
+
+/// A rust fence carries its extracted symbols on the produced chunk, in
+/// block order; prose around the fence joins the same chunk.
+#[test]
+fn rust_fence_symbols_land_on_the_chunk() {
+    let (chunks, stats) = Segmenter::new().unwrap().segment_with_stats(
+        "lib",
+        "1.0",
+        "# T\n\nprose\n\n```rust\nfn parse_config() {}\nstruct Command;\n```\n\nmore prose\n",
+    );
+    assert_eq!(stats.unsupported_fence_languages, 0);
+    let chunk = chunks
+        .iter()
+        .find(|chunk| !chunk.symbols.is_empty())
+        .expect("a chunk carries the fence's symbols");
+    let names: Vec<&str> = chunk.symbols.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, vec!["parse_config", "Command"]);
+    assert_eq!(chunk.symbols[0].kind, "function");
+    assert_eq!(chunk.symbols[1].kind, "struct");
+    assert_eq!(chunk.symbols[0].line, 1, "line is 1-based in the fence");
+}
+
+/// A fence naming an unknown language (`wasm`) is counted and the chunk is
+/// still produced; a symbol-capable language without its grammar
+/// (TypeScript, no grammar by design) counts as unsupported. Unnamed
+/// fences count as neither.
+#[test]
+fn unsupported_and_unknown_fences_are_counted_but_never_fail() {
+    let (chunks, stats) = Segmenter::new().unwrap().segment_with_stats(
+        "lib",
+        "1.0",
+        "# T\n\n```wasm\n(module)\n```\n\nbody\n",
+    );
+    assert_eq!(stats.unknown_fence_languages, 1);
+    assert_eq!(stats.unsupported_fence_languages, 0);
+    assert!(!chunks.is_empty(), "the source still produces chunks");
+
+    let (chunks, stats) = Segmenter::new().unwrap().segment_with_stats(
+        "lib",
+        "1.0",
+        "# T\n\n```ts\nconst x = 1;\n```\n\n```bash\necho hi\n```\n\nbody\n",
+    );
+    assert_eq!(
+        stats.unsupported_fence_languages, 1,
+        "ts counts, bash does not"
+    );
+    assert_eq!(stats.unknown_fence_languages, 0);
+    assert!(!chunks.is_empty(), "the source still produces chunks");
+
+    let (_, stats) = Segmenter::new().unwrap().segment_with_stats(
+        "lib",
+        "1.0",
+        "# T\n\n```\nplain\n```\n\nbody\n",
+    );
+    assert_eq!(stats.unknown_fence_languages, 0);
+    assert_eq!(stats.unsupported_fence_languages, 0);
 }

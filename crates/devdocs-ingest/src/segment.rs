@@ -66,6 +66,26 @@ pub(crate) const KNOWN_FENCE_LANGUAGES: &[&str] = &[
     "ini",
 ];
 
+/// The fence languages whose code the symbol pass would extract symbols
+/// from: the four grammar languages with their aliases, plus the
+/// TypeScript aliases the grammars do not cover. A fence naming one of
+/// these without its grammar in the build (a disabled feature, or the
+/// grammar-less TypeScript aliases) is counted as an unsupported fence
+/// language — reported, never dropped.
+const SYMBOL_FENCE_LANGUAGES: &[&str] = &[
+    "rust",
+    "go",
+    "golang",
+    "python",
+    "py",
+    "javascript",
+    "js",
+    "jsx",
+    "typescript",
+    "ts",
+    "tsx",
+];
+
 /// The per-page counters one segmentation pass produces
 /// (docs/implementation/07 §Normalization pipeline, the ingest events).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -76,6 +96,10 @@ pub struct SegmentStats {
     /// Fenced code blocks whose info string names a language outside
     /// the known fence language set of this module.
     pub unknown_fence_languages: usize,
+    /// Fenced code blocks whose language the symbol pass would consume but
+    /// whose grammar is not in this build (a disabled `grammar-*` feature,
+    /// or the TypeScript aliases).
+    pub unsupported_fence_languages: usize,
 }
 
 /// The fence language of an info string: the first token, lower-cased. An
@@ -100,6 +124,39 @@ fn fence_language_known_or_unnamed(info: &str) -> bool {
 /// Whether a fence info string names a language outside the known set.
 pub(crate) fn fence_language_unknown(info: &str) -> bool {
     !fence_language_known_or_unnamed(info)
+}
+
+/// Extracts the symbols of one fenced code block and accumulates the fence
+/// counters: an unknown language counts, a symbol-capable language without
+/// its grammar counts as unsupported, and a supported language extracts.
+/// Everything is reported, nothing fails — fences are untrusted content.
+fn fence_symbols(
+    blocked: &comrak::nodes::NodeCodeBlock,
+    stats: &mut SegmentStats,
+) -> Vec<crate::symbols::ExtractedSymbol> {
+    let Some(lang) = fence_language(&blocked.info) else {
+        return Vec::new();
+    };
+    if fence_language_unknown(&blocked.info) {
+        stats.unknown_fence_languages += 1;
+        tracing::debug!(
+            language = %blocked.info.trim(),
+            "fenced code block carries an unknown language"
+        );
+        return Vec::new();
+    }
+    let lang = lang.to_ascii_lowercase();
+    if crate::symbols::grammar_for(&lang).is_none() {
+        if SYMBOL_FENCE_LANGUAGES.iter().any(|known| known == &lang) {
+            stats.unsupported_fence_languages += 1;
+            tracing::debug!(
+                language = %lang,
+                "fenced code block names a symbol language without its grammar"
+            );
+        }
+        return Vec::new();
+    }
+    crate::symbols::extract(&lang, &blocked.literal)
 }
 
 /// How chunk sizes are measured (docs/implementation/07: the chars-per-4
@@ -154,6 +211,10 @@ pub struct PreparedChunk {
     /// The byte range of `body` inside the page body; adjacent chunks may
     /// share only the configured overlap.
     pub page_range: std::ops::Range<usize>,
+    /// The symbols declared in the chunk's fenced code blocks, in block
+    /// order. Empty when the chunk carries no fenced code or no grammar
+    /// matched.
+    pub symbols: Vec<crate::symbols::ExtractedSymbol>,
 }
 
 /// The segmenter: one sizer plus the packed limits
@@ -221,7 +282,8 @@ impl Segmenter {
         let (sections, mut stats) = Self::sections(page_body);
         let mut chunks = Vec::new();
         for section in &sections {
-            for span in self.pack_section(section, &mut stats) {
+            for candidate in self.pack_section(section, &mut stats) {
+                let span = candidate.span;
                 let body = &page_body[span.start..span.end];
                 let header = contextual_header(library, version, &section.breadcrumb);
                 let text = format!("{header}\n\n{body}");
@@ -234,6 +296,7 @@ impl Segmenter {
                     token_count,
                     content_hash: devdocs_store::content_hash(body),
                     page_range: span,
+                    symbols: candidate.symbols,
                 });
             }
         }
@@ -280,25 +343,29 @@ impl Segmenter {
                     );
                 }
                 NodeValue::CodeBlock(blocked) if blocked.fenced => {
-                    if fence_language_unknown(&blocked.info) {
-                        stats.unknown_fence_languages += 1;
-                        tracing::debug!(language = %blocked.info.trim(), "fenced code block carries an unknown language");
-                    }
-                    push_block(&mut sections, node, page_body, &offset, &mut stats);
+                    let symbols = fence_symbols(blocked, &mut stats);
+                    push_block(&mut sections, node, page_body, &offset, symbols, &mut stats);
                 }
-                _ => push_block(&mut sections, node, page_body, &offset, &mut stats),
+                _ => push_block(
+                    &mut sections,
+                    node,
+                    page_body,
+                    &offset,
+                    Vec::new(),
+                    &mut stats,
+                ),
             }
         }
         sections.retain(|section| !section.blocks.is_empty());
         (sections, stats)
     }
 
-    /// Packs one section's blocks into chunk spans (byte-exact slices of
-    /// the page) and merges until no boundary sits inside a fenced code
-    /// block.
-    fn pack_section(&self, section: &Section<'_>, stats: &mut SegmentStats) -> Vec<Range<usize>> {
-        let mut spans: Vec<Range<usize>> = Vec::new();
-        let mut current: Option<(Range<usize>, usize)> = None; // span, tokens
+    /// Packs one section's blocks into chunk candidates (byte-exact spans
+    /// of the page plus the symbols their fenced blocks declared) and
+    /// merges until no boundary sits inside a fenced code block.
+    fn pack_section(&self, section: &Section<'_>, stats: &mut SegmentStats) -> Vec<Candidate> {
+        let mut candidates: Vec<Candidate> = Vec::new();
+        let mut current: Option<(Range<usize>, usize, Vec<crate::symbols::ExtractedSymbol>)> = None; // span, tokens, symbols
 
         for block in &section.blocks {
             let range = block.start..block.end;
@@ -309,40 +376,55 @@ impl Segmenter {
                 // A fenced code block never splits, and any block over
                 // twice the target becomes its own chunk, never truncated
                 // (docs/07 rules 3 and 5).
-                if let Some((span, _)) = current.take() {
-                    spans.push(span);
+                if let Some((span, _, symbols)) = current.take() {
+                    candidates.push(Candidate { span, symbols });
                 }
-                spans.push(range);
+                candidates.push(Candidate {
+                    span: range,
+                    symbols: block.symbols.clone(),
+                });
             } else if oversized {
                 // Between the target and twice the target: split at
-                // semantic boundaries with the overlap.
-                if let Some((span, _)) = current.take() {
-                    spans.push(span);
+                // semantic boundaries with the overlap. Only non-fenced
+                // blocks split, so the pieces carry no symbols.
+                if let Some((span, _, symbols)) = current.take() {
+                    candidates.push(Candidate { span, symbols });
                 }
-                spans.extend(self.split_oversized(text, block.start));
+                candidates.extend(self.split_oversized(text, block.start).into_iter().map(
+                    |span| Candidate {
+                        span,
+                        symbols: Vec::new(),
+                    },
+                ));
             } else if tokens > 0 {
                 // The packed span slices the page from the first block's
                 // start to the last block's end, so the bytes between
                 // blocks join the chunk body and share the budget
                 // (docs/07 rule 3).
                 let separator_tokens = match &current {
-                    Some((span, _)) => self.sizer.size(&section.text[span.end..block.start]),
+                    Some((span, _, _)) => self.sizer.size(&section.text[span.end..block.start]),
                     None => 0,
                 };
-                match &current {
-                    Some((_, packed))
-                        if packed + separator_tokens + tokens > self.target_tokens =>
-                    {
-                        if let Some((span, _)) = current.take() {
-                            spans.push(span);
-                        }
-                        current = Some((range, tokens));
+                let overflows = match &current {
+                    Some((_, packed, _)) => {
+                        *packed + separator_tokens + tokens > self.target_tokens
                     }
-                    Some((span, packed)) => {
-                        let packed = *packed + separator_tokens + tokens;
-                        current = Some((span.start..block.end, packed));
+                    None => false,
+                };
+                if overflows {
+                    if let Some((span, _, symbols)) = current.take() {
+                        candidates.push(Candidate { span, symbols });
                     }
-                    None => current = Some((range, tokens)),
+                    current = Some((range, tokens, block.symbols.clone()));
+                } else if let Some((span, packed, mut symbols)) = current.take() {
+                    symbols.extend(block.symbols.iter().cloned());
+                    current = Some((
+                        span.start..block.end,
+                        packed + separator_tokens + tokens,
+                        symbols,
+                    ));
+                } else {
+                    current = Some((range, tokens, block.symbols.clone()));
                 }
             } else {
                 // defensive: a zero-token block carries no content; skip it
@@ -354,14 +436,14 @@ impl Segmenter {
                 stats.skipped_blocks += 1;
             }
         }
-        if let Some((span, _)) = current.take() {
-            spans.push(span);
+        if let Some((span, _, symbols)) = current.take() {
+            candidates.push(Candidate { span, symbols });
         }
 
         // Cross-check: no chunk boundary may fall inside a fenced code
         // block; merge and warn when it does (docs/07 step 4). The probe
         // offset is page-absolute, matching `section.text`.
-        merge_until_fence_safe(spans, section.text)
+        merge_until_fence_safe(candidates, section.text)
     }
 
     /// Splits an oversized block with the `MarkdownSplitter` and returns the
@@ -402,12 +484,14 @@ pub fn contextual_header(library: &str, version: &str, section_path: &[String]) 
     }
 }
 
-/// One top-level block of a section: its absolute byte range and whether
-/// the block is a fenced code block (never split).
+/// One top-level block of a section: its absolute byte range, whether
+/// the block is a fenced code block (never split), and the symbols its
+/// fence declared (empty for non-fenced blocks).
 struct Block {
     start: usize,
     end: usize,
     fenced: bool,
+    symbols: Vec<crate::symbols::ExtractedSymbol>,
 }
 
 /// One section under construction.
@@ -415,6 +499,14 @@ struct Section<'a> {
     text: &'a str,
     breadcrumb: Vec<String>,
     blocks: Vec<Block>,
+}
+
+/// One packed chunk candidate: the byte-exact span of the page plus the
+/// symbols its fenced blocks declared, carried through the merge pass.
+#[derive(Debug)]
+struct Candidate {
+    span: Range<usize>,
+    symbols: Vec<crate::symbols::ExtractedSymbol>,
 }
 
 /// The absolute byte range of one top-level block node. Comrak's end
@@ -455,16 +547,17 @@ fn inline_text<'a>(node: &'a comrak::nodes::AstNode<'a>) -> String {
 /// its boundary scan after every merge, quadratic in the span count —
 /// and sections with fewer than two spans return before any scan, since
 /// every section passes the whole page text.
-fn merge_until_fence_safe(spans: Vec<Range<usize>>, section_text: &str) -> Vec<Range<usize>> {
+fn merge_until_fence_safe(spans: Vec<Candidate>, section_text: &str) -> Vec<Candidate> {
     if spans.len() < 2 {
         return spans;
     }
     let fences = fence_intervals(section_text);
-    let mut merged: Vec<Range<usize>> = Vec::with_capacity(spans.len());
+    let mut merged: Vec<Candidate> = Vec::with_capacity(spans.len());
     for span in spans {
         match merged.last_mut() {
-            Some(last) if boundary_inside_fence(&fences, last.end) => {
-                last.end = span.end;
+            Some(last) if boundary_inside_fence(&fences, last.span.end) => {
+                last.span.end = span.span.end;
+                last.symbols.extend(span.symbols);
                 tracing::warn!(
                     "chunk boundary fell inside a fenced code block; merged the two candidate chunks"
                 );
@@ -503,6 +596,7 @@ fn push_block<'a>(
     node: &comrak::nodes::AstNode,
     page_body: &'a str,
     offset: &impl Fn(usize, usize) -> usize,
+    symbols: Vec<crate::symbols::ExtractedSymbol>,
     stats: &mut SegmentStats,
 ) {
     let fenced = matches!(&node.data().value, NodeValue::CodeBlock(boxed) if boxed.fenced);
@@ -524,7 +618,12 @@ fn push_block<'a>(
         });
     }
     if let Some(last) = sections.last_mut() {
-        last.blocks.push(Block { start, end, fenced });
+        last.blocks.push(Block {
+            start,
+            end,
+            fenced,
+            symbols,
+        });
     }
 }
 

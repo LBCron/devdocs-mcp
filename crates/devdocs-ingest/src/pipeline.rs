@@ -328,6 +328,7 @@ impl<'a> IngestJob<'a> {
                 segment_page(&segmenter, library, version, doc.body.clone()).await?;
             run.events.skipped_blocks += stats.skipped_blocks;
             run.events.unknown_fence_languages += stats.unknown_fence_languages;
+            run.events.unsupported_fence_languages += stats.unsupported_fence_languages;
             for chunk in chunks {
                 run.new_chunks.push(NewChunk {
                     section_path: chunk.section_path,

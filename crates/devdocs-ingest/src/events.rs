@@ -26,6 +26,10 @@ pub struct IngestEvents {
     pub chrome_pattern_drops: usize,
     /// Fenced code blocks whose language is named but not in the known set.
     pub unknown_fence_languages: usize,
+    /// Fenced code blocks whose language the symbol pass would consume but
+    /// whose grammar is not in this build (a disabled `grammar-*` feature,
+    /// or the TypeScript aliases).
+    pub unsupported_fence_languages: usize,
     /// Blocks dropped by the cross-page chrome frequency rule: a block
     /// identical in more than 60% of the corpus's pages
     /// (docs/implementation/07 §Normalization pipeline stage 2).
@@ -66,6 +70,10 @@ impl IngestEvents {
             (
                 "fenced blocks carry an unknown language",
                 self.unknown_fence_languages,
+            ),
+            (
+                "fenced blocks name a symbol language without its grammar",
+                self.unsupported_fence_languages,
             ),
             ("blocks dropped as repeated chrome", self.chrome_drops),
             ("duplicate pages collapsed", self.dedup_dropped_pages),
