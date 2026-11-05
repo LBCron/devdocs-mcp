@@ -23,6 +23,10 @@ pub struct PageDocument {
     pub path: String,
     /// The markdown body.
     pub body: String,
+    /// The page URL for llms.txt sources: the URL the body came from (the
+    /// markdown twin's URL when a twin ingests). `None` for git-repo files
+    /// (docs/implementation/07 §llms.txt adapter).
+    pub page_url: Option<String>,
 }
 
 /// What one chrome-strip pass dropped.
@@ -309,6 +313,7 @@ mod tests {
         PageDocument {
             path: path.to_owned(),
             body: body.into(),
+            page_url: None,
         }
     }
 

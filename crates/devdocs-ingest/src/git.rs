@@ -573,6 +573,7 @@ fn walk_docs(dir: &Path, extensions: &[String]) -> Result<(Vec<PageDocument>, us
         docs.push(PageDocument {
             path: relative.to_string_lossy().into_owned(),
             body,
+            page_url: None,
         });
     }
     Ok((docs, skipped_non_utf8))

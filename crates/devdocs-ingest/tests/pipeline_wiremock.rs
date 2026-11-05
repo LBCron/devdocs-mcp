@@ -139,6 +139,46 @@ async fn wire_ingest_fetches_the_index_and_pages_over_the_network() {
     assert!(!hits.is_empty(), "the wire-fetched page is searchable");
 }
 
+/// The wire-fetched page publishes chunks whose `page_url` is the linked
+/// page's URL while `source_url` stays the index URL
+/// (docs/implementation/07 §llms.txt adapter).
+#[tokio::test]
+async fn wire_ingest_publishes_the_page_url_on_chunks() {
+    let server = MockServer::start().await;
+    mount_ok(&server, "/llms.txt", INDEX).await;
+    mount_ok(&server, "/intro.md", INTRO).await;
+    let page_url = format!("{}/intro.md", server.uri());
+
+    let index_url = format!("{}/llms.txt", server.uri());
+    let config = config(&index_url);
+    let guard = test_guard(&config);
+    let (_db, store) = store();
+
+    let index_url = url::Url::parse(&index_url).unwrap();
+    let job = IngestJob::new(&config, &guard, None);
+    job.run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap();
+
+    let hits = store
+        .search_fts(&devdocs_store::build_match_query("installer"), 10)
+        .unwrap();
+    assert!(!hits.is_empty(), "the page is searchable");
+    assert!(
+        hits.iter()
+            .all(|hit| hit.page_url.as_deref() == Some(page_url.as_str())),
+        "page URL: {:?}",
+        hits.iter().map(|h| h.page_url.clone()).collect::<Vec<_>>()
+    );
+    assert!(
+        hits.iter().all(|hit| hit.source_url == index_url.as_str()),
+        "source URL: {:?}",
+        hits.iter()
+            .map(|h| h.source_url.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
 /// The llms-full probe on the wire: when the export exists next to the
 /// index it becomes one pre-built document, segmented like any other
 /// markdown body (docs/implementation/07 §llms.txt adapter rule 3).

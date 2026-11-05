@@ -231,6 +231,7 @@ fn stripped_corpora_reassemble_from_their_chunks() {
             .map(|(index, body)| PageDocument {
                 path: format!("https://x/p{index}.md"),
                 body: body.clone(),
+                page_url: None,
             })
             .collect();
         let report = strip_chrome(&mut docs);
