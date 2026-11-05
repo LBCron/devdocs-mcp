@@ -17,6 +17,7 @@ use crate::budget::pack;
 use crate::error::{RetrieveError, UsageError};
 use crate::fusion::fuse;
 use crate::item::{match_ref, to_result_item};
+use crate::matchexpr::rung_match_expr;
 use crate::resolver::{ProjectContext, Query, resolve};
 use crate::rung::{Scope, fts_rung, symbol_rung};
 use crate::version::{Version, is_migration_query, pick};
@@ -73,14 +74,18 @@ pub fn search(
     let (pick_status, served_version, requested_text) =
         version_rung_hits(store, query, &resolved, headroom, &mut rung_hits)?;
 
-    // Fuse the rungs and pack within the token budget.
+    // Fuse the rungs and pack under the count cap and the token budget.
     let fused = fuse(plan.rrf_k, &rung_hits);
     if fused.is_empty() {
-        return Err(empty_fusion_miss(store));
+        return Err(empty_fusion_miss(store)?);
     }
     let fused = resume_after_cursor(fused, plan.cursor)?;
 
-    let packed = pack(fused, plan.max_tokens);
+    let packed = pack(
+        fused,
+        usize::try_from(plan.limit).unwrap_or(usize::MAX),
+        plan.max_tokens,
+    );
     let results: Vec<ResultItem> = packed
         .items
         .iter()
@@ -122,9 +127,26 @@ fn version_rung_hits(
     rung_hits: &mut Vec<Vec<Hit>>,
 ) -> Result<(VersionStatus, Option<String>, Option<String>), RetrieveError> {
     let Some(library) = &resolved.library else {
-        // Unfiltered fallback: search all approved sources. Per-item
-        // status is the alias default (no version requested).
-        rung_hits.push(fts_rung(store, &query.text, Scope::All, headroom)?);
+        // The fallback: without a library, search every approved source
+        // (docs/08 §Version resolution, step 4). An explicit version that
+        // the index carries filters the fallback to it — the flags carry
+        // top precedence (docs/08 §Version resolution, step 1). An absent
+        // version follows the fallback ladder instead: serve the nearest
+        // available and label it (docs/08 §Version policy). Per-item
+        // status stays the alias default; an exact-request hit verifies
+        // through `item_status`.
+        match resolved.version.as_deref() {
+            Some(version) => {
+                let expr = rung_match_expr(&query.text);
+                let scoped = store.search_fts_version(&expr, version, headroom)?;
+                if scoped.is_empty() {
+                    rung_hits.push(fts_rung(store, &query.text, Scope::All, headroom)?);
+                } else {
+                    rung_hits.push(scoped);
+                }
+            }
+            None => rung_hits.push(fts_rung(store, &query.text, Scope::All, headroom)?),
+        }
         return Ok((VersionStatus::Alias, None, resolved.version.clone()));
     };
     let available: Vec<Version> = store
@@ -137,15 +159,14 @@ fn version_rung_hits(
     }
     let pick = pick(&available, resolved.version.as_deref());
     let served = pick.version.clone().ok_or(MissReason::NotIndexed)?;
-    let source_id = store
-        .find_source(library, served.as_str())?
-        .ok_or(MissReason::NotIndexed)?;
-    rung_hits.push(fts_rung(
-        store,
-        &query.text,
-        Scope::Source(source_id),
-        headroom,
-    )?);
+    // The pinned scope serves every active origin of the
+    // `(library, version)` pair; the schema allows several per pair.
+    let source_ids = store.find_sources(library, served.as_str())?;
+    if source_ids.is_empty() {
+        return Err(MissReason::NotIndexed.into());
+    }
+    let expr = rung_match_expr(&query.text);
+    rung_hits.push(store.search_fts_sources(&expr, &source_ids, headroom)?);
     if let Some(migration) = migration_rung(store, query, library, &served, &available, headroom)? {
         rung_hits.push(migration);
     }
@@ -190,16 +211,19 @@ fn migration_rung(
 
 /// The miss reason for a valid query that serves nothing (exit 2): the
 /// reason distinguishes an empty index from a query that simply matched
-/// nothing (docs/08 §Error codes).
-fn empty_fusion_miss(store: &Store) -> RetrieveError {
-    let has_active = store
-        .list_sources()
-        .is_ok_and(|sources| sources.iter().any(|s| s.active));
-    if has_active {
+/// nothing (docs/08 §Error codes). The store failure surfaces — the miss
+/// classification must not swallow it (`.agents/instructions/`
+/// error-handling: no swallowed errors).
+///
+/// # Errors
+/// [`RetrieveError::Store`] when the source listing fails.
+fn empty_fusion_miss(store: &Store) -> Result<RetrieveError, RetrieveError> {
+    let has_active = store.list_sources()?.iter().any(|s| s.active);
+    Ok(if has_active {
         MissReason::LowConfidence.into()
     } else {
         MissReason::NotIndexed.into()
-    }
+    })
 }
 
 /// Cursor resume: continue after the last served chunk id in the same
@@ -281,7 +305,15 @@ pub fn open(store: &Store, doc_ref: &str, plan: &Plan) -> Result<ResultEnvelope,
     let start = usize::try_from(plan.cursor.unwrap_or(0))
         .unwrap_or(0)
         .min(total_chars);
-    let rest = &chunk.text[start..];
+    // The cursor is a char offset (docs/08 §CLI contract: pagination), so
+    // it maps to a byte offset before slicing — `nth` walks to the char
+    // at `start`, and past the end it maps to the full length.
+    let start_byte = chunk
+        .text
+        .char_indices()
+        .nth(start)
+        .map_or(chunk.text.len(), |(byte, _)| byte);
+    let rest = &chunk.text[start_byte..];
     let rest_chars = rest.chars().count();
     let mut page = String::new();
     let mut used: u64 = 0;
@@ -396,9 +428,10 @@ pub fn verify(store: &Store, doc_ref: &str) -> Result<ResultEnvelope, RetrieveEr
     // (docs/implementation/07 §Normalization pipeline stage 4) and strip
     // it; the hash covers the body alone. A text without the expected
     // header is itself drift and reports the mismatch honestly.
-    // defensive: a chunk with an empty section path has no title and no
-    // symbol, so no parseable ref reaches it (the ref grammar requires a
-    // path); this arm only keeps the header derivation total.
+    // defensive: a chunk with an empty section path is reachable — the
+    // placeholder ref `docs://<library>/v<version>/index` serves it — so
+    // this arm derives the headerless shape and keeps the derivation
+    // total.
     let header = if chunk.section_path.is_empty() {
         format!("[{} {}]", chunk.library, chunk.version)
     } else {

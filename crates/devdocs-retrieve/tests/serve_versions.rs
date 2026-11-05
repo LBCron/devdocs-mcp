@@ -137,6 +137,30 @@ fn a_migration_question_retrieves_the_older_version() {
     );
 }
 
+/// A version-only resolution (`--version` without `--library`) filters
+/// the fallback search to the requested version — no other version
+/// serves (docs/08 §Version resolution: explicit flags take top
+/// precedence).
+#[test]
+fn a_version_only_request_filters_to_that_version() {
+    let (dir, store) = seeded_two_versions();
+    let query = Query::new("routing", None, Some("0.9.0"));
+    let envelope = search(&store, &query, dir.path(), &Plan::defaults()).unwrap();
+    let versions: Vec<&str> = envelope
+        .results
+        .iter()
+        .map(|item| item.served_version.as_str())
+        .collect();
+    assert_eq!(versions, vec!["0.9.0"]);
+    assert!(
+        envelope
+            .results
+            .iter()
+            .all(|item| item.version_status == VersionStatus::Verified),
+        "the exact-request hits must verify"
+    );
+}
+
 /// Searching an empty migrated store misses with `not_indexed`, not
 /// `low_confidence` — there is no active source to search.
 #[test]
@@ -148,6 +172,29 @@ fn an_empty_index_misses_not_indexed() {
     assert!(
         matches!(error, RetrieveError::Miss(MissReason::NotIndexed)),
         "an empty index must miss with not_indexed, got {error}"
+    );
+}
+
+/// A store failure while classifying the empty fusion surfaces as the
+/// store error — the miss classification must not swallow it.
+#[test]
+fn a_store_failure_on_the_empty_fusion_path_surfaces() {
+    let dir = tempdir().unwrap();
+    let store = devdocs_testkit::open_migrated_and(&dir.path().join("docs.db"), |conn| {
+        devdocs_testkit::seed_source(conn, "acme", true)?;
+        // Corrupt the active flag behind the store's back: a non-numeric
+        // value clears the CHECK-free column, `list_sources` fails to
+        // read it back as an integer, and the FTS path only filters the
+        // row out.
+        conn.execute("UPDATE sources SET active = 'x'", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let query = Query::new("zzz_no_match", None, None);
+    let error = search(&store, &query, dir.path(), &Plan::defaults()).unwrap_err();
+    assert!(
+        matches!(error, RetrieveError::Store(_)),
+        "the store failure must surface, got {error}"
     );
 }
 
@@ -192,6 +239,46 @@ fn search_resumes_after_the_cursor() {
     assert_eq!(resumed_refs, vec![all_refs[position + 1].clone()]);
 }
 
+/// The envelope never carries more than `plan.limit` results, pages carry
+/// `truncated` plus a cursor while more hits remain, and the pages cover
+/// every hit exactly once in fusion order.
+#[test]
+fn search_caps_results_at_the_plan_limit() {
+    let (dir, store) = seeded_three_chunks();
+    let query = Query::new("routing", Some("acme"), None);
+    let capped = Plan {
+        limit: 2,
+        ..Plan::defaults()
+    };
+    let first = search(&store, &query, dir.path(), &capped).unwrap();
+    assert_eq!(first.results.len(), 2);
+    assert!(first.truncated);
+    let cursor: u64 = first.next_cursor.clone().unwrap().parse().unwrap();
+
+    let resumed = Plan {
+        cursor: Some(cursor),
+        ..capped
+    };
+    let second = search(&store, &query, dir.path(), &resumed).unwrap();
+    assert!(second.results.len() <= 2);
+    assert!(!second.truncated);
+    assert_eq!(second.next_cursor, None);
+
+    let paged_refs: Vec<String> = first
+        .results
+        .iter()
+        .chain(&second.results)
+        .map(|item| item.doc_ref.clone())
+        .collect();
+    let full = search(&store, &query, dir.path(), &Plan::defaults()).unwrap();
+    let all_refs: Vec<String> = full
+        .results
+        .iter()
+        .map(|item| item.doc_ref.clone())
+        .collect();
+    assert_eq!(paged_refs, all_refs);
+}
+
 /// Opening a ref whose library has no active source misses with
 /// `not_indexed`.
 #[test]
@@ -204,7 +291,72 @@ fn open_of_an_unindexed_library_misses() {
     );
 }
 
-// Verify's headerless-chunk branch (an empty section path) is
-// unreachable from the CLI surface: the ref grammar requires a path, and
-// a headerless chunk has neither title nor symbol to match — the branch
-// carries a `// defensive:` anchor in serve.rs instead.
+/// Seeds `acme` with two headerless chunks (content before the first
+/// heading).
+fn seeded_headless_chunks() -> (tempfile::TempDir, Store) {
+    let dir = tempdir().unwrap();
+    let store = devdocs_testkit::open_migrated_and(&dir.path().join("docs.db"), |conn| {
+        let source = devdocs_testkit::seed_source(conn, "acme", true)?;
+        devdocs_testkit::seed_chunk(conn, source, 0, "[]", None, "Intro text before a heading.")?;
+        devdocs_testkit::seed_chunk(conn, source, 1, "[]", None, "More head content.")?;
+        Ok(())
+    })
+    .unwrap();
+    (dir, store)
+}
+
+/// A headerless chunk (an empty section path) serves through the
+/// placeholder ref: the ref grammar requires a path, and `open` resolves
+/// `index` to the lowest chunk id when two headless chunks share it.
+#[test]
+fn open_serves_headerless_chunks_through_the_placeholder_ref() {
+    let (_dir, store) = seeded_headless_chunks();
+    let envelope = open(&store, "docs://acme/v1.0.0/index", &Plan::defaults()).unwrap();
+    let served = envelope.results.first().unwrap();
+    assert_eq!(served.section, "");
+    assert_eq!(served.snippet, "Intro text before a heading.");
+}
+
+/// Seeds `acme` with one multibyte chunk whose every line ends in a wide
+/// character, so a char-offset cursor sliced as a byte offset would land
+/// inside a character and panic.
+fn seeded_multibyte_chunk() -> (tempfile::TempDir, Store) {
+    let dir = tempdir().unwrap();
+    let store = devdocs_testkit::open_migrated_and(&dir.path().join("docs.db"), |conn| {
+        let source = devdocs_testkit::seed_source(conn, "acme", true)?;
+        devdocs_testkit::seed_chunk(conn, source, 0, "[\"Guide\"]", None, "A ›\nB →\nC ∴\n")?;
+        Ok(())
+    })
+    .unwrap();
+    (dir, store)
+}
+
+/// Resuming an `open` page with the returned cursor keeps working on a
+/// multibyte chunk: the cursor is a char offset, no page panics, and the
+/// pages concatenate back to the chunk text losslessly.
+#[test]
+fn open_resumes_a_multibyte_chunk_without_panic() {
+    let (_dir, store) = seeded_multibyte_chunk();
+    let budget = Plan {
+        max_tokens: 2,
+        ..Plan::defaults()
+    };
+    let full_text = "A ›\nB →\nC ∴\n";
+
+    let mut served: Vec<String> = Vec::new();
+    let mut cursor: Option<u64> = None;
+    for _ in 0..8 {
+        let page_plan = Plan {
+            cursor,
+            ..budget.clone()
+        };
+        let envelope = open(&store, "docs://acme/v1.0.0/guide", &page_plan).unwrap();
+        served.push(envelope.results.first().unwrap().snippet.clone());
+        if !envelope.truncated {
+            break;
+        }
+        cursor = Some(envelope.next_cursor.unwrap().parse().unwrap());
+    }
+    assert!(served.len() > 1, "the budget must cut the chunk");
+    assert_eq!(served.concat(), full_text);
+}
