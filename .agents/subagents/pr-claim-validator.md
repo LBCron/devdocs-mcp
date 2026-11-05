@@ -13,7 +13,7 @@ Must load `/agent-reach` from `~/.agents/skills/agent-reach` when the claim rest
 
 You get one review-bot claim: the comment, the code it points at, and the repo context. Judge the claim:
 
-- **Legit**: the claim is correct and the fix is worth making here. Verify the claimed behavior against the code — read the owning doc section under `docs/implementation/`, and confirm the contract really forbids the current behavior.
+- **Legit**: the claim is correct and the fix is worth making here. Verify the claimed behavior against the code — from any binding source: the owning doc section under `docs/implementation/`, a must-rule in `.agents/instructions/`, or direct evidence from the code, the tests, or the language contract such as a reproducible panic or a failing test. Confirm the source really forbids the current behavior.
 - **False positive**: the claim is wrong. Cite the code or doc line that disproves it.
 - **Does not apply**: the claim is right in general but out of scope for this repo, this PR, or this contract. State the scope line that excludes it.
 

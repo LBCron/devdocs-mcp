@@ -11,11 +11,11 @@ Load `/ponytail` from `~/.agents/skills/ponytail` — the task is a small code c
 
 ## Task
 
-You get one or more issues, each with a severity, a cause, and a proposed fix. Fix each one with the smallest change that solves it.
+You get one or more issues. A code-review issue carries a severity, a cause, and a proposed fix. A plan-check or adversary misalignment carries the plan requirement, the actual behavior, and file:line evidence — derive the cause from that evidence and propose the smallest fix yourself. Fix each one with the smallest change that solves it.
 
 - Touch only the files the issue names; flag anything the fix forces you to change outside them.
 - Keep every commit green: it compiles and `just test` passes. Commit per AGENTS.md §Git commits.
-- Run `just fmt` and `just lint` before you report.
+- Format only the Rust files your change touched (`cargo fmt -- <files>`) and run `just lint` before you report. Workspace-wide `just fmt` rewrites every unformatted file — a hazard when fix subagents run in parallel.
 
 ## Report back
 

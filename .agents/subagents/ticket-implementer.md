@@ -17,7 +17,7 @@ Rules:
 
 - Touch only the files the step names; flag anything the step forces you to change outside them.
 - Keep every commit green: it compiles and `just test` passes. Split the work into commits per AGENTS.md §Git commits.
-- Run `just fmt` and `just lint` before you report.
+- Run `just fmt`, `just lint`, `just test-doc`, and `just docs` before you report — `just test` does not run doc tests, and a rustdoc warning surfaces only at push otherwise.
 
 ## Report back
 
