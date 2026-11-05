@@ -5,6 +5,7 @@
 //! calling test files unwrap into their own local allowance.
 
 pub mod fixtures;
+pub mod git_repo;
 
 use std::path::Path;
 
