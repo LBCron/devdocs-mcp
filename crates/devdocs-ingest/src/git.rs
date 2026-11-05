@@ -21,6 +21,7 @@ use std::sync::{Mutex, Once};
 
 use crate::chrome::PageDocument;
 use crate::error::IngestError;
+use crate::pipeline::TOTAL_INGEST_CAP;
 
 /// The `GIT_*` environment variables every invocation strips, so an
 /// ambient value cannot redirect the child to another repository or
@@ -85,14 +86,19 @@ pub fn install_signal_cleanup() {
     });
 }
 
-/// Removes every `devdocs-git-*` entry under `tmp` except the currently
-/// registered path (one slot; the clone of the slot is taken first). The
-/// sweep is best effort — every error is ignored — and covers clone dirs
-/// left behind when the total-cap timeout drops the `spawn_blocking`
-/// future and the process exits before the guard's drop runs
-/// (docs/implementation/09 §Local storage controls). It runs at the next
-/// `TempClone::create`, i.e. the next `add` run of this short-lived CLI
-/// process.
+/// Removes every `devdocs-git-*` entry under `tmp` whose mtime is older
+/// than the ingest total cap, except the currently registered path (one
+/// slot; the clone of the slot is taken first). The registry is
+/// per-process, so the age bound is what keeps the sweep safe across
+/// concurrent `add` runs sharing a data root: a live clone is never older
+/// than the cap (the cap bounds the whole fetch), while a dir leaked by a
+/// crashed or cap-tripped process is swept by a later run. The sweep is
+/// best effort — every error is ignored, and entries whose mtime cannot
+/// be read are skipped — and covers clone dirs left behind when the
+/// total-cap timeout drops the `spawn_blocking` future and the process
+/// exits before the guard's drop runs (docs/implementation/09 §Local
+/// storage controls). It runs at the next `TempClone::create`, i.e. the
+/// next `add` run of this short-lived CLI process.
 fn sweep_stale_clones(tmp: &Path) {
     let registered = REGISTERED_PATH.lock().ok().and_then(|slot| slot.clone());
     let Ok(entries) = std::fs::read_dir(tmp) else {
@@ -105,6 +111,15 @@ fn sweep_stale_clones(tmp: &Path) {
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with("devdocs-git-"));
         if !is_clone_entry || Some(path.as_path()) == registered.as_deref() {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|mtime| mtime.elapsed().ok())
+            .is_some_and(|age| age >= TOTAL_INGEST_CAP);
+        if !stale {
             continue;
         }
         if path.is_dir() {
@@ -902,11 +917,16 @@ mod tests {
         }
     }
 
-    /// A stale clone dir planted under the tmp root is swept at the next
-    /// `TempClone::create`, and the freshly created dir survives
-    /// (docs/implementation/09 §Local storage controls).
+    /// A clone dir planted under the tmp root with an mtime older than
+    /// the ingest total cap is swept at the next `TempClone::create`; a
+    /// young one survives, as does the freshly created dir — the age
+    /// bound keeps the sweep from racing a concurrent process's live
+    /// clone (docs/implementation/09 §Local storage controls).
     #[test]
     fn a_stale_clone_dir_is_swept_at_the_next_create() {
+        use std::fs::File;
+        use std::time::{Duration, SystemTime};
+
         let _order = TEMP_CLONE_ORDER.lock().unwrap();
         let data = tempdir().unwrap();
         // The tmp root exists at mode 0700 in production; the sweep must
@@ -921,9 +941,19 @@ mod tests {
         let stale = tmp.join("devdocs-git-stale");
         std::fs::create_dir_all(&stale).unwrap();
         std::fs::write(stale.join("leftover"), "x").unwrap();
+        // Age the planted dir past the cap: the sweep only removes
+        // entries older than the total ingest cap.
+        let old = SystemTime::now() - crate::pipeline::TOTAL_INGEST_CAP - Duration::from_secs(60);
+        File::open(&stale).unwrap().set_modified(old).unwrap();
+
+        // A young clone dir stays: it could belong to another process's
+        // live clone (the registry is per-process).
+        let fresh = tmp.join("devdocs-git-fresh");
+        std::fs::create_dir_all(&fresh).unwrap();
 
         let guard = super::TempClone::create(data.path()).unwrap();
         assert!(!stale.exists(), "the stale clone dir must be swept");
+        assert!(fresh.exists(), "the young clone dir must survive");
         assert!(guard.path().exists(), "the new clone dir must survive");
     }
 
