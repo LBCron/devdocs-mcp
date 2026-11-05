@@ -12,8 +12,17 @@ name = "devdocs_ingest"
 path = "src/lib.rs"
 
 [features]
-default = []
+# The symbol pass (M5): each grammar behind its own feature, aggregated by
+# `symbols` so callers opt into the whole grammar set at once. The
+# tree-sitter core stays a required dependency — it is the API layer only;
+# the grammar crates carry the generated parsers.
+default = ["symbols"]
 exact-tokens = ["dep:tiktoken-rs", "text-splitter/tiktoken-rs"]
+grammar-rust = ["dep:tree-sitter-rust"]
+grammar-go = ["dep:tree-sitter-go"]
+grammar-python = ["dep:tree-sitter-python"]
+grammar-javascript = ["dep:tree-sitter-javascript"]
+symbols = ["grammar-rust", "grammar-go", "grammar-python", "grammar-javascript"]
 
 [dependencies]
 bytes.workspace = true
@@ -25,6 +34,11 @@ serde.workspace = true
 serde_json.workspace = true
 text-splitter.workspace = true
 tiktoken-rs = { workspace = true, optional = true }
+tree-sitter.workspace = true
+tree-sitter-rust = { workspace = true, optional = true }
+tree-sitter-go = { workspace = true, optional = true }
+tree-sitter-python = { workspace = true, optional = true }
+tree-sitter-javascript = { workspace = true, optional = true }
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true

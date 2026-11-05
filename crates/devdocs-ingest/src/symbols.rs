@@ -1,0 +1,174 @@
+//! Symbol extraction over the fenced code blocks of a documentation page
+//! (docs/implementation/01 tech-stack note, tree-sitter paragraph).
+//!
+//! One tree-sitter grammar per supported language, each behind its own
+//! feature (`grammar-rust`, `grammar-go`, `grammar-python`,
+//! `grammar-javascript`; aggregated by `symbols`). With a grammar feature
+//! off, [`grammar_for`] returns `None` for its language and [`extract`]
+//! yields nothing — extraction degrades, it never fails. The TypeScript
+//! grammar is deliberately absent (docs/implementation/01: binding version
+//! conflict); the JavaScript grammar gives it partial coverage.
+
+use tree_sitter::{Language, Node, Parser};
+
+/// One symbol found in a code block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedSymbol {
+    /// The declared name, e.g. `parse_config`.
+    pub name: String,
+    /// The kind vocabulary entry for the declaration — one of `function`,
+    /// `method`, `class`, `struct`, `enum`, `trait`, `type`, `interface`,
+    /// `constant`, `variable`, `module`.
+    pub kind: String,
+    /// The 1-based line of the declaration inside the code block.
+    pub line: u32,
+}
+
+/// The grammar for a fence language name, when this build carries it.
+/// Accepts the fence aliases the ingest knows (`golang`, `py`, `js`,
+/// `jsx`); the comparison is case-sensitive ASCII, and the caller
+/// lower-cases the fence token first.
+#[must_use]
+pub fn grammar_for(lang: &str) -> Option<Language> {
+    match lang {
+        #[cfg(feature = "grammar-rust")]
+        "rust" => Some(Language::new(tree_sitter_rust::LANGUAGE)),
+        #[cfg(feature = "grammar-go")]
+        "go" | "golang" => Some(Language::new(tree_sitter_go::LANGUAGE)),
+        #[cfg(feature = "grammar-python")]
+        "python" | "py" => Some(Language::new(tree_sitter_python::LANGUAGE)),
+        #[cfg(feature = "grammar-javascript")]
+        "javascript" | "js" | "jsx" => Some(Language::new(tree_sitter_javascript::LANGUAGE)),
+        _ => None,
+    }
+}
+
+/// Extracts the symbols declared in `code`, parsed as `lang`. A language
+/// without its grammar feature, an unparsable input, or a parse with
+/// syntax errors all yield what the walk can salvage — the call never
+/// panics and never fails: fences are untrusted content
+/// (docs/implementation/09 §Content filtering).
+#[must_use]
+pub fn extract(lang: &str, code: &str) -> Vec<ExtractedSymbol> {
+    let Some(grammar) = grammar_for(lang) else {
+        return Vec::new();
+    };
+    let mut parser = Parser::new();
+    if parser.set_language(&grammar).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(code.as_bytes(), None) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    visit(tree.root_node(), code.as_bytes(), &mut out, 0);
+    out
+}
+
+/// The recursion cap of the walk. Fence code is bounded by the page body
+/// limit, but a pathological nesting depth must not turn the walk into a
+/// stack overflow; 64 covers any real declaration nesting many times over.
+const MAX_DEPTH: usize = 64;
+
+/// Walks `node` pre-order, recording the mapped declaration kinds.
+fn visit(node: Node<'_>, src: &[u8], out: &mut Vec<ExtractedSymbol>, depth: usize) {
+    if depth >= MAX_DEPTH {
+        return;
+    }
+    match node.kind() {
+        // Rust `function_item`/`function_signature_item` (a trait method
+        // declaration) and the Go/JavaScript declarations share the
+        // `function` kind; `impl_item` carries no `name` and stays unmapped.
+        "function_item"
+        | "function_signature_item"
+        | "function_declaration"
+        | "generator_function_declaration" => push(node, "function", src, out),
+        "struct_item" => push(node, "struct", src, out),
+        "enum_item" => push(node, "enum", src, out),
+        "trait_item" => push(node, "trait", src, out),
+        // Rust `type_item` and the Go `type_spec` (under `type_declaration`).
+        "type_item" | "type_spec" => push(node, "type", src, out),
+        // Rust `const_item`/`static_item` and the Go `const_spec`.
+        "const_item" | "static_item" | "const_spec" => push(node, "constant", src, out),
+        "mod_item" => push(node, "module", src, out),
+        "method_declaration" | "method_definition" => push(node, "method", src, out),
+        "var_spec" => push(node, "variable", src, out),
+        // Python
+        "class_definition" | "class_declaration" => push(node, "class", src, out),
+        "function_definition" => {
+            let kind = if python_class_member(node) {
+                "method"
+            } else {
+                "function"
+            };
+            push(node, kind, src, out);
+        }
+        // JavaScript: module-scope `variable_declarator`s only; a
+        // function- or class-valued declarator keeps that kind.
+        "variable_declarator" if javascript_top_level(node) => {
+            push(node, javascript_variable_kind(node), src, out);
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+    for child in children {
+        visit(child, src, out, depth + 1);
+    }
+}
+
+/// Records one declaration: its `name` field child and its start line.
+/// A node without a usable `name` (a parse-error hole) contributes nothing.
+fn push(node: Node<'_>, kind: &str, src: &[u8], out: &mut Vec<ExtractedSymbol>) {
+    if let Some(name) = node
+        .child_by_field_name("name")
+        .and_then(|name| name.utf8_text(src).ok().filter(|text| !text.is_empty()))
+    {
+        out.push(ExtractedSymbol {
+            name: name.to_owned(),
+            kind: kind.to_owned(),
+            line: u32::try_from(node.start_position().row + 1).unwrap_or(u32::MAX),
+        });
+    }
+}
+
+/// Whether a Python `function_definition` is a member of a class body:
+/// its first non-wrapper ancestors reach a `class_definition`
+/// (`decorated_definition` and the class `block` are wrappers). A function
+/// nested in another function, however deep, is not a method.
+fn python_class_member(node: Node<'_>) -> bool {
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        match parent.kind() {
+            "block" | "decorated_definition" => current = parent.parent(),
+            "class_definition" => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Whether a JavaScript `variable_declarator` sits at module scope: a
+/// declarator nested inside a function body (`statement_block`) is a
+/// function-local, not an indexable symbol.
+fn javascript_top_level(node: Node<'_>) -> bool {
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        match parent.kind() {
+            "statement_block" => return false,
+            "program" => return true,
+            _ => current = parent.parent(),
+        }
+    }
+    false
+}
+
+/// The kind of a JavaScript `variable_declarator`: a function or class
+/// value makes it a declaration of that kind, everything else a variable.
+fn javascript_variable_kind(node: Node<'_>) -> &'static str {
+    match node.child_by_field_name("value").map(|value| value.kind()) {
+        Some("function_expression" | "arrow_function" | "function") => "function",
+        Some("class") => "class",
+        _ => "variable",
+    }
+}

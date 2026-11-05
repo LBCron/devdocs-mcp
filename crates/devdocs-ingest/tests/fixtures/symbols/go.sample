@@ -1,0 +1,54 @@
+package deploy
+
+import (
+	"errors"
+	"sync"
+)
+
+// ErrRejected is returned when the target refuses the plan.
+var ErrRejected = errors.New("rejected")
+
+// MaxRetries bounds one deploy attempt.
+const MaxRetries = 3
+
+// Target names one deploy destination.
+type Target struct {
+	Name string
+	Zone string
+}
+
+// Planner builds deploy plans for targets.
+type Planner interface {
+	Plan(target Target) (string, error)
+}
+
+// DefaultPlanner plans without side effects.
+type DefaultPlanner struct{}
+
+// Plan builds the plan for one target.
+func (p *DefaultPlanner) Plan(target Target) (string, error) {
+	if target.Name == "" {
+		return "", ErrRejected
+	}
+	return "plan " + target.Name, nil
+}
+
+// mu guards the rolling plan cache.
+var mu sync.Mutex
+
+// cacheVersion is the plan cache format version.
+const cacheVersion = "v2"
+
+// PlanAll plans every target in order.
+func PlanAll(targets []Target) ([]string, error) {
+	planner := &DefaultPlanner{}
+	plans := make([]string, 0, len(targets))
+	for _, target := range targets {
+		plan, err := planner.Plan(target)
+		if err != nil {
+			return nil, err
+		}
+		plans = append(plans, plan)
+	}
+	return plans, nil
+}

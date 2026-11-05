@@ -1,0 +1,47 @@
+"""Deploy planning for the release tool."""
+
+import threading
+
+MAX_RETRIES = 3
+
+_lock = threading.Lock()
+
+
+class Planner:
+    """Builds deploy plans for targets."""
+
+    def __init__(self, zone):
+        self.zone = zone
+
+    def plan(self, target):
+        """Builds the plan for one target."""
+        return f"plan {target}"
+
+    @property
+    def ready(self):
+        """Whether the planner holds a zone."""
+        return bool(self.zone)
+
+
+class ParallelPlanner(Planner):
+    """Plans targets on a worker pool."""
+
+    def plan(self, target):
+        """Plans one target with the pool."""
+        return super().plan(target) + f" [{self.zone}]"
+
+
+def plan_all(targets, zone="eu"):
+    """Plans every target in order."""
+    planner = Planner(zone)
+    return [planner.plan(target) for target in targets]
+
+
+def _retry(fn, retries=MAX_RETRIES):
+    """Runs `fn` up to `retries` times."""
+    for attempt in range(retries):
+        try:
+            return fn()
+        except Exception:
+            if attempt == retries - 1:
+                raise

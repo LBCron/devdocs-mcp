@@ -15,6 +15,7 @@ pub mod relations;
 pub mod resolver;
 
 pub mod segment;
+pub mod symbols;
 
 pub use chrome::{ChromeReport, PageDocument, strip_chrome};
 pub use error::IngestError;
@@ -25,3 +26,4 @@ pub use license::{LicenseGrant, gate_fetch, refused_status};
 pub use llms_txt::{LlmsLink, LlmsSection, LlmsTxtIndex, parse_llms_txt};
 pub use pipeline::{IngestJob, IngestOutcome, TOTAL_INGEST_CAP};
 pub use segment::{PreparedChunk, Segmenter, contextual_header};
+pub use symbols::{ExtractedSymbol, extract, grammar_for};

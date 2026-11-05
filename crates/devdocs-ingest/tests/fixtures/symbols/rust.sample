@@ -1,0 +1,62 @@
+//! Runtime configuration for the deploy tool.
+
+use std::collections::HashMap;
+
+/// The retry budget for one outbound request.
+pub const MAX_RETRIES: u32 = 3;
+
+/// A parsed command with its argument values.
+pub struct Command {
+    pub name: String,
+    pub args: HashMap<String, String>,
+}
+
+impl Command {
+    /// Runs the command against the current settings.
+    pub fn execute(&self) -> bool {
+        !self.args.is_empty()
+    }
+}
+
+/// The failure modes a run can end in.
+pub enum RunError {
+    Timeout,
+    Rejected(String),
+}
+
+/// The executor contract every backend implements.
+pub trait Executor {
+    /// Runs one command and reports success.
+    fn run(&self, command: &Command) -> bool;
+}
+
+/// The built-in executor.
+pub struct LocalExecutor;
+
+impl Executor for LocalExecutor {
+    fn run(&self, command: &Command) -> bool {
+        command.execute()
+    }
+}
+
+/// The deploy target kinds the tool understands.
+pub type TargetKind = String;
+
+/// A lock protecting the reload path.
+pub static RELOAD_LOCK: std::sync::Mutex<bool> = std::sync::Mutex::new(true);
+
+/// The `deploy` module gates every mutating command.
+pub mod deploy {
+    /// Plans one deploy from the given target.
+    pub fn plan(target: &str) -> String {
+        format!("plan {target}")
+    }
+}
+
+/// Loads the configuration file and validates it.
+pub fn parse_config(path: &str) -> Result<Command, RunError> {
+    Ok(Command {
+        name: path.to_string(),
+        args: HashMap::new(),
+    })
+}

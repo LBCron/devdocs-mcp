@@ -1,0 +1,52 @@
+/**
+ * Deploy planning for the release tool.
+ */
+
+const MAX_RETRIES = 3;
+
+let cacheVersion = 'v2';
+
+/** Builds deploy plans for targets. */
+class Planner {
+  constructor(zone) {
+    this.zone = zone;
+  }
+
+  /** Builds the plan for one target. */
+  plan(target) {
+    return `plan ${target}`;
+  }
+
+  get ready() {
+    return Boolean(this.zone);
+  }
+}
+
+/** Plans targets on a worker pool. */
+class ParallelPlanner extends Planner {
+  /** Plans one target with the pool. */
+  plan(target) {
+    return `${super.plan(target)} [${this.zone}]`;
+  }
+}
+
+/** Plans every target in order. */
+function planAll(targets, zone = 'eu') {
+  const planner = new Planner(zone);
+  return targets.map((target) => planner.plan(target));
+}
+
+/** Retries `fn` up to `retries` times. */
+async function* retry(fn, retries = MAX_RETRIES) {
+  for (let attempt = 0; attempt < retries; attempt++) {
+    yield fn();
+  }
+}
+
+/** The named deploy entry point. */
+var deploy = function deploy(target) {
+  return new ParallelPlanner('eu').plan(target);
+};
+
+/** The arrow-shaped alias. */
+const planOne = (target) => deploy(target);
