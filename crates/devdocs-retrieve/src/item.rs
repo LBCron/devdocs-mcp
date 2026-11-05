@@ -45,15 +45,16 @@ pub fn to_result_item(
 }
 
 /// Derives the `docs://` ref for one chunk: the library, the `v`-prefixed
-/// version, the slugified section path (the placeholder segment when the
-/// chunk has no section path), and the slugified symbol as the fragment
-/// when one applies.
+/// version, the section path (the placeholder segment when a path segment
+/// or the whole path slugs to empty), and the slugified symbol as the
+/// fragment when one applies. An empty fragment is left out — a symbol
+/// that slugs to empty names nothing.
 #[must_use]
 pub fn derive_ref(hit: &Hit) -> String {
     let segments: Vec<String> = if hit.section_path.is_empty() {
         vec![HEAD_SEGMENT.to_owned()]
     } else {
-        hit.section_path.iter().map(|s| slug(s)).collect()
+        hit.section_path.iter().map(|s| segment(s)).collect()
     };
     let mut ref_ = format!(
         "docs://{}/v{}/{}",
@@ -62,8 +63,11 @@ pub fn derive_ref(hit: &Hit) -> String {
         segments.join("/")
     );
     if let Some(symbol) = &hit.symbol {
-        ref_.push('#');
-        ref_.push_str(&slug(symbol));
+        let slug = slug(symbol);
+        if !slug.is_empty() {
+            ref_.push('#');
+            ref_.push_str(&slug);
+        }
     }
     ref_
 }
@@ -88,6 +92,20 @@ pub fn slug(text: &str) -> String {
     out
 }
 
+/// The ref segment for one section heading: the slug, or the placeholder
+/// when the heading has no ASCII alphanumerics. A non-ASCII or
+/// punctuation-only heading slugs to empty, and the ref grammar rejects
+/// empty segments.
+#[must_use]
+fn segment(text: &str) -> String {
+    let s = slug(text);
+    if s.is_empty() {
+        HEAD_SEGMENT.to_owned()
+    } else {
+        s
+    }
+}
+
 /// Lowercase hex of a sha256 digest.
 #[must_use]
 pub fn hex(bytes: &[u8]) -> String {
@@ -101,16 +119,18 @@ pub fn hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Finds the chunk that serves a parsed ref: the full slugified section
-/// path first, then the last segment, then the fragment (symbol or title
+/// Finds the chunk that serves a parsed ref: the full section path
+/// first, then the last segment, then the fragment (symbol or title
 /// match). The placeholder segment matches a chunk without a section
-/// path. When several candidates remain, the lowest chunk id serves.
-/// `None` when nothing matches.
+/// path and a chunk whose heading slugs to empty. When several
+/// candidates remain, the lowest chunk id serves. `None` when nothing
+/// matches.
 #[must_use]
 pub fn match_ref<'a>(chunks: &'a [Hit], parsed: &ParsedRef) -> Option<&'a Hit> {
-    let want: Vec<String> = parsed.segments.iter().map(|s| slug(s)).collect();
+    let want: Vec<String> = parsed.segments.iter().map(|s| segment(s)).collect();
     // 1. The full section path matches the ref path exactly. The
-    //    placeholder path also matches a chunk without a section path.
+    //    placeholder path also matches a chunk without a section path
+    //    and a chunk whose heading slugs to empty.
     let full: Vec<&Hit> = chunks
         .iter()
         .filter(|c| {
@@ -118,7 +138,7 @@ pub fn match_ref<'a>(chunks: &'a [Hit], parsed: &ParsedRef) -> Option<&'a Hit> {
                 || (c.section_path.len() == want.len()
                     && c.section_path
                         .iter()
-                        .map(|s| slug(s))
+                        .map(|s| segment(s))
                         .eq(want.iter().cloned()))
         })
         .collect();
@@ -138,22 +158,27 @@ pub fn match_ref<'a>(chunks: &'a [Hit], parsed: &ParsedRef) -> Option<&'a Hit> {
         // 3. The fragment matches the title (the last section segment).
         let by_title: Vec<&Hit> = chunks
             .iter()
-            .filter(|c| c.section_path.last().is_some_and(|t| slug(t) == *fragment))
+            .filter(|c| {
+                c.section_path
+                    .last()
+                    .is_some_and(|t| segment(t) == *fragment)
+            })
             .collect();
         if by_title.len() == 1 {
             return by_title.first().copied();
         }
     }
     // 4. The last segment matches the chunk's last section segment; the
-    //    placeholder names a chunk without a section path. When several
-    //    candidates remain — two pages can share a section title — the
-    //    lowest chunk id serves, so one ref always serves one chunk.
+    //    placeholder names a chunk without a section path and a chunk
+    //    whose heading slugs to empty. When several candidates remain —
+    //    two pages can share a section title — the lowest chunk id
+    //    serves, so one ref always serves one chunk.
     let last = want.last()?;
     let by_last: Vec<&Hit> = chunks
         .iter()
         .filter(|c| {
             (last == HEAD_SEGMENT && c.section_path.is_empty())
-                || c.section_path.last().is_some_and(|t| slug(t) == *last)
+                || c.section_path.last().is_some_and(|t| segment(t) == *last)
         })
         .collect();
     by_last.iter().min_by_key(|hit| hit.chunk_id).copied()
@@ -326,6 +351,41 @@ mod tests {
         assert_eq!(
             match_ref(&[headless_later, headless_earlier], &placeholder).map(|h| h.chunk_id),
             Some(4)
+        );
+    }
+
+    /// A heading with no ASCII alphanumerics slugs to empty; the ref
+    /// carries the placeholder segment and still serves the chunk, and a
+    /// symbol that slugs to empty leaves no empty fragment.
+    #[test]
+    fn empty_slug_headings_derive_and_match_the_placeholder_ref() {
+        let heading = hit("acme", "1.0.0", &["日本語"], None);
+        assert_eq!(derive_ref(&heading), "docs://acme/v1.0.0/index");
+        let parsed = devdocs_model::docref::ParsedRef::parse("docs://acme/v1.0.0/index").unwrap();
+        assert_eq!(match_ref(&[heading], &parsed).map(|h| h.chunk_id), Some(1));
+
+        let nested = hit("acme", "1.0.0", &["Intro", "###"], None);
+        assert_eq!(derive_ref(&nested), "docs://acme/v1.0.0/intro/index");
+
+        let symbol = hit("acme", "1.0.0", &["Guide"], Some("###"));
+        assert_eq!(derive_ref(&symbol), "docs://acme/v1.0.0/guide");
+    }
+
+    /// A literal "Index" heading, a heading that slugs to empty, and a
+    /// headless chunk all collide on the placeholder ref; the lowest
+    /// chunk id serves.
+    #[test]
+    fn placeholder_collisions_serve_the_lowest_chunk_id() {
+        let mut named = hit("acme", "1.0.0", &["Index"], None);
+        named.chunk_id = 8;
+        let mut empties = hit("acme", "1.0.0", &["###"], None);
+        empties.chunk_id = 6;
+        let mut headless = hit("acme", "1.0.0", &[], None);
+        headless.chunk_id = 9;
+        let parsed = devdocs_model::docref::ParsedRef::parse("docs://acme/v1.0.0/index").unwrap();
+        assert_eq!(
+            match_ref(&[named, empties, headless], &parsed).map(|h| h.chunk_id),
+            Some(6)
         );
     }
 
