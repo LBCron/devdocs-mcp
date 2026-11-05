@@ -113,7 +113,7 @@ pub enum Command {
     },
     /// Exact symbol lookup.
     Symbol {
-        /// The library[@version] to search.
+        /// The `library[@version]` to search.
         target: String,
         /// The symbol name.
         symbol: String,
