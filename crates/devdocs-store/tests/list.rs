@@ -38,6 +38,7 @@ fn published_sources_list_in_order() {
 
     let chunks = [NewChunk {
         section_path: vec![String::from("Guide")],
+        symbols: Vec::new(),
         symbol: None,
         text: String::from("[a 1] hello"),
         token_count: 4,

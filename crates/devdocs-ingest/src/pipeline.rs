@@ -330,9 +330,31 @@ impl<'a> IngestJob<'a> {
             run.events.unknown_fence_languages += stats.unknown_fence_languages;
             run.events.unsupported_fence_languages += stats.unsupported_fence_languages;
             for chunk in chunks {
+                // The primary symbol for `chunks.symbol`: the declared
+                // symbol whose name the contextual header names, else the
+                // first declared one (docs/implementation/07
+                // §Normalization pipeline, the symbol pass).
+                let symbols: Vec<devdocs_store::Symbol> = chunk
+                    .symbols
+                    .iter()
+                    .map(|sym| devdocs_store::Symbol {
+                        name: sym.name.clone(),
+                        kind: sym.kind.clone(),
+                    })
+                    .collect();
+                let symbol = chunk
+                    .symbols
+                    .iter()
+                    .find(|sym| chunk.header.contains(&sym.name))
+                    .or_else(|| chunk.symbols.first())
+                    .map(|sym| devdocs_store::Symbol {
+                        name: sym.name.clone(),
+                        kind: sym.kind.clone(),
+                    });
                 run.new_chunks.push(NewChunk {
                     section_path: chunk.section_path,
-                    symbol: None,
+                    symbols,
+                    symbol,
                     text: chunk.text,
                     token_count: chunk.token_count,
                     content_hash: chunk.content_hash,

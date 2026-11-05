@@ -15,8 +15,14 @@ use crate::store::Store;
 pub struct NewChunk {
     /// Breadcrumb of section titles.
     pub section_path: Vec<String>,
-    /// Exact symbol this chunk documents, with its `symbols.kind`, when one
-    /// applies.
+    /// Every symbol declared in the chunk, stored in the `symbols` table
+    /// for the exact-symbol lookup ladder (docs/implementation/06
+    /// §Metadata mapping). Duplicates collapse on the `(symbol, chunk_id)`
+    /// primary key.
+    pub symbols: Vec<Symbol>,
+    /// The exact symbol this chunk documents, stored in `chunks.symbol`:
+    /// the declared symbol whose name the section header names, else the
+    /// first declared one.
     pub symbol: Option<Symbol>,
     /// Body with the contextual header prepended.
     pub text: String,
@@ -201,10 +207,13 @@ fn insert_chunks(
                 i64::from(chunk.ordinal),
             ])
             .map_err(StoreError::Sql)?;
-        if let Some(sym) = &chunk.symbol {
+        let chunk_id = tx.last_insert_rowid();
+        // `OR IGNORE` on the (symbol, chunk_id) primary key keeps a repeat
+        // insert of the same generation a no-op.
+        for sym in &chunk.symbols {
             tx.execute(
-                "INSERT INTO symbols(symbol, chunk_id, kind) VALUES (?1, ?2, ?3)",
-                params![sym.name, tx.last_insert_rowid(), sym.kind],
+                "INSERT OR IGNORE INTO symbols(symbol, chunk_id, kind) VALUES (?1, ?2, ?3)",
+                params![sym.name, chunk_id, sym.kind],
             )
             .map_err(StoreError::Sql)?;
         }

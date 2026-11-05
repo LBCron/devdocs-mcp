@@ -191,3 +191,74 @@ async fn wire_ingest_fails_when_the_llms_full_probe_hits_a_server_error() {
         other => panic!("expected Guard(Http(500)), got {other}"),
     }
 }
+
+/// The wire path publishes the symbol pass: a page with a rust fenced
+/// block carries its primary symbol on `chunks.symbol`, the `symbols`
+/// table holds the extracted rows, and republishing the same generation
+/// leaves the symbol row counts unchanged — idempotent
+/// (docs/implementation/07 §Normalization pipeline, the symbol pass).
+#[tokio::test]
+async fn wire_ingest_publishes_symbols_idempotently() {
+    let server = MockServer::start().await;
+    mount_ok(&server, "/llms.txt", INDEX).await;
+    mount_ok(
+        &server,
+        "/intro.md",
+        concat!(
+            "# Intro\n\nThe Acme SDK ships a client for every runtime.\n\n",
+            "## parse_config\n\n",
+            "```rust\n",
+            "fn parse_config(path: &str) -> Config {\n",
+            "    Config::load(path)\n",
+            "}\n",
+            "```\n"
+        ),
+    )
+    .await;
+
+    let index_url = format!("{}/llms.txt", server.uri());
+    let config = config(&index_url);
+    let guard = test_guard(&config);
+    let (_db, store) = store();
+
+    let index_url = url::Url::parse(&index_url).unwrap();
+    let job = IngestJob::new(&config, &guard, None);
+    job.run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap();
+
+    // The fence's section names the symbol, so `chunks.symbol` carries it
+    // and the FTS hit for the code body exposes it.
+    let source_id = store.find_source("acme", "1.0").unwrap().unwrap();
+    let hits = store
+        .search_fts_source(&devdocs_store::build_match_query("Config"), source_id, 10)
+        .unwrap();
+    assert!(
+        hits.iter()
+            .any(|hit| hit.symbol.as_deref() == Some("parse_config")),
+        "the fenced chunk carries the primary symbol: {hits:?}"
+    );
+
+    // The `symbols` table holds the extracted rows, joined back to the
+    // active source with their kind.
+    let lookups = store
+        .lookup_symbol("parse_config", devdocs_model::SourceId(source_id))
+        .unwrap();
+    assert_eq!(lookups.len(), 1, "one symbol row for the fenced block");
+    assert_eq!(lookups[0].symbol_kind.as_deref(), Some("function"));
+
+    // Republishing the same generation replaces the chunk set; the symbol
+    // row counts land unchanged.
+    let before = lookups.len();
+    job.run(Arc::clone(&store), &index_url, "acme", "1.0")
+        .await
+        .unwrap();
+    let after = store
+        .lookup_symbol("parse_config", devdocs_model::SourceId(source_id))
+        .unwrap();
+    assert_eq!(
+        after.len(),
+        before,
+        "republish leaves symbol rows unchanged"
+    );
+}

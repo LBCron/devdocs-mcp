@@ -48,12 +48,14 @@ fn source(status: LicenseStatus) -> SourceRecord {
 
 /// A one-line chunk body with the given ordinal and body term.
 fn chunk(ordinal: u32, symbol: Option<(&str, &str)>, body: &str) -> NewChunk {
+    let symbol = symbol.map(|(name, kind)| devdocs_store::Symbol {
+        name: name.to_owned(),
+        kind: kind.to_owned(),
+    });
     NewChunk {
         section_path: vec!["Routing".to_owned()],
-        symbol: symbol.map(|(name, kind)| devdocs_store::Symbol {
-            name: name.to_owned(),
-            kind: kind.to_owned(),
-        }),
+        symbols: symbol.iter().cloned().collect(),
+        symbol,
         text: format!("## Routing\n\n{body}"),
         token_count: 16,
         content_hash: content_hash(body),
