@@ -294,8 +294,8 @@ const SOURCE_SQL: &str = "SELECT source_id FROM sources \
 
 /// The source-set lookup SQL: every active source id for one exact
 /// `(library, version)` pair, case-insensitive on the library, lowest
-/// first. The schema's UNIQUE (library, version, kind, `origin_url`) key
-/// allows several active origins per pair.
+/// first. Several active origins per pair are representable
+/// (docs/implementation/06-data-model.md, §Schema).
 const SOURCES_SQL: &str = "SELECT source_id FROM sources \
      WHERE library = ?1 COLLATE NOCASE AND version = ?2 AND active = 1 \
      ORDER BY source_id";
@@ -432,8 +432,9 @@ impl Store {
 
     /// The active source id for one exact `(library, version)` pair,
     /// case-insensitive on the library; `None` when no active source
-    /// serves that pair. When several active origins serve the pair, the
-    /// lowest source id returns, so one ref always serves one source.
+    /// serves that pair. When several active origins serve the pair
+    /// (docs/implementation/06-data-model.md, §Schema), the lowest
+    /// source id returns, so one ref always serves one source.
     pub fn find_source(&self, library: &str, version: &str) -> Result<Option<i64>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
         let mut stmt = conn.prepare_cached(SOURCE_SQL)?;

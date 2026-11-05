@@ -36,10 +36,12 @@ Order, highest first:
 | `go.mod` | internal line parser | `require (...)` blocks |
 | `Gemfile.lock` | internal line parser | `GEM specs` section (phase 2) |
 
-3. Query text mentions (`next.js 16`) as a weak hint.
-4. Fallback: no library filter. Search all approved sources.
+3. Query text mentions (`next.js 16`) as a weak hint. A leading `v` on a mention version is stripped, so the hint matches the index's bare version spelling.
+4. Fallback: no library filter. Search all approved sources. An explicit version that the index carries narrows the fallback to that version; an absent version follows the fallback ladder (§Version policy).
 
 The precedence applies per field: a flag beats the lockfile in the field it fills, and a field the flags leave open falls to the lockfile — but a lockfile entry never donates its version to a library a flag named unless the entry is that library.
+
+A pinned scope serves every active origin of one exact `(library, version)` pair — the schema allows several origins per pair (docs/implementation/06-data-model.md). `open` and `verify` resolve refs through the lowest source id, so one ref always serves one source.
 
 Policy (research: retrieval-design.md §3.4): never serve `latest` silently when a version was requested. The result carries `requested_version`, `served_version`, and `version_status`:
 
