@@ -36,8 +36,9 @@ fn cargo_lock_rows_without_names_are_skipped() {
     );
 }
 
-/// package-lock.json v3: the `packages` map keys strip their
-/// `node_modules/` prefix; the root entry is skipped.
+/// package-lock.json v3: the name is the segment after the last
+/// `node_modules/`, the root entry is skipped, and a nested key
+/// yields to its top-level twin.
 #[test]
 fn package_lock_v3_strips_node_modules() {
     let content = r#"{
@@ -56,10 +57,29 @@ fn package_lock_v3_strips_node_modules() {
                 version: Some("16.2.9".to_owned()),
             },
             Dep {
-                library: "next/node_modules/react".to_owned(),
+                library: "react".to_owned(),
                 version: Some("18.3.1".to_owned()),
             },
         ]
+    );
+}
+
+/// A nested key and its top-level twin name the same package; the
+/// top-level pin wins even when the nested key sorts first.
+#[test]
+fn package_lock_nested_duplicate_keeps_top_level() {
+    let content = r#"{
+        "packages": {
+            "node_modules/app/node_modules/react": {"version": "19.0.0"},
+            "node_modules/react": {"version": "18.3.1"}
+        }
+    }"#;
+    assert_eq!(
+        parse_package_lock(content),
+        vec![Dep {
+            library: "react".to_owned(),
+            version: Some("18.3.1".to_owned()),
+        }]
     );
 }
 
@@ -81,7 +101,7 @@ fn package_lock_v1_falls_back_to_dependencies() {
 }
 
 /// pnpm-lock.yaml: the `packages` keys split at the version `@`, with
-/// peer suffixes and scoped names handled.
+/// peer suffixes, scoped names, and the v6 leading `/` handled.
 #[test]
 fn pnpm_lock_keys_split_at_version() {
     let content = "packages:\n\
@@ -105,6 +125,26 @@ fn pnpm_lock_keys_split_at_version() {
             Dep {
                 library: "react".to_owned(),
                 version: Some("18.3.1".to_owned()),
+            },
+        ]
+    );
+
+    // v6 keys carry a leading `/`; it trims away so the names match
+    // the v9 shape.
+    let v6 = "packages:\n\
+              \x20 '/next@16.2.9': {}\n\
+              \x20 '/@babel/core@7.26.0': {}\n";
+    // BTreeMap key order: `/@babel/core` sorts before `/next`.
+    assert_eq!(
+        parse_pnpm_lock(v6),
+        vec![
+            Dep {
+                library: "@babel/core".to_owned(),
+                version: Some("7.26.0".to_owned()),
+            },
+            Dep {
+                library: "next".to_owned(),
+                version: Some("16.2.9".to_owned()),
             },
         ]
     );
@@ -234,13 +274,22 @@ fn precedence_flag_over_lockfile_over_mention() {
     assert_eq!(none.source, ResolutionSource::Unfiltered);
 }
 
-/// A `name@version` mention resolves the same way as the spaced form.
+/// A `name@version` mention resolves the same way as the spaced form;
+/// a `v` prefix on the version keeps only the bare spelling.
 #[test]
 fn at_mentions_resolve() {
     let empty = ProjectContext::empty();
     let resolved = resolve(&Query::new("zod@4.6.7 parse", None, None), &empty);
     assert_eq!(resolved.library.as_deref(), Some("zod"));
     assert_eq!(resolved.version.as_deref(), Some("4.6.7"));
+
+    let at_v = resolve(&Query::new("next@v16 routing", None, None), &empty);
+    assert_eq!(at_v.library.as_deref(), Some("next"));
+    assert_eq!(at_v.version.as_deref(), Some("16"));
+
+    let spaced_v = resolve(&Query::new("next v16 routing", None, None), &empty);
+    assert_eq!(spaced_v.library.as_deref(), Some("next"));
+    assert_eq!(spaced_v.version.as_deref(), Some("16"));
 }
 
 /// A flag version pairs with a lockfile library when the flag leaves
@@ -260,67 +309,74 @@ fn flag_version_pairs_with_lockfile_library() {
     assert_eq!(resolved.source, ResolutionSource::Flag);
 }
 
-/// `detect` finds each lockfile kind in a project directory and
-/// parses its entries.
+/// Writes one lockfile into a temp project and checks what `detect`
+/// parses from it.
+fn assert_lockfile_detected(name: &str, content: &str, expected: Dep) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(name), content).unwrap();
+    let ctx = ProjectContext::detect(dir.path());
+    assert_eq!(ctx.deps, vec![expected], "lockfile: {name}");
+    assert_eq!(ctx.files, vec![dir.path().join(name)]);
+}
+
+/// `detect` reads the JS lockfiles (npm, pnpm) and parses their
+/// entries.
 #[test]
-fn detect_reads_each_lockfile_kind() {
-    let cases: [(&str, &str, Dep); 6] = [
-        (
-            "Cargo.lock",
-            "[[package]]\nname = \"serde\"\nversion = \"1.0.229\"\n",
-            Dep {
-                library: "serde".to_owned(),
-                version: Some("1.0.229".to_owned()),
-            },
-        ),
-        (
-            "package-lock.json",
-            r#"{"packages": {"node_modules/next": {"version": "16.2.9"}}}"#,
-            Dep {
-                library: "next".to_owned(),
-                version: Some("16.2.9".to_owned()),
-            },
-        ),
-        (
-            "pnpm-lock.yaml",
-            "packages:\n  'next@16.2.9': {}\n",
-            Dep {
-                library: "next".to_owned(),
-                version: Some("16.2.9".to_owned()),
-            },
-        ),
-        (
-            "uv.lock",
-            "[[package]]\nname = \"click\"\nversion = \"8.1.8\"\n",
-            Dep {
-                library: "click".to_owned(),
-                version: Some("8.1.8".to_owned()),
-            },
-        ),
-        (
-            "pyproject.toml",
-            "[project]\nname = \"app\"\ndependencies = [\"uvicorn\"]\n",
-            Dep {
-                library: "uvicorn".to_owned(),
-                version: None,
-            },
-        ),
-        (
-            "go.mod",
-            "module example.test/app\n\nrequire github.com/spf13/cobra v1.9.1\n",
-            Dep {
-                library: "github.com/spf13/cobra".to_owned(),
-                version: Some("1.9.1".to_owned()),
-            },
-        ),
-    ];
-    for (name, content, expected) in cases {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(name), content).unwrap();
-        let ctx = ProjectContext::detect(dir.path());
-        assert_eq!(ctx.deps, vec![expected], "lockfile: {name}");
-        assert_eq!(ctx.files, vec![dir.path().join(name)]);
-    }
+fn detect_reads_js_lockfiles() {
+    assert_lockfile_detected(
+        "package-lock.json",
+        r#"{"packages": {"node_modules/next": {"version": "16.2.9"}}}"#,
+        Dep {
+            library: "next".to_owned(),
+            version: Some("16.2.9".to_owned()),
+        },
+    );
+    assert_lockfile_detected(
+        "pnpm-lock.yaml",
+        "packages:\n  'next@16.2.9': {}\n",
+        Dep {
+            library: "next".to_owned(),
+            version: Some("16.2.9".to_owned()),
+        },
+    );
+}
+
+/// `detect` reads the tool lockfiles (Cargo, uv, pyproject, Go) and
+/// parses their entries.
+#[test]
+fn detect_reads_tool_lockfiles() {
+    assert_lockfile_detected(
+        "Cargo.lock",
+        "[[package]]\nname = \"serde\"\nversion = \"1.0.229\"\n",
+        Dep {
+            library: "serde".to_owned(),
+            version: Some("1.0.229".to_owned()),
+        },
+    );
+    assert_lockfile_detected(
+        "uv.lock",
+        "[[package]]\nname = \"click\"\nversion = \"8.1.8\"\n",
+        Dep {
+            library: "click".to_owned(),
+            version: Some("8.1.8".to_owned()),
+        },
+    );
+    assert_lockfile_detected(
+        "pyproject.toml",
+        "[project]\nname = \"app\"\ndependencies = [\"uvicorn\"]\n",
+        Dep {
+            library: "uvicorn".to_owned(),
+            version: None,
+        },
+    );
+    assert_lockfile_detected(
+        "go.mod",
+        "module example.test/app\n\nrequire github.com/spf13/cobra v1.9.1\n",
+        Dep {
+            library: "github.com/spf13/cobra".to_owned(),
+            version: Some("1.9.1".to_owned()),
+        },
+    );
 }
 
 /// `detect` keeps walking when the present lockfiles parse to

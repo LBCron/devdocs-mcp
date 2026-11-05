@@ -205,8 +205,9 @@ pub fn resolve(query: &Query, ctx: &ProjectContext) -> Resolved {
 /// (docs/implementation/08 §Version resolution: `next.js 16`).
 ///
 /// Recognizes `name@version` and `name version` when the second token
-/// looks like a version (a leading digit, optionally with a `v`). Names
-/// with no version stay a library-only hint.
+/// looks like a version (a leading digit, optionally with a `v`). A
+/// leading `v` is stripped so the pin matches the index's bare version
+/// spelling. Names with no version stay a library-only hint.
 #[must_use]
 fn mention(text: &str) -> Option<Dep> {
     let tokens: Vec<&str> = text.split_whitespace().collect();
@@ -217,14 +218,14 @@ fn mention(text: &str) -> Option<Dep> {
         {
             return Some(Dep {
                 library: name.to_owned(),
-                version: Some(version.to_owned()),
+                version: Some(version.strip_prefix('v').unwrap_or(version).to_owned()),
             });
         }
         let next = tokens.get(i + 1)?;
         if is_name(token) && is_version_shaped(next) {
             return Some(Dep {
                 library: (*token).to_owned(),
-                version: Some((*next).to_owned()),
+                version: Some(next.strip_prefix('v').unwrap_or(*next).to_owned()),
             });
         }
     }
@@ -319,17 +320,28 @@ pub fn parse_package_lock(content: &str) -> Vec<Dep> {
     let Ok(lock) = serde_json::from_str::<Lockfile>(content) else {
         return Vec::new();
     };
-    let mut deps: Vec<Dep> = lock
+    let mut entries: Vec<(String, usize, Option<String>)> = lock
         .packages
         .into_iter()
         .filter_map(|(key, row)| {
             // The root entry ("") and non-package keys carry no install
-            // name; only the `node_modules/` keys name dependencies.
-            let name = key.strip_prefix("node_modules/")?;
-            Some(Dep {
-                library: name.to_owned(),
-                version: row.version,
-            })
+            // name; the name is the segment after the last
+            // `node_modules/`, so a nested key names the innermost
+            // package.
+            let name = key.rsplit_once("node_modules/")?.1.to_owned();
+            Some((name, key.matches("node_modules/").count(), row.version))
+        })
+        .collect();
+    // A nested key and its top-level twin can name the same package;
+    // keep the shallowest key (fewest `node_modules/` segments) so the
+    // top-level pin wins.
+    entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    entries.dedup_by(|a, b| a.0 == b.0);
+    let mut deps: Vec<Dep> = entries
+        .into_iter()
+        .map(|(name, _, version)| Dep {
+            library: name,
+            version,
         })
         .collect();
     // Legacy v1 lockfiles name dependencies only under the top map.
@@ -358,8 +370,10 @@ pub fn parse_pnpm_lock(content: &str) -> Vec<Dep> {
     lock.packages
         .keys()
         .filter_map(|key| {
+            // v6 keys carry a leading `/`; v9 keys do not. Trim it so
+            // both shapes split the same way.
             let entry = key.trim_end_matches(':').split('(').next()?;
-            let (name, version) = split_name_version(entry)?;
+            let (name, version) = split_name_version(entry.trim_start_matches('/'))?;
             Some(Dep {
                 library: name.to_owned(),
                 version: Some(version.to_owned()),
