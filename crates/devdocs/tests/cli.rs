@@ -875,7 +875,7 @@ fn db_migrate_runs_and_is_idempotent() {
     );
     assert_eq!(code, 0, "stderr: {stderr}");
     let result: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
-    assert_eq!(result["schema_version"], 1);
+    assert_eq!(result["schema_version"], 2);
 
     let (code, stdout, stderr) = output(
         env.cmd(),
@@ -883,7 +883,7 @@ fn db_migrate_runs_and_is_idempotent() {
     );
     assert_eq!(code, 0, "stderr: {stderr}");
     let result: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
-    assert_eq!(result["schema_version"], 1);
+    assert_eq!(result["schema_version"], 2);
 }
 
 /// `list` on an empty store prints the empty envelope under `--json`.

@@ -23,19 +23,26 @@ const SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ("index", "idx_symbols_chunk"),
 ];
 
-/// Applies schema 0001 to a fresh temp file and checks every object.
+/// Applies every shipped migration to a fresh temp file and checks every
+/// object, including the license-gate expiry column from 0002.
 #[test]
-fn fresh_database_reaches_version_one_with_all_objects() {
+fn fresh_database_reaches_the_latest_version_with_all_objects() {
     let dir = tempfile::tempdir().unwrap();
     let mut conn = Connection::open(dir.path().join("docs.db")).unwrap();
 
     let applied = migrate(&mut conn).unwrap();
     assert_eq!(
         applied,
-        vec![devdocs_store::AppliedMigration {
-            version: 1,
-            name: "0001_init".to_owned(),
-        }]
+        vec![
+            devdocs_store::AppliedMigration {
+                version: 1,
+                name: "0001_init".to_owned(),
+            },
+            devdocs_store::AppliedMigration {
+                version: 2,
+                name: "0002_license_gate".to_owned(),
+            },
+        ]
     );
 
     for (kind, name) in SCHEMA_OBJECTS {
@@ -52,7 +59,25 @@ fn fresh_database_reaches_version_one_with_all_objects() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
+
+    // The expiry column exists, is nullable, and existing rows carry no
+    // expiry.
+    conn.execute(
+        "INSERT INTO sources(library, version, kind, origin_url, license_status, fetched_at, \
+         active) VALUES ('acme', '1.0', 'llms_txt', 'https://docs.test/llms.txt', \
+         'pending_review', '2026-01-01T00:00:00Z', 0)",
+        [],
+    )
+    .unwrap();
+    let expires: Option<String> = conn
+        .query_row(
+            "SELECT license_expires_at FROM sources WHERE library = 'acme'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(expires, None);
 }
 
 /// A second run applies nothing, leaves `user_version` alone, and keeps the
@@ -80,7 +105,7 @@ fn re_migrating_an_up_to_date_database_applies_nothing() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
     let created_after: String = conn
         .query_row(
             "SELECT value FROM meta WHERE key = 'schema_created_at'",

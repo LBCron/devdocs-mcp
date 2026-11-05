@@ -17,7 +17,7 @@ impl Store {
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
         let mut statement = conn.prepare(
             "SELECT library, version, kind, license, license_status, active, fetched_at, \
-             commit_sha FROM sources ORDER BY library, version",
+             license_expires_at, commit_sha FROM sources ORDER BY library, version",
         )?;
         let rows = statement.query_map([], |row| {
             let kind_raw: String = row.get(2)?;
@@ -45,10 +45,8 @@ impl Store {
                 license_status: status.as_str().to_owned(),
                 active: active != 0,
                 fetched_at: row.get(6)?,
-                // The `license_expires_at` column lands with migration 0002;
-                // until then no source records an expiry.
-                license_expires_at: None,
-                commit_sha: row.get(7)?,
+                license_expires_at: row.get(7)?,
+                commit_sha: row.get(8)?,
             })
         })?;
         let mut sources = Vec::new();
