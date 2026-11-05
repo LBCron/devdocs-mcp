@@ -21,13 +21,14 @@ proptest! {
     fn packer_properties_hold(
         costs in prop::collection::vec(0u32..1_000_000, 0..64),
         max_tokens in 0u64..200_000,
+        limit in 1usize..=64,
     ) {
         let fused: Vec<_> = costs
             .iter()
             .enumerate()
             .map(|(i, &cost)| (hit(i as u64 + 1, cost), 1.0 / (f64::from(u32::try_from(i).unwrap_or(u32::MAX)) + 1.0)))
             .collect();
-        let packed = pack(fused.clone(), max_tokens);
+        let packed = pack(fused.clone(), limit, max_tokens);
 
         // Rank 1 always fits: the first result is never dropped.
         if !fused.is_empty() {
@@ -41,7 +42,8 @@ proptest! {
 
         // The budget holds for everything after rank 1. Rank 1 itself may
         // exceed the budget — the oversize case is chunked at open time,
-        // never dropped (docs/implementation/08 §Fusion and budget).
+        // never dropped (docs/implementation/08 §Fusion and budget). The
+        // total never exceeds the budget either, for the same reason.
         let after_rank_one: u64 = packed
             .items
             .iter()
@@ -49,6 +51,19 @@ proptest! {
             .map(|(hit, _)| u64::from(hit.token_count))
             .sum();
         prop_assert!(after_rank_one <= max_tokens, "rank-1 tail {after_rank_one} > {max_tokens}");
+        let rank_one: u64 = packed
+            .items
+            .first()
+            .map_or(0, |(hit, _)| u64::from(hit.token_count));
+        let total: u64 = packed
+            .items
+            .iter()
+            .map(|(hit, _)| u64::from(hit.token_count))
+            .sum();
+        prop_assert!(
+            total <= max_tokens.max(rank_one),
+            "total {total} > max(max_tokens {max_tokens}, rank 1 {rank_one})"
+        );
 
         // The pack stops at the first result that would exceed the budget:
         // when anything was cut, the very next fusion position is the cut
@@ -68,7 +83,10 @@ proptest! {
                 .map(|(hit, _)| u64::from(hit.token_count))
                 .sum();
             let next: u64 = u64::from(fused[kept].0.token_count);
-            prop_assert!(used + next > max_tokens, "cut too early");
+            prop_assert!(
+                kept == limit || used + next > max_tokens,
+                "cut too early"
+            );
             prop_assert_eq!(
                 packed.next_cursor,
                 Some(packed.items.last().unwrap().0.chunk_id.to_string())

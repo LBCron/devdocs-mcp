@@ -14,16 +14,21 @@ use common::{indexed_doc, indexed_env, output};
 use devdocs_model::ResultEnvelope;
 use serde_json::Value;
 
-/// The bytes of one search run, with `served_at` removed — the byte-identity
-/// comparison excludes the wall-clock field (docs/implementation/13 §M4:
-/// "byte-identity excludes the `served_at` wall-clock field").
-fn envelope_without_served_at(stdout: &str) -> Value {
-    let mut envelope: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
-    envelope
-        .as_object_mut()
-        .expect("envelope is an object")
-        .remove("served_at");
-    envelope
+/// The bytes of one search run, with the `served_at` entry cut at the
+/// string level — the wall-clock field is the only run-varying value in
+/// the envelope (docs/implementation/13 §M4: "byte-identity excludes the
+/// `served_at` wall-clock field"). The entry and the comma before it go,
+/// so the rest stays valid JSON.
+fn strip_served_at(raw: &str) -> String {
+    let json = raw.trim();
+    // The entry is the envelope's last field, so the last occurrence of
+    // the key is the top-level one.
+    let key = "\"served_at\":\"";
+    let at = json.rfind(key).expect("envelope carries served_at");
+    let value_starts = at + key.len();
+    let value_ends = value_starts + json[value_starts..].find('"').expect("value closes");
+    let head = json[..at].strip_suffix(',').unwrap_or(&json[..at]);
+    format!("{head}{}", &json[value_ends + 1..])
 }
 
 /// One fixture query snapshots to the exact `--json` envelope
@@ -51,7 +56,8 @@ fn search_snapshots_the_result_envelope() {
 }
 
 /// Running the same query twice against the same DB produces byte-identical
-/// output, with the `served_at` wall-clock field excluded
+/// output: the raw stdout strings match after the `served_at` entry is cut,
+/// so key order, whitespace, and value drift all fail
 /// (docs/implementation/08 §CLI contract, adjusted by the issue #8
 /// comparison rule).
 #[test]
@@ -69,9 +75,9 @@ fn identical_db_state_gives_byte_identical_output() {
     assert_eq!(code1, 0);
     assert_eq!(code2, 0);
     assert_eq!(
-        envelope_without_served_at(&out1),
-        envelope_without_served_at(&out2),
-        "the envelope must be identical except served_at"
+        strip_served_at(&out1),
+        strip_served_at(&out2),
+        "the envelope must be byte-identical except served_at"
     );
 }
 
@@ -149,15 +155,23 @@ fn open_under_a_tiny_budget_truncates_and_carries_a_cursor() {
     open1.next_cursor.expect("cursor present");
 }
 
-/// Resuming through the cursor tiles the chunk: page 1 opens the served
-/// text and page 2 carries the rest.
+/// Resuming through the cursor tiles the chunk: following `next_cursor`
+/// to the end joins to the exact served text of the default-budget open,
+/// with no page repeated and no page missing.
 #[test]
 fn cursor_resume_tiles_the_whole_chunk() {
     let (env, config) = indexed_env();
     let doc_ref = indexed_doc(&env, &config).doc_ref;
     let cfg = ["--config", config.to_str().expect("config path")];
 
-    // open with a tiny budget: page 1 and the cursor.
+    // The whole chunk under the default budget, for the tiling comparison.
+    let (code, stdout, stderr) = output(env.cmd(), &["open", &doc_ref, "--json", cfg[0], cfg[1]]);
+    assert_eq!(code, 0, "open failed: {stderr}");
+    let full: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
+    let whole = full.results.first().expect("full page").snippet.clone();
+
+    // Page 1 under a tiny budget, then follow the cursor to the end. The
+    // cap keeps a cursor that never settles from hanging the test.
     let (code, stdout, stderr) = output(
         env.cmd(),
         &[
@@ -171,40 +185,36 @@ fn cursor_resume_tiles_the_whole_chunk() {
         ],
     );
     assert_eq!(code, 0, "open failed: {stderr}");
-    let open1: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
-    let page1 = open1.results.first().expect("page 1").snippet.clone();
-    let cursor = open1.next_cursor.expect("cursor present");
-
-    // Resume through the cursor: the pages tile the chunk.
-    let (code, stdout, stderr) = output(
-        env.cmd(),
-        &[
-            "open",
-            &doc_ref,
-            "--max-tokens",
-            "1",
-            "--cursor",
-            &cursor,
-            "--json",
-            cfg[0],
-            cfg[1],
-        ],
-    );
-    assert_eq!(code, 0, "open resume failed: {stderr}");
-    let open2: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
-    let page2 = open2.results.first().expect("page 2").snippet.clone();
-    let (code, stdout, _stderr) = output(env.cmd(), &["open", &doc_ref, "--json", cfg[0], cfg[1]]);
-    assert_eq!(code, 0);
-    let full: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
-    let whole = full.results.first().expect("full page").snippet.clone();
-    assert!(
-        whole.starts_with(page1.trim_end_matches('\n')),
-        "page 1 tiles the whole"
-    );
-    assert!(
-        whole.contains(page2.trim_end_matches('\n')),
-        "page 2 is the rest"
-    );
+    let mut page: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
+    let mut tiled = String::new();
+    let mut pages = 0;
+    loop {
+        assert!(pages < 32, "the cursor never settles: {pages} pages served");
+        let item = page.results.first().expect("page serves a result");
+        tiled.push_str(&item.snippet);
+        pages += 1;
+        let Some(cursor) = &page.next_cursor else {
+            break;
+        };
+        let (code, stdout, stderr) = output(
+            env.cmd(),
+            &[
+                "open",
+                &doc_ref,
+                "--max-tokens",
+                "1",
+                "--cursor",
+                cursor,
+                "--json",
+                cfg[0],
+                cfg[1],
+            ],
+        );
+        assert_eq!(code, 0, "open resume failed: {stderr}");
+        page = serde_json::from_str(stdout.trim()).expect("envelope");
+    }
+    assert!(pages > 1, "a tiny budget must cut the chunk into pages");
+    assert_eq!(tiled, whole, "the pages tile the whole chunk exactly");
 }
 
 /// `verify` re-derives the stored hash: it matches the search result's
