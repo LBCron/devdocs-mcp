@@ -15,7 +15,8 @@ This project is a local, read-only documentation MCP server for coding agents. I
 - `lefthook` runs the git hooks; they delegate to justfile recipes, so a hook failure means the same command CI runs failed. Run `lefthook install` after changing `lefthook.yml`.
 - Its commit-msg hook enforces Conventional Commits: `type(scope): subject`, scope optional, subject ≤ 72 chars.
 - `just test` runs nextest with `.config/nextest.toml` (`retries = 0`, `fail-fast = false`): a failing test surfaces immediately and is never retried.
-- Must use `bash` as the primary terminal. Must search with `rg`; plain `grep` does not satisfy this.
+- Must run commands in `zsh` on macOS and `bash` everywhere else. When `bash` is absent, must fall back to the next bash-like shell (Git Bash and similar); when no bash-like shell exists, must use the OS-default terminal.
+- Must search with `rg`; plain `grep` does not satisfy this.
 - Optional cargo tools (`nextest`, `cargo-deny`, `cargo-audit`, `cargo-machete`, `cargo-llvm-cov`, `cargo-mutants`, `cargo-semver-checks`) are installed via `cargo binstall`.
 - `just test` and `just deny` hard-fail when nextest/cargo-deny are missing (with a binstall hint). CI installs the tools explicitly, so a missing tool there means the install step failed and fails the job loudly; there is no fallback.
 - The dev toolchain is pinned to 1.99.1, but code must compile on MSRV 1.90 (`just msrv`): no std APIs newer than 1.90.
