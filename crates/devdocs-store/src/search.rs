@@ -206,6 +206,13 @@ const FTS_MATCH_CLAUSE: &str = "chunks_fts MATCH ?1 AND s.active = 1 {license_cl
 /// filter it replaces.
 const FTS_LIBRARY_PREDICATE: &str = " AND s.library = ?3 COLLATE NOCASE";
 
+/// The version-scoped predicate, bound to `?3`, appended to
+/// [`FTS_MATCH_CLAUSE`] before the limit — the version-only fallback
+/// path, where the request names a version but no library
+/// (docs/implementation/08 §Version resolution, step 4). The comparison
+/// is exact, like [`SOURCE_SQL`].
+const FTS_VERSION_PREDICATE: &str = " AND s.version = ?3";
+
 /// The source-scoped predicate, bound to `?3`, appended to
 /// [`FTS_MATCH_CLAUSE`] before the limit — the exact-version serving path.
 const FTS_SOURCE_PREDICATE: &str = " AND s.source_id = ?3";
@@ -244,6 +251,23 @@ fn fts_sql(where_clause: &str) -> String {
     .replace(LICENSE_PLACEHOLDER, TERMINAL_LICENSE_CLAUSE)
 }
 
+/// Composes the pinned-source-set clause: [`FTS_MATCH_CLAUSE`] plus
+/// `s.source_id IN (…)` with one placeholder per source id behind `?3`.
+/// Deterministic per set size, so the same size yields the same SQL string
+/// on every call and `prepare_cached` stays effective — one cache entry
+/// per set size.
+fn fts_source_set_clause(count: usize) -> String {
+    // Explicit indices, like [`FTS_LIBRARY_PREDICATE`]: the IN list sits
+    // before the `LIMIT ?2` tail, so bare `?` placeholders would take
+    // indices 2 and up and collide with the limit's.
+    let placeholders = (3..)
+        .take(count)
+        .map(|n| format!("?{n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{FTS_MATCH_CLAUSE} AND s.source_id IN ({placeholders})")
+}
+
 /// Composes one ordinal-ordered query (symbol lookups, full-chunk reads):
 /// the shared projection, one query-specific suffix column at index 12,
 /// the FROM/JOIN, and the clause. Deterministic in its arguments, so the
@@ -259,12 +283,22 @@ fn plain_sql(from_clause: &str, where_clause: &str, suffix_column: &str) -> Stri
     .replace(LICENSE_PLACEHOLDER, TERMINAL_LICENSE_CLAUSE)
 }
 
-/// The source lookup SQL: the active source id for one exact
-/// `(library, version)` pair, case-insensitive on the library.
+/// The source lookup SQL: the lowest active source id for one exact
+/// `(library, version)` pair, case-insensitive on the library. The
+/// `open`/`verify` ref paths resolve through it so one ref always serves
+/// the same source.
 const SOURCE_SQL: &str = "SELECT source_id FROM sources \
      WHERE library = ?1 COLLATE NOCASE AND version = ?2 AND active = 1 \
      ORDER BY source_id \
      LIMIT 1";
+
+/// The source-set lookup SQL: every active source id for one exact
+/// `(library, version)` pair, case-insensitive on the library, lowest
+/// first. The schema's UNIQUE (library, version, kind, `origin_url`) key
+/// allows several active origins per pair.
+const SOURCES_SQL: &str = "SELECT source_id FROM sources \
+     WHERE library = ?1 COLLATE NOCASE AND version = ?2 AND active = 1 \
+     ORDER BY source_id";
 
 /// The version listing SQL: every active source of one library, newest
 /// publication first.
@@ -339,6 +373,53 @@ impl Store {
             .map_err(StoreError::Sql)
     }
 
+    /// Full-text search scoped to one exact version across every active
+    /// source that serves it — the version-only fallback path, where the
+    /// request names a version but no library. Same weights and ordering
+    /// as [`Store::search_fts`].
+    pub fn search_fts_version(
+        &self,
+        match_expr: &str,
+        version: &str,
+        limit: u32,
+    ) -> Result<Vec<Hit>, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
+        let sql = fts_sql(&format!("{FTS_MATCH_CLAUSE}{FTS_VERSION_PREDICATE}"));
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params![match_expr, limit, version], fts_hit)?;
+        rows.collect::<Result<Vec<Hit>, _>>()
+            .map_err(StoreError::Sql)
+    }
+
+    /// Full-text search scoped to the given source ids — the
+    /// pinned-version serving path over every origin that serves the
+    /// `(library, version)` pair. Same weights and ordering as
+    /// [`Store::search_fts`]. An empty set serves nothing.
+    pub fn search_fts_sources(
+        &self,
+        match_expr: &str,
+        source_ids: &[i64],
+        limit: u32,
+    ) -> Result<Vec<Hit>, StoreError> {
+        if source_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
+        let sql = fts_sql(&fts_source_set_clause(source_ids.len()));
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut bind = Vec::with_capacity(source_ids.len() + 2);
+        bind.push(rusqlite::types::Value::from(match_expr.to_owned()));
+        bind.push(rusqlite::types::Value::from(i64::from(limit)));
+        bind.extend(
+            source_ids
+                .iter()
+                .map(|id| rusqlite::types::Value::from(*id)),
+        );
+        let rows = stmt.query_map(rusqlite::params_from_iter(bind), fts_hit)?;
+        rows.collect::<Result<Vec<Hit>, _>>()
+            .map_err(StoreError::Sql)
+    }
+
     /// Every chunk of one source in ordinal order — the `open` read path.
     pub fn source_chunks(&self, source_id: i64) -> Result<Vec<Hit>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
@@ -351,7 +432,8 @@ impl Store {
 
     /// The active source id for one exact `(library, version)` pair,
     /// case-insensitive on the library; `None` when no active source
-    /// serves that pair.
+    /// serves that pair. When several active origins serve the pair, the
+    /// lowest source id returns, so one ref always serves one source.
     pub fn find_source(&self, library: &str, version: &str) -> Result<Option<i64>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
         let mut stmt = conn.prepare_cached(SOURCE_SQL)?;
@@ -360,6 +442,18 @@ impl Store {
             Some(row) => Ok(Some(row.get(0)?)),
             None => Ok(None),
         }
+    }
+
+    /// Every active source id for one exact `(library, version)` pair,
+    /// case-insensitive on the library, lowest first. The schema's UNIQUE
+    /// (library, version, kind, `origin_url`) key allows several active
+    /// origins per pair, and the pinned search scope serves them all.
+    pub fn find_sources(&self, library: &str, version: &str) -> Result<Vec<i64>, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
+        let mut stmt = conn.prepare_cached(SOURCES_SQL)?;
+        let rows = stmt.query_map(params![library, version], |row| row.get(0))?;
+        rows.collect::<Result<Vec<i64>, _>>()
+            .map_err(StoreError::Sql)
     }
 
     /// The exact versions one active library serves, in descending version

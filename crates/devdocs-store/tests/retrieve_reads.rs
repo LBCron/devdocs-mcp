@@ -10,13 +10,15 @@ use devdocs_store::{Store, build_match_query};
 use rusqlite::Connection;
 use tempfile::tempdir;
 
-/// Opens a store on a migrated temp file and seeds two sources: next.js at
-/// two versions, each with two chunks. The inactive source must never
-/// serve.
+/// Opens a store on a migrated temp file and seeds three sources: next.js
+/// at two versions, a second active origin of next.js 16.2.9, and an
+/// inactive zod. The inactive source must never serve.
 struct Seeded {
     store: Store,
-    /// The active next.js 16.2.9 source.
+    /// The active next.js 16.2.9 source (the lowest id of the pair).
     v16: i64,
+    /// The second active origin of next.js 16.2.9 (a higher id).
+    v16b: i64,
     /// The active next.js 15.0.0 source.
     v15: i64,
     /// The inactive zod 4.6.7 source.
@@ -24,10 +26,11 @@ struct Seeded {
     dir: tempfile::TempDir,
 }
 
-/// Inserts the raw `sources` rows: active next.js at 15.0.0, inactive zod,
-/// and repoints the `seed_source` next.js row at its real version and
-/// origin. Returns the (next.js 16, next.js 15, zod) source ids.
-fn seeded_sources(conn: &Connection) -> (i64, i64, i64) {
+/// Inserts the raw `sources` rows: active next.js at 15.0.0, a second
+/// active origin of next.js 16.2.9, inactive zod, and repoints the
+/// `seed_source` next.js row at its real version and origin. Returns the
+/// (next.js 16, mirror 16, next.js 15, zod) source ids.
+fn seeded_sources(conn: &Connection) -> (i64, i64, i64, i64) {
     let v16 = devdocs_testkit::seed_source(conn, "next.js", true).unwrap();
     // seed_source pins version 1.0.0 with a per-library origin; the second
     // next.js source needs distinct (version, origin) values to clear the
@@ -41,18 +44,28 @@ fn seeded_sources(conn: &Connection) -> (i64, i64, i64) {
     .unwrap();
     let v15 = conn.last_insert_rowid();
     let zod = devdocs_testkit::seed_source(conn, "zod", false).unwrap();
+    // A second active origin of the same (library, version) pair: the
+    // UNIQUE key allows several per pair when only the origin differs.
+    conn.execute(
+        "INSERT INTO sources(library, version, kind, origin_url, license_status, fetched_at, active) \
+         VALUES ('next.js', '16.2.9', 'llms_txt', 'https://example.test/16-mirror', 'approved_index', \
+         '2026-01-01T00:00:00Z', 1)",
+        [],
+    )
+    .unwrap();
+    let v16b = conn.last_insert_rowid();
     // Repoint the first next.js source at its real version and origin.
     conn.execute(
         "UPDATE sources SET version = '16.2.9', origin_url = 'https://example.test/16' WHERE source_id = ?1",
         rusqlite::params![v16],
     )
     .unwrap();
-    (v16, v15, zod)
+    (v16, v16b, v15, zod)
 }
 
-/// Seeds two chunks on the next.js 16 source and one each on the next.js
-/// 15 and zod sources.
-fn seed_chunks(conn: &Connection, v16: i64, v15: i64, zod: i64) {
+/// Seeds two chunks on the next.js 16 source and one each on its mirror
+/// origin, the next.js 15 and zod sources.
+fn seed_chunks(conn: &Connection, v16: i64, v16b: i64, v15: i64, zod: i64) {
     devdocs_testkit::seed_chunk(
         conn,
         v16,
@@ -73,6 +86,15 @@ fn seed_chunks(conn: &Connection, v16: i64, v15: i64, zod: i64) {
     .unwrap();
     devdocs_testkit::seed_chunk(
         conn,
+        v16b,
+        0,
+        "[\"Routing\"]",
+        None,
+        "Mirror routing notes live only on this origin.",
+    )
+    .unwrap();
+    devdocs_testkit::seed_chunk(
+        conn,
         v15,
         0,
         "[\"Routing\"]",
@@ -88,11 +110,12 @@ fn seeded() -> Seeded {
     let dir = tempdir().unwrap();
     let store = devdocs_testkit::open_migrated(&dir.path().join("docs.db")).unwrap();
     let conn = Connection::open(dir.path().join("docs.db")).unwrap();
-    let (v16, v15, zod) = seeded_sources(&conn);
-    seed_chunks(&conn, v16, v15, zod);
+    let (v16, v16b, v15, zod) = seeded_sources(&conn);
+    seed_chunks(&conn, v16, v16b, v15, zod);
     Seeded {
         store,
         v16,
+        v16b,
         v15,
         zod,
         dir,
@@ -223,5 +246,62 @@ fn library_versions_list_descending() {
     assert_eq!(
         s.store.library_versions("nope").unwrap(),
         Vec::<String>::new()
+    );
+}
+
+/// The plural source lookup returns every active origin of one exact
+/// `(library, version)` pair, lowest id first, case-insensitive on the
+/// library; the singular lookup keeps resolving the lowest id so one ref
+/// always serves one source.
+#[test]
+fn find_sources_returns_every_active_origin_of_the_pair() {
+    let s = seeded();
+    assert_eq!(
+        s.store.find_sources("next.js", "16.2.9").unwrap(),
+        vec![s.v16, s.v16b]
+    );
+    assert_eq!(
+        s.store.find_sources("Next.JS", "16.2.9").unwrap(),
+        vec![s.v16, s.v16b]
+    );
+    assert_eq!(
+        s.store.find_sources("next.js", "16.2.10").unwrap(),
+        Vec::<i64>::new()
+    );
+    assert_eq!(
+        s.store.find_source("next.js", "16.2.9").unwrap(),
+        Some(s.v16)
+    );
+}
+
+/// The source-set search serves chunks unique to the higher-id origin —
+/// a pinned version reaches every origin of the pair, not only the
+/// lowest source id.
+#[test]
+fn source_set_search_serves_every_origin_of_the_pair() {
+    let s = seeded();
+    // The mirror chunk exists only on the higher-id origin.
+    let mirror = s
+        .store
+        .search_fts_sources(&build_match_query("mirror"), &[s.v16, s.v16b], 10)
+        .unwrap();
+    assert_eq!(mirror.len(), 1);
+    assert_eq!(mirror[0].source_id, s.v16b);
+
+    // A term both origins carry serves from both.
+    let shared = s
+        .store
+        .search_fts_sources(&build_match_query("routing"), &[s.v16, s.v16b], 10)
+        .unwrap();
+    let mut sources: Vec<i64> = shared.iter().map(|hit| hit.source_id).collect();
+    sources.sort_unstable();
+    assert_eq!(sources, vec![s.v16, s.v16b]);
+
+    // An empty set serves nothing.
+    assert_eq!(
+        s.store
+            .search_fts_sources(&build_match_query("routing"), &[], 10)
+            .unwrap(),
+        Vec::<devdocs_store::Hit>::new()
     );
 }
