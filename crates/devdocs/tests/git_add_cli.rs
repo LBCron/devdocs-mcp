@@ -32,12 +32,39 @@ fn write_git_config(env: &Env, url: &str) -> std::path::PathBuf {
             "[sources.acme]\n\
              kind = \"git\"\n\
              url = \"{url}\"\n\
-             license = \"MIT\"\n\
-             status = \"approved_index\"\n"
+             license = \"MIT\"\n"
         ),
     )
     .expect("config written");
     config
+}
+
+/// Asserts the `add --json` report of a successful tag-pin add: the acme
+/// library ingests chunks and carries the tag's commit SHA.
+fn assert_added_report(added: &Value, tag_sha: &str) {
+    assert_eq!(added["library"], "acme");
+    assert_eq!(added["version"], "v1.0.0");
+    assert!(
+        added["chunks"].as_u64().expect("chunks") > 0,
+        "the fixture docs ingest: {added}"
+    );
+    assert_eq!(
+        added["commit_sha"], tag_sha,
+        "the report carries the tag's commit: {added}"
+    );
+}
+
+/// Asserts the `list --json` results of a successful tag-pin add: exactly
+/// one git source at the pinned version carrying the tag's commit SHA.
+fn assert_list_report(list: &Value, tag_sha: &str) {
+    let results = list["results"].as_array().expect("results");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["kind"], "git");
+    assert_eq!(results[0]["version"], "v1.0.0");
+    assert_eq!(
+        results[0]["commit_sha"], tag_sha,
+        "list shows the capture commit: {results:?}"
+    );
 }
 
 /// A tag-pin `add --kind git` against a local fixture repo publishes, and
@@ -71,16 +98,7 @@ fn add_git_tag_pin_publishes_and_list_shows_commit_sha() {
     );
     assert_eq!(code, 0, "stderr: {stderr}");
     let added: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
-    assert_eq!(added["library"], "acme");
-    assert_eq!(added["version"], "v1.0.0");
-    assert!(
-        added["chunks"].as_u64().expect("chunks") > 0,
-        "the fixture docs ingest: {added}"
-    );
-    assert_eq!(
-        added["commit_sha"], repo.tag_sha,
-        "the report carries the tag's commit: {added}"
-    );
+    assert_added_report(&added, &repo.tag_sha);
 
     let (code, stdout, stderr) = output(
         env.cmd(),
@@ -95,14 +113,7 @@ fn add_git_tag_pin_publishes_and_list_shows_commit_sha() {
     );
     assert_eq!(code, 0, "stderr: {stderr}");
     let list: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
-    let results = list["results"].as_array().expect("results");
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0]["kind"], "git");
-    assert_eq!(results[0]["version"], "v1.0.0");
-    assert_eq!(
-        results[0]["commit_sha"], repo.tag_sha,
-        "list shows the capture commit: {results:?}"
-    );
+    assert_list_report(&list, &repo.tag_sha);
 }
 
 /// A git add without `--version` has no pin to resolve: usage error, no

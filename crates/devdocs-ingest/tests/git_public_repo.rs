@@ -4,15 +4,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use devdocs_ingest::guard::FetchGuard;
 use devdocs_ingest::{GitPin, IngestJob, gate_fetch};
-use devdocs_model::config::{
-    Config, DEFAULT_GIT_EXTENSIONS, FetchConfig, IndexConfig, IngestConfig, SearchConfig,
-    SourceConfig,
-};
+use devdocs_model::config::{Config, SourceConfig};
+use devdocs_testkit::base_config;
 use tempfile::tempdir;
 use url::Url;
 
@@ -24,42 +21,19 @@ const REPO_URL: &str = "https://github.com/dtolnay/prettyplease";
 
 /// A config with the public repo registered as the `acme` git source.
 fn config(url: &Url) -> Config {
-    let mut sources = BTreeMap::new();
-    sources.insert(
+    let mut config = base_config();
+    config.sources.insert(
         String::from("acme"),
         SourceConfig {
             kind: Some(String::from("git")),
             url: Some(url.to_string()),
             license: Some(String::from("MIT")),
-            status: Some(String::from("approved_index")),
+            attribution: None,
+            expires: None,
             refresh_days: None,
         },
     );
-    Config {
-        fetch: FetchConfig {
-            concurrency: 4,
-            timeout_ms: 15_000,
-            max_bytes: 20 * 1024 * 1024,
-            max_redirects: 3,
-            user_agent: String::from("devdocs/0.2.0"),
-        },
-        index: IndexConfig {
-            path: std::path::PathBuf::from("/tmp/unused.db"),
-            embeddings: false,
-        },
-        search: SearchConfig {
-            max_tokens_default: 2000,
-            limit_default: 8,
-            rrf_k: 60,
-        },
-        ingest: IngestConfig {
-            git_extensions: DEFAULT_GIT_EXTENSIONS
-                .iter()
-                .map(|ext| (*ext).to_owned())
-                .collect(),
-        },
-        sources,
-    }
+    config
 }
 
 /// A tag-pin clone of a small public repository through the full git

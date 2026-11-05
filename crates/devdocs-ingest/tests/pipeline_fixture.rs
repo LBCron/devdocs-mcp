@@ -3,15 +3,15 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use devdocs_ingest::fixture::FixtureSet;
 use devdocs_ingest::guard::FetchGuard;
 use devdocs_ingest::{IngestJob, gate_fetch};
-use devdocs_model::config::{Config, FetchConfig, IndexConfig, SearchConfig, SourceConfig};
+use devdocs_model::config::{Config, SourceConfig};
 use devdocs_model::error::{Error, UpstreamCode};
 use devdocs_model::source::LicenseStatus;
+use devdocs_testkit::base_config;
 use url::Url;
 
 /// The index body: one HTML page with a markdown twin, one HTML page
@@ -75,42 +75,19 @@ fn fixture_dir() -> tempfile::TempDir {
 
 /// A config with the acme source registered at the index stage.
 fn config() -> Config {
-    let mut sources = BTreeMap::new();
-    sources.insert(
+    let mut config = base_config();
+    config.sources.insert(
         String::from("acme"),
         SourceConfig {
             kind: Some(String::from("llms_txt")),
             url: Some(String::from("https://docs.acme.test/llms.txt")),
             license: Some(String::from("MIT")),
-            status: Some(String::from("approved_index")),
+            attribution: None,
+            expires: None,
             refresh_days: None,
         },
     );
-    Config {
-        fetch: FetchConfig {
-            concurrency: 4,
-            timeout_ms: 15_000,
-            max_bytes: 20 * 1024 * 1024,
-            max_redirects: 3,
-            user_agent: String::from("devdocs/0.2.0"),
-        },
-        index: IndexConfig {
-            path: std::path::PathBuf::from("/tmp/unused.db"),
-            embeddings: false,
-        },
-        search: SearchConfig {
-            max_tokens_default: 2000,
-            limit_default: 8,
-            rrf_k: 60,
-        },
-        ingest: devdocs_model::config::IngestConfig {
-            git_extensions: devdocs_model::config::DEFAULT_GIT_EXTENSIONS
-                .iter()
-                .map(|ext| (*ext).to_owned())
-                .collect(),
-        },
-        sources,
-    }
+    config
 }
 
 #[tokio::test]

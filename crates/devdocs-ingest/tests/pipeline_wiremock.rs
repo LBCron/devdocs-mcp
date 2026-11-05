@@ -10,7 +10,6 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use wiremock::matchers::path;
@@ -18,7 +17,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use devdocs_ingest::guard::FetchGuard;
 use devdocs_ingest::{IngestError, IngestJob};
-use devdocs_model::config::{Config, FetchConfig, IndexConfig, SearchConfig, SourceConfig};
+use devdocs_model::config::{Config, SourceConfig};
+use devdocs_testkit::base_config;
 
 /// The index body: one markdown page. The link is relative, so it joins
 /// against the wiremock base URL the index actually came from.
@@ -36,42 +36,19 @@ const INTRO: &str = concat!(
 
 /// A config with the acme source registered at the wiremock index URL.
 fn config(index_url: &str) -> Config {
-    let mut sources = BTreeMap::new();
-    sources.insert(
+    let mut config = base_config();
+    config.sources.insert(
         String::from("acme"),
         SourceConfig {
             kind: Some(String::from("llms_txt")),
             url: Some(index_url.to_owned()),
             license: Some(String::from("MIT")),
-            status: Some(String::from("approved_index")),
+            attribution: None,
+            expires: None,
             refresh_days: None,
         },
     );
-    Config {
-        fetch: FetchConfig {
-            concurrency: 4,
-            timeout_ms: 15_000,
-            max_bytes: 20 * 1024 * 1024,
-            max_redirects: 3,
-            user_agent: String::from("devdocs/0.2.0"),
-        },
-        index: IndexConfig {
-            path: std::path::PathBuf::from("/tmp/unused.db"),
-            embeddings: false,
-        },
-        search: SearchConfig {
-            max_tokens_default: 2000,
-            limit_default: 8,
-            rrf_k: 60,
-        },
-        ingest: devdocs_model::config::IngestConfig {
-            git_extensions: devdocs_model::config::DEFAULT_GIT_EXTENSIONS
-                .iter()
-                .map(|ext| (*ext).to_owned())
-                .collect(),
-        },
-        sources,
-    }
+    config
 }
 
 /// A guard for the config with the test-double exception on: the wiremock
