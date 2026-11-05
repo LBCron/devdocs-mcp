@@ -3,7 +3,7 @@ type: guide
 title: Security Implementation
 description: The mapping from the research threat model to concrete controls in code, the fetch-guard invariants and tests, injection-filter operations, storage controls, and the security checklist.
 tags: [devdocs, security, ssrf, injection, licensing]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-06T18:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -52,8 +52,8 @@ The blocklist has no config escape. The one exception is in test code: the guard
 
 - argv arrays only. No shell, no string concatenation into commands.
 - `GIT_TERMINAL_PROMPT=0`, `GIT_CONFIG_NOSYSTEM=1` on every invocation.
-- Clone with hooks and filters disabled: `git clone --config core.hooksPath=/dev/null --config filter.lfs.process= --filter=blob:none` where supported, and a docs-only sparse checkout for large repos. A malicious repo cannot run checkout hooks through this path.
-- Remote URLs come from config or CLI, never from fetched content. A source URL that changes between plan and fetch aborts the run.
+- Clone with hooks and filters disabled: `git clone --config core.hooksPath=/dev/null --config filter.lfs.process= --filter=blob:none` where supported, and a docs-only sparse checkout for large repos (deferred; recorded in [07](07-ingest-pipeline.md) §Git adapter). A malicious repo cannot run checkout hooks through this path.
+- Remote URLs come from config or CLI, never from fetched content. A source URL that changes between plan and fetch aborts the run. Transport URLs are passed to git with the operator's own privilege and no scheme is restricted — `file://` stays allowed for fixtures and tests, so an `ext::` URL would run a command with operator privilege; the operator's own config and CLI are the trust boundary.
 - The temp clone directory sits under `DEVDOCS_HOME/tmp` with mode 0700 and is removed after the run.
 
 ## Injection filter operations

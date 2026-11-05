@@ -210,7 +210,7 @@ fn withdraw_on_terminal_refusal(config: &Config, index_url: &Url) -> Result<(), 
 /// happens before any publish.
 ///
 /// The effective kind dispatches the adapter (docs/implementation/07
-/// §Adapter ladder): an explicit `--kind` wins, then the config
+/// §Priority ladder): an explicit `--kind` wins, then the config
 /// `[sources.<name>].kind`, then `llms_txt`.
 ///
 /// # Errors
