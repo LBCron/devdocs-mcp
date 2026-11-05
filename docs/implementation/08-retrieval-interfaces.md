@@ -3,7 +3,7 @@ type: guide
 title: Retrieval and Interfaces (L3 + L4)
 description: The hybrid retrieval pipeline, version resolution, budget enforcement, fallback ladder, the result shape, the full CLI contract, and the MCP adapter.
 tags: [devdocs, retrieval, cli, mcp, rrf, max-tokens]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-05T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -111,6 +111,8 @@ The unified shape for CLI JSON and MCP structured output (research: retrieval-de
 ```
 
 Session dedup: with `--session <id>` (and session id in MCP calls), served chunk ids land in `session_trajectory`, and later queries in the same session down-rank already-served chunks instead of re-serving identical text (research: retrieval-design.md §3.8. The Ref measurement motivating it: −5,500 tokens average per request).
+
+Ref derivation: a chunk with an empty section path (content before the first heading) gets the placeholder segment `index` in its ref — `docs://<library>/v<version>/index`. A ref that names several chunks (two pages with the same section title) serves the lowest chunk id.
 
 ## CLI contract
 
