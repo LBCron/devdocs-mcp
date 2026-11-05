@@ -4,13 +4,78 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use devdocs_retrieve::budget::pack;
+use devdocs_retrieve::budget::{Packed, pack};
 use devdocs_store::Hit;
 use proptest::prelude::*;
 
 /// Builds a hit from the proptest's token count and id.
 fn hit(chunk_id: u64, token_count: u32) -> Hit {
     devdocs_testkit::sample_hit(chunk_id.cast_signed(), token_count)
+}
+
+/// The budget bounds: rank 1 itself may exceed the budget — the oversize
+/// case is chunked at open time, never dropped (docs/implementation/08
+/// §Fusion and budget) — so the tail and the total stay within
+/// `max_tokens` and `max(max_tokens, rank 1)` respectively.
+fn assert_budget_bounds(packed: &Packed, max_tokens: u64) -> Result<(), TestCaseError> {
+    let rank_one: u64 = packed
+        .items
+        .first()
+        .map_or(0, |(hit, _)| u64::from(hit.token_count));
+    let tail: u64 = packed
+        .items
+        .iter()
+        .skip(1)
+        .map(|(hit, _)| u64::from(hit.token_count))
+        .sum();
+    let total: u64 = packed
+        .items
+        .iter()
+        .map(|(hit, _)| u64::from(hit.token_count))
+        .sum();
+    prop_assert!(tail <= max_tokens, "rank-1 tail {tail} > {max_tokens}");
+    prop_assert!(
+        total <= max_tokens.max(rank_one),
+        "total {total} > max(max_tokens {max_tokens}, rank 1 {rank_one})"
+    );
+    Ok(())
+}
+
+/// The cut shape: a truncated pack keeps a maximal prefix — it stops at
+/// the limit or at the first result that would exceed the budget — and
+/// reports the last served chunk id as the resume cursor. An untruncated
+/// pack serves the whole fusion order with no cursor.
+fn assert_cut_shape(
+    packed: &Packed,
+    fused: &[(Hit, f64)],
+    limit: usize,
+    max_tokens: u64,
+) -> Result<(), TestCaseError> {
+    if fused.is_empty() {
+        prop_assert_eq!(packed.items.len(), 0);
+        prop_assert_eq!(packed.truncated, false);
+        prop_assert_eq!(packed.next_cursor.clone(), None);
+        return Ok(());
+    }
+    if !packed.truncated {
+        prop_assert_eq!(packed.items.len(), fused.len());
+        prop_assert_eq!(packed.next_cursor.clone(), None);
+        return Ok(());
+    }
+    let kept = packed.items.len();
+    prop_assert!(kept < fused.len());
+    let used: u64 = packed
+        .items
+        .iter()
+        .map(|(hit, _)| u64::from(hit.token_count))
+        .sum();
+    let next: u64 = u64::from(fused[kept].0.token_count);
+    prop_assert!(kept == limit || used + next > max_tokens, "cut too early");
+    prop_assert_eq!(
+        packed.next_cursor.clone(),
+        Some(packed.items.last().unwrap().0.chunk_id.to_string())
+    );
+    Ok(())
 }
 
 proptest! {
@@ -40,60 +105,7 @@ proptest! {
             prop_assert_eq!(kept.0.chunk_id, expected.0.chunk_id);
         }
 
-        // The budget holds for everything after rank 1. Rank 1 itself may
-        // exceed the budget — the oversize case is chunked at open time,
-        // never dropped (docs/implementation/08 §Fusion and budget). The
-        // total never exceeds the budget either, for the same reason.
-        let after_rank_one: u64 = packed
-            .items
-            .iter()
-            .skip(1)
-            .map(|(hit, _)| u64::from(hit.token_count))
-            .sum();
-        prop_assert!(after_rank_one <= max_tokens, "rank-1 tail {after_rank_one} > {max_tokens}");
-        let rank_one: u64 = packed
-            .items
-            .first()
-            .map_or(0, |(hit, _)| u64::from(hit.token_count));
-        let total: u64 = packed
-            .items
-            .iter()
-            .map(|(hit, _)| u64::from(hit.token_count))
-            .sum();
-        prop_assert!(
-            total <= max_tokens.max(rank_one),
-            "total {total} > max(max_tokens {max_tokens}, rank 1 {rank_one})"
-        );
-
-        // The pack stops at the first result that would exceed the budget:
-        // when anything was cut, the very next fusion position is the cut
-        // point, so the kept prefix is maximal. The accumulator includes
-        // rank 1, so this also covers the oversize rank-1 case — no later
-        // result can fit behind it.
-        if fused.is_empty() {
-            prop_assert_eq!(packed.items.len(), 0);
-            prop_assert_eq!(packed.truncated, false);
-            prop_assert_eq!(packed.next_cursor, None);
-        } else if packed.truncated {
-            let kept = packed.items.len();
-            prop_assert!(kept < fused.len());
-            let used: u64 = packed
-                .items
-                .iter()
-                .map(|(hit, _)| u64::from(hit.token_count))
-                .sum();
-            let next: u64 = u64::from(fused[kept].0.token_count);
-            prop_assert!(
-                kept == limit || used + next > max_tokens,
-                "cut too early"
-            );
-            prop_assert_eq!(
-                packed.next_cursor,
-                Some(packed.items.last().unwrap().0.chunk_id.to_string())
-            );
-        } else {
-            prop_assert_eq!(packed.items.len(), fused.len());
-            prop_assert_eq!(packed.next_cursor, None);
-        }
+        assert_budget_bounds(&packed, max_tokens)?;
+        assert_cut_shape(&packed, &fused, limit, max_tokens)?;
     }
 }

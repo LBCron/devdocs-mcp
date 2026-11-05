@@ -155,28 +155,20 @@ fn open_under_a_tiny_budget_truncates_and_carries_a_cursor() {
     open1.next_cursor.expect("cursor present");
 }
 
-/// Resuming through the cursor tiles the chunk: following `next_cursor`
-/// to the end joins to the exact served text of the default-budget open,
-/// with no page repeated and no page missing.
-#[test]
-fn cursor_resume_tiles_the_whole_chunk() {
-    let (env, config) = indexed_env();
-    let doc_ref = indexed_doc(&env, &config).doc_ref;
+/// Opens `doc_ref` under a one-token budget and follows `next_cursor`
+/// to the end, returning the joined snippets and the page count. The
+/// cap keeps a cursor that never settles from hanging the test.
+fn tiled_tiny_budget_pages(
+    env: &common::Env,
+    doc_ref: &str,
+    config: &std::path::Path,
+) -> (String, usize) {
     let cfg = ["--config", config.to_str().expect("config path")];
-
-    // The whole chunk under the default budget, for the tiling comparison.
-    let (code, stdout, stderr) = output(env.cmd(), &["open", &doc_ref, "--json", cfg[0], cfg[1]]);
-    assert_eq!(code, 0, "open failed: {stderr}");
-    let full: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
-    let whole = full.results.first().expect("full page").snippet.clone();
-
-    // Page 1 under a tiny budget, then follow the cursor to the end. The
-    // cap keeps a cursor that never settles from hanging the test.
     let (code, stdout, stderr) = output(
         env.cmd(),
         &[
             "open",
-            &doc_ref,
+            doc_ref,
             "--max-tokens",
             "1",
             "--json",
@@ -200,7 +192,7 @@ fn cursor_resume_tiles_the_whole_chunk() {
             env.cmd(),
             &[
                 "open",
-                &doc_ref,
+                doc_ref,
                 "--max-tokens",
                 "1",
                 "--cursor",
@@ -213,6 +205,25 @@ fn cursor_resume_tiles_the_whole_chunk() {
         assert_eq!(code, 0, "open resume failed: {stderr}");
         page = serde_json::from_str(stdout.trim()).expect("envelope");
     }
+    (tiled, pages)
+}
+
+/// Resuming through the cursor tiles the chunk: following `next_cursor`
+/// to the end joins to the exact served text of the default-budget open,
+/// with no page repeated and no page missing.
+#[test]
+fn cursor_resume_tiles_the_whole_chunk() {
+    let (env, config) = indexed_env();
+    let doc_ref = indexed_doc(&env, &config).doc_ref;
+    let cfg = ["--config", config.to_str().expect("config path")];
+
+    // The whole chunk under the default budget, for the tiling comparison.
+    let (code, stdout, stderr) = output(env.cmd(), &["open", &doc_ref, "--json", cfg[0], cfg[1]]);
+    assert_eq!(code, 0, "open failed: {stderr}");
+    let full: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
+    let whole = full.results.first().expect("full page").snippet.clone();
+
+    let (tiled, pages) = tiled_tiny_budget_pages(&env, &doc_ref, &config);
     assert!(pages > 1, "a tiny budget must cut the chunk into pages");
     assert_eq!(tiled, whole, "the pages tile the whole chunk exactly");
 }
