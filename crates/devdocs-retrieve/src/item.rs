@@ -32,10 +32,7 @@ pub fn to_result_item(
         section: hit.section_path.join(" > "),
         snippet: hit.snippet.clone().unwrap_or_else(|| hit.text.clone()),
         examples: Vec::new(),
-        source_url: hit
-            .page_url
-            .clone()
-            .unwrap_or_else(|| hit.source_url.clone()),
+        source_url: hit.result_source_url().to_owned(),
         source_commit: hit.source_commit.clone().unwrap_or_default(),
         requested_version: requested.map(str::to_owned),
         served_version: hit.version.clone(),

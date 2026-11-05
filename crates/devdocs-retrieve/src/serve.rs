@@ -427,10 +427,7 @@ fn served_item(
         section: chunk.section_path.join(" > "),
         snippet,
         examples: Vec::new(),
-        source_url: chunk
-            .page_url
-            .clone()
-            .unwrap_or_else(|| chunk.source_url.clone()),
+        source_url: chunk.result_source_url().to_owned(),
         source_commit: chunk.source_commit.clone().unwrap_or_default(),
         requested_version: requested_version.map(str::to_owned),
         served_version: chunk.version.clone(),
@@ -530,4 +527,49 @@ pub fn versions(
         next_cursor: None,
         served_at: now_rfc3339(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::served_item;
+    use devdocs_store::Hit;
+
+    fn chunk() -> Hit {
+        let mut chunk = devdocs_testkit::sample_hit(1, 42);
+        chunk.text = "text".to_owned();
+        chunk.content_hash = [0xab; 32];
+        chunk.source_url = "https://example.test/next".to_owned();
+        chunk
+    }
+
+    /// The served item cites the chunk's page URL when the chunk carries
+    /// one, and falls back to the source origin URL otherwise
+    /// (docs/implementation/08 §Result envelope).
+    #[test]
+    fn served_item_prefers_the_page_url() {
+        let mut with_page = chunk();
+        with_page.page_url = Some("https://example.test/next/routing.html".to_owned());
+        let item = served_item(
+            &with_page,
+            "docs://next.js/v16.2.9/index",
+            None,
+            "s".to_owned(),
+            42,
+            1.0,
+        );
+        assert_eq!(item.source_url, "https://example.test/next/routing.html");
+
+        let without_page = chunk();
+        let item = served_item(
+            &without_page,
+            "docs://next.js/v16.2.9/index",
+            None,
+            "s".to_owned(),
+            42,
+            1.0,
+        );
+        assert_eq!(item.source_url, "https://example.test/next");
+    }
 }

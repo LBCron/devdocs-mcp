@@ -60,6 +60,15 @@ pub struct Hit {
     pub license_status: String,
 }
 
+impl Hit {
+    /// The URL a result cites: the linked page URL when the chunk
+    /// carries one, else the source origin URL.
+    #[must_use]
+    pub fn result_source_url(&self) -> &str {
+        self.page_url.as_deref().unwrap_or(&self.source_url)
+    }
+}
+
 /// Reads a `chunks.section_path` JSON string array out of a row column.
 fn section_path(
     row: &rusqlite::Row<'_>,
