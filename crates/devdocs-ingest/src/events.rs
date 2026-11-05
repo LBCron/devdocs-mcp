@@ -41,6 +41,11 @@ pub struct IngestEvents {
     /// `llms-full.txt` exports found by the probe and ingested as one
     /// pre-built document each.
     pub full_exports: usize,
+    /// Commit pins the full-clone fallback served: a server without
+    /// `allowReachableSHA1InWant` rejects the SHA fetch, so the clone
+    /// re-runs full and checks the commit out
+    /// (docs/implementation/07 §Git adapter).
+    pub sha_fetch_fallbacks: usize,
 }
 
 impl IngestEvents {
@@ -75,6 +80,10 @@ impl IngestEvents {
             ),
             ("subpath indexes scoped", self.subpath_indexes),
             ("llms-full exports ingested", self.full_exports),
+            (
+                "commit pins served by the full-clone fallback",
+                self.sha_fetch_fallbacks,
+            ),
         ];
         for (category, count) in counters {
             if count > 0 {

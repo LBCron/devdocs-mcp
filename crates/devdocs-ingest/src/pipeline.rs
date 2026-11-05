@@ -9,6 +9,10 @@
 //! the cap, so a timed-out run reports the publish's own result and the
 //! store state never diverges from the reported outcome. A run that never
 //! reaches publish leaves the store untouched.
+//!
+//! The git entry point ([`IngestJob::run_git`]) runs the same gate and the
+//! same dedup → chrome → segment → publish second half over the git
+//! adapter's docs walk (docs/implementation/07 §Git adapter).
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -55,13 +59,14 @@ pub struct IngestOutcome {
     pub events: IngestEvents,
 }
 
-/// One ingest run: the resolved config, the guard, and the optional fixture
-/// replay set.
+/// One ingest run: the resolved config, the guard, the optional fixture
+/// replay set, and the git entry point's extra per-command config.
 #[derive(Clone)]
 pub struct IngestJob<'a> {
     config: &'a Config,
     guard: &'a FetchGuard,
     fixture: Option<&'a FixtureSet>,
+    extra_git_config: Vec<String>,
 }
 
 impl std::fmt::Debug for IngestJob<'_> {
@@ -80,7 +85,18 @@ impl<'a> IngestJob<'a> {
             config,
             guard,
             fixture,
+            extra_git_config: Vec::new(),
         }
+    }
+
+    /// Adds per-command `-c key=value` git config for the git entry point
+    /// ([`IngestJob::run_git`]). The seam exists for tests that must pin a
+    /// git protocol version (for example `protocol.version=0` to exercise
+    /// the commit-pin fallback); production callers leave it empty.
+    #[must_use]
+    pub fn with_extra_git_config(mut self, extra: &[String]) -> Self {
+        self.extra_git_config = extra.to_vec();
+        self
     }
 
     /// Runs the pipeline: gate, fetch index, parse, fetch pages, segment,
@@ -103,17 +119,7 @@ impl<'a> IngestJob<'a> {
         library: &str,
         version: &str,
     ) -> Result<IngestOutcome, IngestError> {
-        let grant = crate::license::gate_fetch(self.config, index_url)?;
-        // The published library identity is the registry entry: a caller
-        // that passes another name would publish approved content under an
-        // arbitrary name, so the run refuses instead (docs/implementation/07
-        // §License gate).
-        if library != grant.name {
-            return Err(IngestError::LicenseNameMismatch {
-                expected: grant.name.clone(),
-                actual: library.to_owned(),
-            });
-        }
+        let grant = self.gate(index_url, library)?;
         let prepared = tokio::time::timeout(
             TOTAL_INGEST_CAP,
             self.prepare(index_url, library, version, &grant),
@@ -124,6 +130,122 @@ impl<'a> IngestJob<'a> {
         })??;
         self.publish(store, index_url, library, version, &grant, prepared)
             .await
+    }
+
+    /// Runs the git pipeline: gate, plan, clone and check the pin out,
+    /// walk the docs, segment, publish
+    /// (docs/implementation/07 §Git adapter). The license gate is the same
+    /// deny-by-default gate the llms.txt entry runs — the registry entry
+    /// must match `repo_url` exactly — and the published library identity
+    /// is the registry name, as in [`IngestJob::run`].
+    ///
+    /// The whole adapter — plan, clone, checkout, docs walk — is blocking
+    /// subprocess and filesystem work, so it runs inside one
+    /// `spawn_blocking`, the same executor-free contract rusqlite and CPU
+    /// work follow. The total cap bounds the plan-fetch-segment work only;
+    /// the publish runs after the cap, exactly as in [`IngestJob::run`].
+    ///
+    /// # Errors
+    /// [`IngestError`] when any stage fails; the store stays untouched on
+    /// any failure.
+    pub async fn run_git(
+        &self,
+        store: std::sync::Arc<Store>,
+        repo_url: &Url,
+        library: &str,
+        version: &str,
+        pin: &str,
+        data_root: &std::path::Path,
+    ) -> Result<IngestOutcome, IngestError> {
+        let grant = self.gate(repo_url, library)?;
+        let prepared = tokio::time::timeout(
+            TOTAL_INGEST_CAP,
+            self.prepare_git(repo_url, library, version, pin, data_root, &grant),
+        )
+        .await
+        .map_err(|_| IngestError::TotalTimeout {
+            seconds: TOTAL_INGEST_CAP.as_secs(),
+        })??;
+        self.publish(store, repo_url, library, version, &grant, prepared)
+            .await
+    }
+
+    /// The license gate both entry points run: the deny-by-default fetch
+    /// gate, then the registry-name check — the published library identity
+    /// is the registry entry, so a caller that passes another name would
+    /// publish approved content under an arbitrary name, and the run
+    /// refuses instead (docs/implementation/07 §License gate).
+    fn gate(
+        &self,
+        origin_url: &Url,
+        library: &str,
+    ) -> Result<crate::license::LicenseGrant, IngestError> {
+        let grant = crate::license::gate_fetch(self.config, origin_url)?;
+        if library != grant.name {
+            return Err(IngestError::LicenseNameMismatch {
+                expected: grant.name.clone(),
+                actual: library.to_owned(),
+            });
+        }
+        Ok(grant)
+    }
+
+    /// Plans, clones, and walks one git source inside the total-cap
+    /// timeout: the plan pins the URL as the single source of truth, the
+    /// fetch echoes the same URL back (a mismatch fails as
+    /// `GIT_URL_MISMATCH`), and the walk output joins the same
+    /// dedup/chrome/segment path the llms.txt corpus takes. Publishes
+    /// nothing.
+    async fn prepare_git(
+        &self,
+        repo_url: &Url,
+        library: &str,
+        version: &str,
+        pin: &str,
+        data_root: &std::path::Path,
+        grant: &crate::license::LicenseGrant,
+    ) -> Result<Prepared, IngestError> {
+        let url = repo_url.as_str().to_owned();
+        let pin = pin.to_owned();
+        let data_root = data_root.to_path_buf();
+        let extensions = self.config.ingest.git_extensions.clone();
+        let extra_config = self.extra_git_config.clone();
+        let fetched = tokio::task::spawn_blocking(move || {
+            let git_plan = crate::git::plan(&url, &pin, &data_root)?;
+            let extra: Vec<&str> = extra_config.iter().map(String::as_str).collect();
+            git_plan.fetch_with(&url, &extensions, &extra)
+        })
+        .await
+        .map_err(|join| IngestError::Join(join.to_string()))??;
+
+        let mut run = RunState::default();
+        run.events.sha_fetch_fallbacks = usize::from(fetched.fallback_used);
+        if fetched.skipped_non_utf8 > 0 {
+            tracing::warn!(
+                count = fetched.skipped_non_utf8,
+                "git docs walk skipped files that are not valid UTF-8"
+            );
+        }
+        let run = self
+            .segment_corpus(fetched.docs, library, version, run, repo_url.as_str())
+            .await?;
+
+        let record = SourceRecord {
+            id: devdocs_model::SourceId(0),
+            library: library.to_owned(),
+            version: version.to_owned(),
+            kind: SourceKind::Git,
+            origin_url: repo_url.clone(),
+            commit_sha: Some(fetched.commit_sha),
+            license: grant.license.clone(),
+            license_status: grant.status,
+            fetched_at: OffsetDateTime::now_utc(),
+        };
+        Ok(Prepared {
+            record,
+            new_chunks: run.new_chunks,
+            events: run.events,
+        })
     }
 
     /// Fetches and parses one llms.txt index into a scope for its
@@ -299,18 +421,55 @@ impl<'a> IngestJob<'a> {
         // from: a redirect can move it to another directory, and the
         // pre-redirect URL would join every link to the wrong base.
         let root = self.load_scope(index_url).await?;
-        let segmenter = Segmenter::new()?;
         let mut run = RunState::default();
         let mut docs: Vec<PageDocument> = Vec::new();
         let mut seen: HashMap<String, usize> = HashMap::new();
         self.walk_scopes(root, &mut docs, &mut seen, &mut run)
             .await?;
 
-        // Normalization runs off the async path over the whole corpus:
-        // comrak parsing and hashing are CPU work. Dedup first, so a
-        // duplicate page cannot skew the chrome frequency counts; then the
-        // chrome strip (docs/implementation/07 §Normalization pipeline).
+        let run = self
+            .segment_corpus(docs, library, version, run, index_url.as_str())
+            .await?;
+
+        let record = SourceRecord {
+            id: devdocs_model::SourceId(0),
+            library: library.to_owned(),
+            version: version.to_owned(),
+            kind: SourceKind::LlmsTxt,
+            origin_url: index_url.clone(),
+            commit_sha: None,
+            license: grant.license.clone(),
+            license_status: grant.status,
+            fetched_at: OffsetDateTime::now_utc(),
+        };
+        Ok(Prepared {
+            record,
+            new_chunks: run.new_chunks,
+            events: run.events,
+        })
+    }
+
+    /// The shared second half of both entry points
+    /// (docs/implementation/07 §Normalization pipeline): dedup, the chrome
+    /// strip, and segmentation over the buffered corpus, all off the async
+    /// path — comrak parsing and hashing are CPU work, so the strip runs
+    /// in one `spawn_blocking` and each page's segmentation in another.
+    /// A corpus that segments to zero chunks — no ingestable pages at all,
+    /// or only heading-only ones — must not publish an empty generation
+    /// over the active one (docs/implementation/07 §Atomic publish), so
+    /// the phase fails with `NoIngestablePages` against `origin_url`.
+    async fn segment_corpus(
+        &self,
+        docs: Vec<PageDocument>,
+        library: &str,
+        version: &str,
+        mut run: RunState,
+        origin_url: &str,
+    ) -> Result<RunState, IngestError> {
+        // Dedup first, so a duplicate page cannot skew the chrome
+        // frequency counts; then the chrome strip.
         let (dedup_dropped, chrome_report, docs) = tokio::task::spawn_blocking(move || {
+            let mut docs = docs;
             let dropped = dedup_pages(&mut docs);
             let report = crate::chrome::strip_chrome(&mut docs);
             (dropped, report, docs)
@@ -323,6 +482,7 @@ impl<'a> IngestJob<'a> {
 
         // Segment every stripped document (docs/implementation/07
         // §Segmentation algorithm), one spawn_blocking per page.
+        let segmenter = Segmenter::new()?;
         for doc in &docs {
             let (chunks, stats) =
                 segment_page(&segmenter, library, version, doc.body.clone()).await?;
@@ -341,31 +501,12 @@ impl<'a> IngestJob<'a> {
             run.events.pages += 1;
         }
 
-        // A run that segments to zero chunks — no markdown links at all, or
-        // only heading-only pages — must not publish an empty generation
-        // over the active one (docs/implementation/07 §Atomic publish).
         if run.new_chunks.is_empty() {
             return Err(IngestError::NoIngestablePages {
-                index: index_url.to_string(),
+                index: origin_url.to_owned(),
             });
         }
-
-        let record = SourceRecord {
-            id: devdocs_model::SourceId(0),
-            library: library.to_owned(),
-            version: version.to_owned(),
-            kind: SourceKind::LlmsTxt,
-            origin_url: index_url.clone(),
-            commit_sha: None,
-            license: grant.license.clone(),
-            license_status: grant.status,
-            fetched_at: OffsetDateTime::now_utc(),
-        };
-        Ok(Prepared {
-            record,
-            new_chunks: run.new_chunks,
-            events: run.events,
-        })
+        Ok(run)
     }
 
     /// Ingests one already-resolved page link: fetch, prefer the v2
@@ -496,11 +637,12 @@ impl<'a> IngestJob<'a> {
     }
 
     /// Publishes the prepared run outside the total-cap timeout and reports
-    /// the publish's own result.
+    /// the publish's own result. `origin_url` is the source URL either
+    /// entry point ran against — the llms.txt index or the git repository.
     async fn publish(
         &self,
         store: std::sync::Arc<Store>,
-        index_url: &Url,
+        origin_url: &Url,
         library: &str,
         version: &str,
         grant: &crate::license::LicenseGrant,
@@ -521,7 +663,7 @@ impl<'a> IngestJob<'a> {
         Ok(IngestOutcome {
             library: library.to_owned(),
             version: version.to_owned(),
-            origin_url: index_url.to_string(),
+            origin_url: origin_url.to_string(),
             license_status: grant.status,
             pages: events.pages,
             skipped_pages: events.skipped_pages,

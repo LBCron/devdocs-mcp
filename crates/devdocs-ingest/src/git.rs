@@ -206,9 +206,10 @@ impl GitPlan {
     }
 
     /// [`GitPlan::fetch`] with extra per-command `-c key=value` config.
-    /// The seam exists for tests that must pin a git protocol version;
-    /// production callers go through `fetch`.
-    fn fetch_with(
+    /// The seam exists for tests that must pin a git protocol version
+    /// (for example `protocol.version=0` to exercise the commit-pin
+    /// fallback); production callers go through `fetch`.
+    pub(crate) fn fetch_with(
         &self,
         url: &str,
         extensions: &[String],
