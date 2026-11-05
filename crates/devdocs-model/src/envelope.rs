@@ -112,6 +112,9 @@ pub struct SourceSummary {
     pub license_status: String,
     /// Whether the source is active in search.
     pub active: bool,
+    /// The commit the content was captured at, when the adapter records
+    /// one (git sources only).
+    pub commit_sha: Option<String>,
 }
 
 /// The RFC 3339 UTC timestamp envelopes carry as `served_at`; the fallback
@@ -160,6 +163,7 @@ mod tests {
             kind: String::from("llms_txt"),
             license_status: String::from("approved_index"),
             active: true,
+            commit_sha: None,
         };
         let text = serde_json::to_string(&summary).unwrap();
         let back: SourceSummary = serde_json::from_str(&text).unwrap();

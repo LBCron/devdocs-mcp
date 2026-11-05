@@ -209,13 +209,18 @@ fn withdraw_on_terminal_refusal(config: &Config, index_url: &Url) -> Result<(), 
 /// points): the publish-time withdrawal cannot run, because this refusal
 /// happens before any publish.
 ///
+/// The effective kind dispatches the adapter (docs/implementation/07
+/// §Adapter ladder): an explicit `--kind` wins, then the config
+/// `[sources.<name>].kind`, then `llms_txt`.
+///
 /// # Errors
 /// [`Error`] for the gate refusal (`FETCH_BLOCKED`), guard refusals and
-/// failures, parse failures, and store failures.
+/// failures, parse failures, git failures, and store failures.
 pub fn run_add(
     config: &Config,
     source: &str,
     version: Option<&str>,
+    kind: Option<&str>,
     fixture_dir: Option<&std::path::Path>,
 ) -> Result<serde_json::Value, Error> {
     let index_url = Url::parse(source).map_err(|e| Error::Usage(format!("bad source URL: {e}")))?;
@@ -229,13 +234,40 @@ pub fn run_add(
         }
     };
 
-    // 2. The fixture set, when replaying.
+    // 2. The effective kind. `--kind` wins, then the config entry.
+    let effective_kind = kind
+        .or_else(|| {
+            config
+                .sources
+                .get(&grant.name)
+                .and_then(|entry| entry.kind.as_deref())
+        })
+        .unwrap_or("llms_txt");
+
+    if effective_kind == "git" {
+        // `--fixture` replays recorded HTTP responses; the git adapter has
+        // no replay surface, so a silent drop would run against the network.
+        if fixture_dir.is_some() {
+            return Err(Error::Usage(
+                "--fixture replays HTTP recordings and does not apply to git sources".to_owned(),
+            ));
+        }
+        // The pin must be explicit: there is no "latest" tag to resolve.
+        let Some(pin) = version else {
+            return Err(Error::Usage(
+                "git sources require --version (a tag or a commit SHA)".to_owned(),
+            ));
+        };
+        return run_add_git(config, &index_url, &grant.name, pin);
+    }
+
+    // 3. The fixture set, when replaying.
     let fixture = fixture_dir
         .map(FixtureSet::load)
         .transpose()
         .map_err(map_ingest_error)?;
 
-    // 3. The guard and the ingest run. The tokio runtime is local to the
+    // 4. The guard and the ingest run. The tokio runtime is local to the
     // command: the rest of the CLI stays synchronous.
     let guard = devdocs_ingest::FetchGuard::from_fetch_config(&config.fetch);
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -254,16 +286,76 @@ pub fn run_add(
     // blocking task running; do not wait for it when the runtime drops.
     runtime.shutdown_background();
     let outcome = result.map_err(map_ingest_error)?;
+    add_report(&outcome, None)
+}
 
+/// Runs the git branch of `devdocs add`: the pin is the `--version` value
+/// (40 hex → commit pin, otherwise tag pin), the clone runs inside
+/// [`IngestJob::run_git`]'s `spawn_blocking` — not through the HTTP fetch
+/// guard, which does not govern the git transport
+/// (docs/implementation/07 §Git adapter) — and the version label is the
+/// pin itself.
+///
+/// # Errors
+/// [`Error`] for any ingest failure (`IngestJob::run_git` maps the whole
+/// plan/fetch/segment/publish chain), and store failures when reading back
+/// the published commit.
+fn run_add_git(
+    config: &Config,
+    repo_url: &Url,
+    library: &str,
+    pin: &str,
+) -> Result<serde_json::Value, Error> {
+    let guard = devdocs_ingest::FetchGuard::from_fetch_config(&config.fetch);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| Error::Upstream {
+            code: UpstreamCode::UpstreamError,
+            detail: format!("cannot start the async runtime: {e}"),
+        })?;
+
+    let store = open_store(config, false)?;
+    // The clone directory lands under the store's data root, the directory
+    // `open_store` already created with mode 0700.
+    let data_root = config.index.path.parent().map_or_else(
+        || std::path::PathBuf::from("."),
+        std::path::Path::to_path_buf,
+    );
+    let job = IngestJob::new(config, &guard, None);
+    let result =
+        runtime.block_on(job.run_git(Arc::clone(&store), repo_url, library, pin, pin, &data_root));
+    // A run that hit the total cap can leave its in-flight segmentation
+    // blocking task running; do not wait for it when the runtime drops.
+    runtime.shutdown_background();
+    let outcome = result.map_err(map_ingest_error)?;
+
+    // The commit provenance lives in the published source row, so the
+    // report reads it back from the store instead of threading it through
+    // the outcome type.
+    let commit_sha = store
+        .list_sources()
+        .map_err(|error| map_store_error(&error))?
+        .into_iter()
+        .find(|source| source.library == outcome.library && source.version == outcome.version)
+        .and_then(|source| source.commit_sha);
+    add_report(&outcome, commit_sha.as_deref())
+}
+
+/// The `add --json` report both adapters return; the event report also
+/// goes to stderr as log lines (the default filter is `warn`, so the lines
+/// surface only under `--verbose`)
+/// (docs/implementation/07 §Normalization pipeline).
+fn add_report(
+    outcome: &devdocs_ingest::IngestOutcome,
+    commit_sha: Option<&str>,
+) -> Result<serde_json::Value, Error> {
     tracing::info!(
         pages = outcome.pages,
         skipped = outcome.skipped_pages,
         chunks = outcome.chunks,
         "ingest finished"
     );
-    // The event report goes to stderr as log lines; the default filter is
-    // `warn`, so the lines surface only under `--verbose`
-    // (docs/implementation/07 §Normalization pipeline).
     outcome.events.log();
     // defensive: `IngestEvents` is a plain struct of integer counters, so
     // `serde_json::to_value` cannot fail on it; the mapping exists only to
@@ -280,6 +372,7 @@ pub fn run_add(
         "pages": outcome.pages,
         "skipped_pages": outcome.skipped_pages,
         "chunks": outcome.chunks,
+        "commit_sha": commit_sha,
         "events": events,
     }))
 }

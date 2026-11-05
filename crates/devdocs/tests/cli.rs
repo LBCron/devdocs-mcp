@@ -578,7 +578,8 @@ fn add_without_a_registry_entry_refuses_fetch_blocked() {
 }
 
 /// An unsupported `--kind` is a usage error, never a silent flag drop: the
-/// llms.txt pipeline must not run for a registered URL with `--kind git`.
+/// llms.txt pipeline must not run for a registered URL with an unknown
+/// kind (`openapi` has no adapter yet).
 #[test]
 fn add_rejects_an_unsupported_kind() {
     let env = Env::new();
@@ -592,7 +593,7 @@ fn add_rejects_an_unsupported_kind() {
             "add",
             "https://docs.acme.test/llms.txt",
             "--kind",
-            "git",
+            "openapi",
             "--fixture",
             fixture.to_str().expect("fixture path"),
             "--json",

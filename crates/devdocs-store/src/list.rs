@@ -7,15 +7,16 @@ use crate::error::StoreError;
 use crate::store::Store;
 
 impl Store {
-    /// Lists every source row: library, version, kind, license stage, and
-    /// the active flag, ordered by library then version.
+    /// Lists every source row: library, version, kind, license stage, the
+    /// active flag, and the capture commit when the adapter records one,
+    /// ordered by library then version.
     ///
     /// # Errors
     /// [`StoreError::Sql`] when the query fails.
     pub fn list_sources(&self) -> Result<Vec<SourceSummary>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
         let mut statement = conn.prepare(
-            "SELECT library, version, kind, license_status, active \
+            "SELECT library, version, kind, license_status, active, commit_sha \
              FROM sources ORDER BY library, version",
         )?;
         let rows = statement.query_map([], |row| {
@@ -42,6 +43,7 @@ impl Store {
                 kind: kind.as_str().to_owned(),
                 license_status: status.as_str().to_owned(),
                 active: active != 0,
+                commit_sha: row.get(5)?,
             })
         })?;
         let mut sources = Vec::new();
