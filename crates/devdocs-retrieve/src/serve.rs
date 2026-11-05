@@ -427,7 +427,10 @@ fn served_item(
         section: chunk.section_path.join(" > "),
         snippet,
         examples: Vec::new(),
-        source_url: chunk.source_url.clone(),
+        source_url: chunk
+            .page_url
+            .clone()
+            .unwrap_or_else(|| chunk.source_url.clone()),
         source_commit: chunk.source_commit.clone().unwrap_or_default(),
         requested_version: requested_version.map(str::to_owned),
         served_version: chunk.version.clone(),

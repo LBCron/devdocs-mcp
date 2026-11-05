@@ -1,6 +1,6 @@
 ---
 source: crates/devdocs/tests/search_cli.rs
-assertion_line: 130
+assertion_line: 53
 expression: envelope
 ---
 {
@@ -17,7 +17,7 @@ expression: envelope
       "served_version": "1.0",
       "snippet": "[acme 1.0 › Intro]\n\nThe Acme SDK ships a <mark>client</mark> for every runtime.",
       "source_commit": "",
-      "source_url": "https://docs.acme.test/llms.txt",
+      "source_url": "https://docs.acme.test/intro.md",
       "title": "Intro",
       "token_count": 17,
       "version_status": "alias"
