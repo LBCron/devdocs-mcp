@@ -14,6 +14,7 @@ Local, read-only documentation server for coding agents, exposed over MCP with a
 | just | 1.59.0 | `brew install just` |
 | lefthook | 2.2.2 | `brew install lefthook` |
 | cargo-binstall | 1.26.1 | `brew install cargo-binstall` |
+| `~/.agents/skills` | latest | Global skills directory carrying `/caveman`, `/ponytail`, and `/agent-reach`, which the repo's agent instructions route subagents through |
 
 Dev tools used by optional recipes:
 
