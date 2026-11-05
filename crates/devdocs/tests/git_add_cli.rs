@@ -15,8 +15,12 @@ use serde_json::Value;
 
 /// The `file://` URL of a local repository path — the exact string the
 /// gate matches against the registry entry and the adapter plans with.
+/// `Url::from_file_path` normalizes the separators, so the TOML string
+/// stays parseable on Windows too (a raw `\U` reads as a unicode escape).
 fn repo_url(path: &Path) -> String {
-    format!("file://{}", path.display())
+    url::Url::from_file_path(path)
+        .expect("local path is a file url")
+        .to_string()
 }
 
 /// Writes a config with the `acme` git source approved at the index stage.
