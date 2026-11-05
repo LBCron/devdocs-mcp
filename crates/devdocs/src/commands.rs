@@ -61,6 +61,107 @@ fn map_store_error(error: &devdocs_store::StoreError) -> Error {
     }
 }
 
+/// Maps a retrieval error onto the CLI error model
+/// (docs/implementation/08 §Error codes): misses exit 2 with their
+/// `miss_reason`, broken refs and cursors exit 1, drift and store
+/// failures exit 3.
+fn map_retrieve_error(error: devdocs_retrieve::RetrieveError) -> Error {
+    match error {
+        // defensive: a store failure after the index opens is only
+        // reachable through a corrupted database, which the store-layer
+        // tests cover; this arm keeps the mapping total.
+        devdocs_retrieve::RetrieveError::Store(e) => map_store_error(&e),
+        devdocs_retrieve::RetrieveError::Miss(reason) => Error::NoResult { reason },
+        devdocs_retrieve::RetrieveError::Usage(e) => Error::Usage(e.to_string()),
+        devdocs_retrieve::RetrieveError::HashMismatch(detail) => Error::Upstream {
+            code: UpstreamCode::HashMismatch,
+            detail,
+        },
+    }
+}
+
+/// The current directory for the resolver's lockfile walk; a vanished
+/// working directory is an upstream failure, not a usage error.
+fn project_dir() -> Result<std::path::PathBuf, Error> {
+    // defensive: the CLI never deletes its own working directory, so the
+    // arm is unreachable from a normal invocation; kept for the resolver's
+    // lockfile walk.
+    std::env::current_dir().map_err(|e| Error::Upstream {
+        code: UpstreamCode::UpstreamError,
+        detail: format!("cannot read the current directory: {e}"),
+    })
+}
+
+/// Runs `devdocs search <query>` (docs/implementation/08 §CLI contract).
+///
+/// # Errors
+/// [`Error::NoResult`] on the cold-miss paths (exit 2 with `miss_reason`),
+/// [`Error::Usage`] for a broken cursor, [`Error::Upstream`] for store
+/// failures.
+pub fn run_search(
+    config: &Config,
+    query: &str,
+    library: Option<&str>,
+    version: Option<&str>,
+    limit: Option<u32>,
+    cursor: Option<u64>,
+) -> Result<ResultEnvelope, Error> {
+    let store = open_store(config, false)?;
+    let plan = devdocs_retrieve::Plan {
+        limit: limit.unwrap_or(config.search.limit_default),
+        max_tokens: config.search.max_tokens_default,
+        rrf_k: config.search.rrf_k,
+        cursor,
+    };
+    let query = devdocs_retrieve::Query::new(query, library, version);
+    let project = project_dir()?;
+    devdocs_retrieve::serve::search(&store, &query, &project, &plan).map_err(map_retrieve_error)
+}
+
+/// Runs `devdocs open <ref>`.
+///
+/// # Errors
+/// [`Error::Usage`] for a malformed ref or cursor, [`Error::NoResult`] on
+/// the cold-miss paths, [`Error::Upstream`] for store failures.
+pub fn run_open(
+    config: &Config,
+    doc_ref: &str,
+    cursor: Option<u64>,
+) -> Result<ResultEnvelope, Error> {
+    let store = open_store(config, false)?;
+    let plan = devdocs_retrieve::Plan {
+        max_tokens: config.search.max_tokens_default,
+        cursor,
+        ..devdocs_retrieve::Plan::defaults()
+    };
+    devdocs_retrieve::serve::open(&store, doc_ref, &plan).map_err(map_retrieve_error)
+}
+
+/// Runs `devdocs verify <ref>`: re-derives the content hash and reports
+/// `HASH_MISMATCH` on drift (docs/implementation/06 §Hashing policy).
+///
+/// # Errors
+/// [`Error::Upstream`] with the `HASH_MISMATCH` code on drift,
+/// [`Error::Usage`] for a malformed ref, [`Error::NoResult`] on the
+/// cold-miss paths, [`Error::Upstream`] for store failures.
+pub fn run_verify(config: &Config, doc_ref: &str) -> Result<ResultEnvelope, Error> {
+    let store = open_store(config, false)?;
+    devdocs_retrieve::serve::verify(&store, doc_ref).map_err(map_retrieve_error)
+}
+
+/// Runs `devdocs versions <library>`.
+///
+/// # Errors
+/// [`Error::NoResult`] with `not_indexed` when the library is absent,
+/// [`Error::Upstream`] for store failures.
+pub fn run_versions(
+    config: &Config,
+    library: &str,
+) -> Result<ResultEnvelope<SourceSummary>, Error> {
+    let store = open_store(config, false)?;
+    devdocs_retrieve::serve::versions(&store, library).map_err(map_retrieve_error)
+}
+
 /// A gate refusal carrying a terminal status (`denied`, `expired`,
 /// `revoked`) withdraws the previously published generation before the
 /// refusal returns, so a revoked registry entry takes its source out of

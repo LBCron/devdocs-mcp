@@ -86,8 +86,13 @@ fn injected_error(code: &str) -> Option<Error> {
             key_path: "fetch.concurrency".to_owned(),
             reason: "injected config error".to_owned(),
         },
-        "NO_RESULT" => Error::NoResult {
+        // The cold-miss code carries `not_indexed`; plain `NO_RESULT` maps
+        // to a valid-query miss without a colder reason.
+        "PKG_NOT_INDEXED" => Error::NoResult {
             reason: devdocs_model::MissReason::NotIndexed,
+        },
+        "NO_RESULT" => Error::NoResult {
+            reason: devdocs_model::MissReason::LowConfidence,
         },
         "FETCH_BLOCKED" | "UPSTREAM_ERROR" | "HASH_MISMATCH" => Error::Upstream {
             code: match code {

@@ -147,11 +147,14 @@ fn refuse_manual_graders(suite: &Suite) -> Result<(), EvalError> {
     Ok(())
 }
 
-/// Refuses a subprocess call that exited nonzero — its wall time says
-/// nothing about real latency, so the run fails (exit 3) instead of
-/// letting a dead binary pass the p95 gate.
+/// Accepts a subprocess call that exited 0 or 2 and refuses the rest. An
+/// exit 2 is the documented miss — a valid query that served nothing
+/// (docs/implementation/08 §Error codes) — and its wall time is a real
+/// timed search. Any other nonzero exit says the call died before doing
+/// real work, so the run fails (exit 3) instead of letting a dead binary
+/// pass the p95 gate.
 fn check_exit(sample: SubprocessSample, label: &str) -> Result<(), EvalError> {
-    if sample.exit_code == 0 {
+    if sample.exit_code == 0 || sample.exit_code == 2 {
         return Ok(());
     }
     Err(EvalError::Subprocess(format!(

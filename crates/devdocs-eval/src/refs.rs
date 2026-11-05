@@ -1,62 +1,11 @@
 //! The `docs://` ref grammar (docs/implementation/14 §Golden-set format):
-//! parsing and pin validation.
+//! parsing (re-exported from the model crate) and pin validation.
 
 use crate::suite::TaskType;
 
-/// A parsed `docs://` ref: `docs://<library>/v<version>/<path>[#<fragment>]`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedRef {
-    /// The library authority.
-    pub library: String,
-    /// The pinned version, without the leading `v`.
-    pub version: String,
-    /// The non-empty path segments.
-    pub segments: Vec<String>,
-    /// The fragment after `#`, when present.
-    pub fragment: Option<String>,
-}
-
-impl ParsedRef {
-    /// Parses the ref grammar; `None` for any broken shape.
-    ///
-    /// The path is one or more `/`-separated segments
-    /// without `..`, `?`, or whitespace; a fragment must be non-empty
-    /// without whitespace.
-    #[must_use]
-    pub fn parse(r: &str) -> Option<ParsedRef> {
-        let rest = r.strip_prefix("docs://")?;
-        let (library, tail) = rest.split_once('/')?;
-        if library.is_empty() {
-            return None;
-        }
-        let (path, fragment) = match tail.split_once('#') {
-            Some((p, f)) => (p, Some(f)),
-            None => (tail, None),
-        };
-        let (version_segment, segment_text) = path.split_once('/')?;
-        let version = version_segment.strip_prefix('v')?;
-        if version.is_empty() {
-            return None;
-        }
-        let segments: Vec<String> = segment_text.split('/').map(str::to_owned).collect();
-        if segments.is_empty()
-            || segments.iter().any(|s| {
-                s.is_empty() || s == ".." || s.contains('?') || s.contains(char::is_whitespace)
-            })
-        {
-            return None;
-        }
-        if fragment.is_some_and(|f| f.is_empty() || f.contains(char::is_whitespace)) {
-            return None;
-        }
-        Some(ParsedRef {
-            library: library.to_owned(),
-            version: version.to_owned(),
-            segments,
-            fragment: fragment.map(str::to_owned),
-        })
-    }
-}
+// The grammar lives once: the model crate owns the parser, the eval
+// harness and the retrieval open path both consume it.
+pub use devdocs_model::docref::ParsedRef;
 
 /// Rejects versions that are not an exact pin (docs/implementation/14:
 /// "Version is exact. A question without a pinned version is invalid input

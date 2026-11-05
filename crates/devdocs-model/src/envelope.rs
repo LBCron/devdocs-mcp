@@ -5,6 +5,7 @@
 //! docs/08 example exactly; placeholder commands print the empty envelope.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -22,6 +23,18 @@ pub enum VersionStatus {
     Fallback,
     /// The library is absent from the index.
     Absent,
+}
+
+impl fmt::Display for VersionStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            Self::Verified => "verified",
+            Self::Alias => "alias",
+            Self::Fallback => "fallback",
+            Self::Absent => "absent",
+        };
+        f.write_str(text)
+    }
 }
 
 /// One search/open/symbol result in the docs/08 result envelope.
@@ -125,7 +138,17 @@ pub fn empty_envelope() -> ResultEnvelope {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::{SourceSummary, empty_envelope, now_rfc3339};
+    use super::{SourceSummary, VersionStatus, empty_envelope, now_rfc3339};
+
+    /// The `Display` text of each status is the exact `snake_case` string the
+    /// envelope contract names (docs/implementation/08 §CLI contract).
+    #[test]
+    fn version_status_displays_the_contract_strings() {
+        assert_eq!(VersionStatus::Verified.to_string(), "verified");
+        assert_eq!(VersionStatus::Alias.to_string(), "alias");
+        assert_eq!(VersionStatus::Fallback.to_string(), "fallback");
+        assert_eq!(VersionStatus::Absent.to_string(), "absent");
+    }
 
     /// A source summary round-trips through the envelope JSON, so the
     /// `list` output parses on the consumer side.

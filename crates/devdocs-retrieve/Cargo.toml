@@ -7,6 +7,20 @@ license.workspace = true
 repository.workspace = true
 description = "Hybrid retrieval, fusion, and budget packing for devdocs"
 
+[dependencies]
+devdocs-model.workspace = true
+devdocs-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+serde_yaml_ng.workspace = true
+
+[dev-dependencies]
+devdocs-testkit.workspace = true
+insta.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

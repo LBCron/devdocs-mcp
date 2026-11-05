@@ -107,6 +107,9 @@ pub enum Command {
         /// Cap the result count.
         #[arg(long)]
         limit: Option<u32>,
+        /// Resume after the last served chunk id from a truncated page.
+        #[arg(long)]
+        cursor: Option<u64>,
     },
     /// Exact symbol lookup.
     Symbol {
@@ -119,6 +122,9 @@ pub enum Command {
     Open {
         /// The document ref, for example `docs://next.js/v16.2.9/proxy#rewrite`.
         doc_ref: String,
+        /// Resume at the character offset from a truncated page.
+        #[arg(long)]
+        cursor: Option<u64>,
     },
     /// Re-derive and compare the content hash of a ref.
     Verify {
@@ -313,18 +319,135 @@ pub fn run(cli: &Cli) -> Result<(), Error> {
             let result = crate::commands::run_db_migrate(&config, *force)?;
             print_line(&result)
         }
+        Command::Search {
+            query,
+            library,
+            version,
+            limit,
+            cursor,
+        } => run_search_command(
+            cli,
+            query,
+            library.as_deref(),
+            version.as_deref(),
+            *limit,
+            *cursor,
+        ),
+        Command::Open { doc_ref, cursor } => run_open_command(cli, doc_ref, *cursor),
+        Command::Verify { doc_ref } => run_verify_command(cli, doc_ref),
+        Command::Versions { library } => run_versions_command(cli, library),
         Command::Sync { .. }
-        | Command::Search { .. }
         | Command::Symbol { .. }
-        | Command::Open { .. }
-        | Command::Verify { .. }
-        | Command::Versions { .. }
         | Command::Source { .. }
         | Command::Skill { .. }
         | Command::Mcp { .. }
         | Command::Db { .. }
         | Command::Eval { .. } => print_placeholder(),
     }
+}
+
+/// Runs `devdocs search` and prints the envelope.
+fn run_search_command(
+    cli: &Cli,
+    query: &str,
+    library: Option<&str>,
+    version: Option<&str>,
+    limit: Option<u32>,
+    cursor: Option<u64>,
+) -> Result<(), Error> {
+    let config = Config::load(&overrides(cli))?;
+    let envelope = crate::commands::run_search(&config, query, library, version, limit, cursor)?;
+    if cli.json {
+        print_line(&envelope)
+    } else {
+        write_stdout_text(&summarize_search(&envelope))
+    }
+}
+
+/// Runs `devdocs open` and prints the served page.
+fn run_open_command(cli: &Cli, doc_ref: &str, cursor: Option<u64>) -> Result<(), Error> {
+    let config = Config::load(&overrides(cli))?;
+    let envelope = crate::commands::run_open(&config, doc_ref, cursor)?;
+    if cli.json {
+        print_line(&envelope)
+    } else {
+        write_stdout_text(&summarize_open(&envelope))
+    }
+}
+
+/// Runs `devdocs verify` and prints the verification outcome.
+fn run_verify_command(cli: &Cli, doc_ref: &str) -> Result<(), Error> {
+    let config = Config::load(&overrides(cli))?;
+    let envelope = crate::commands::run_verify(&config, doc_ref)?;
+    if cli.json {
+        print_line(&envelope)
+    } else {
+        let item = envelope.results.first();
+        write_stdout_line(&match item {
+            Some(item) => format!("{} verified ({})", item.doc_ref, item.content_hash),
+            // defensive: `verify` answers with exactly one result or an
+            // error, so the envelope never arrives empty; the arm keeps
+            // the match total.
+            None => String::from("nothing to verify"),
+        })
+    }
+}
+
+/// Runs `devdocs versions` and prints the per-library discovery surface.
+fn run_versions_command(cli: &Cli, library: &str) -> Result<(), Error> {
+    let config = Config::load(&overrides(cli))?;
+    let envelope = crate::commands::run_versions(&config, library)?;
+    if cli.json {
+        print_line(&envelope)
+    } else {
+        for item in &envelope.results {
+            let state = if item.active { "active" } else { "inactive" };
+            write_stdout_line(&format!(
+                "{} {} ({} · {} · {})",
+                item.library, item.version, item.kind, item.license_status, state
+            ))?;
+        }
+        Ok(())
+    }
+}
+
+/// The human-readable search summary without `--json`: one line per
+/// result, in fusion order, plus the truncation notice.
+fn summarize_search(envelope: &devdocs_model::ResultEnvelope) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    for item in &envelope.results {
+        let _ = writeln!(
+            out,
+            "{}  {}  [{} · {} · {} tokens]",
+            item.doc_ref, item.title, item.served_version, item.version_status, item.token_count
+        );
+    }
+    if envelope.truncated
+        && let Some(cursor) = &envelope.next_cursor
+    {
+        let _ = writeln!(out, "…truncated; resume with --cursor {cursor}");
+    }
+    out
+}
+
+/// The human-readable `open` output: the served text, then the
+/// continuation notice when the budget cut the chunk.
+fn summarize_open(envelope: &devdocs_model::ResultEnvelope) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = envelope
+        .results
+        .first()
+        .map(|item| item.snippet.clone())
+        .unwrap_or_default();
+    if envelope.truncated
+        && let Some(cursor) = &envelope.next_cursor
+    {
+        let _ = writeln!(out, "\n…truncated; resume with --cursor {cursor}");
+    }
+    out
 }
 
 /// The human-readable one-line summary `add` prints without `--json`.

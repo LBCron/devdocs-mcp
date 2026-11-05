@@ -2,12 +2,14 @@
 
 pub mod chunk;
 pub mod config;
+pub mod docref;
 pub mod envelope;
 pub mod error;
 pub mod source;
 
 pub use chunk::Chunk;
 pub use config::{Config, Overrides, Paths, SourceConfig};
+pub use docref::ParsedRef;
 pub use envelope::{
     Example, ResultEnvelope, ResultItem, SourceSummary, VersionStatus, empty_envelope, now_rfc3339,
 };

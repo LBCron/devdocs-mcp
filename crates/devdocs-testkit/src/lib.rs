@@ -57,6 +57,80 @@ pub fn seed_chunk(
     Ok(conn.last_insert_rowid())
 }
 
+/// The shared test fixture for fusion, budget, and item tests: a minimal
+/// deterministic hit with the identity fields filled and every optional
+/// payload empty. Tests that need different values mutate the returned
+/// struct.
+#[must_use]
+pub fn sample_hit(chunk_id: i64, token_count: u32) -> devdocs_store::Hit {
+    devdocs_store::Hit {
+        chunk_id,
+        source_id: chunk_id,
+        library: "a".to_owned(),
+        version: "1.0.0".to_owned(),
+        section_path: Vec::new(),
+        symbol: None,
+        symbol_kind: None,
+        snippet: None,
+        text: String::new(),
+        token_count,
+        rank: None,
+        content_hash: [0u8; 32],
+        source_url: String::new(),
+        source_commit: None,
+        license_status: "approved_index".to_owned(),
+    }
+}
+
+/// Seeds one active source named `library` with one chunk (ordinal 0,
+/// `section_path_json`, `text`) into a migrated store at `path`, and
+/// returns the store with the source id. The seeding connection is
+/// dropped before the store is handed back, so tests never import
+/// rusqlite.
+pub fn seeded_store(
+    path: &Path,
+    library: &str,
+    section_path_json: &str,
+    text: &str,
+) -> Result<(Store, i64), StoreError> {
+    let store = open_migrated(path)?;
+    let conn = Connection::open(path).map_err(StoreError::Sql)?;
+    let source_id = seed_source(&conn, library, true).map_err(StoreError::Sql)?;
+    seed_chunk(&conn, source_id, 0, section_path_json, None, text).map_err(StoreError::Sql)?;
+    drop(conn);
+    Ok((store, source_id))
+}
+
+/// Appends drift to one chunk's stored text behind the store's back,
+/// returning the number of drifted rows. The `HASH_MISMATCH` drift test
+/// drives this instead of opening a raw connection.
+pub fn corrupt_one_chunk_text(path: &Path) -> Result<usize, StoreError> {
+    let conn = Connection::open(path).map_err(StoreError::Sql)?;
+    let drifted = conn
+        .execute(
+            "UPDATE chunks SET text = text || ' drifted' \
+             WHERE chunk_id IN (SELECT chunk_id FROM chunks LIMIT 1)",
+            [],
+        )
+        .map_err(StoreError::Sql)?;
+    Ok(drifted)
+}
+
+/// Opens a migrated store at `path`, runs `seed` against a temporary
+/// connection to the same file, drops that connection, and returns the
+/// store. For seed shapes the dedicated helpers do not cover, such as
+/// inactive sources.
+pub fn open_migrated_and(
+    path: &Path,
+    seed: impl FnOnce(&Connection) -> Result<(), rusqlite::Error>,
+) -> Result<Store, StoreError> {
+    let store = open_migrated(path)?;
+    let conn = Connection::open(path).map_err(StoreError::Sql)?;
+    seed(&conn).map_err(StoreError::Sql)?;
+    drop(conn);
+    Ok(store)
+}
+
 /// One chunk row read back from a store file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredChunk {
