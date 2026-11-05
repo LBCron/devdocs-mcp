@@ -49,6 +49,24 @@ impl Plan {
     }
 }
 
+/// The packed pipeline outcome: the hits in served order with their fusion
+/// scores, the pack state, and the per-item status inputs.
+#[derive(Debug, Clone)]
+pub struct PackedSearch {
+    /// The packed hits with their fusion scores, in served order.
+    pub items: Vec<(Hit, f64)>,
+    /// Whether the token budget cut the page.
+    pub truncated: bool,
+    /// The resume cursor, when the budget cut the page.
+    pub next_cursor: Option<String>,
+    /// The pick status the version policy applied.
+    pub pick_status: VersionStatus,
+    /// The version the pipeline served, when one was picked.
+    pub served_version: Option<String>,
+    /// The requested version text, when the query carried one.
+    pub requested_text: Option<String>,
+}
+
 /// Runs the search pipeline end to end.
 ///
 /// `project` is the directory the resolver starts its lockfile walk from —
@@ -65,7 +83,56 @@ pub fn search(
     plan: &Plan,
 ) -> Result<ResultEnvelope, RetrieveError> {
     let ctx = ProjectContext::detect(project);
-    let resolved = resolve(query, &ctx);
+    search_with_context(store, query, &ctx, plan)
+}
+
+/// The search pipeline with a caller-supplied project context: the eval
+/// harness passes an empty context so host lockfiles never leak into a
+/// run, while the CLI keeps the lockfile walk.
+///
+/// # Errors
+/// The same paths as [`search`].
+pub fn search_with_context(
+    store: &Store,
+    query: &Query,
+    ctx: &ProjectContext,
+    plan: &Plan,
+) -> Result<ResultEnvelope, RetrieveError> {
+    let packed = search_packed(store, query, ctx, plan)?;
+    let results: Vec<ResultItem> = packed
+        .items
+        .iter()
+        .map(|(hit, score)| {
+            let status = item_status(
+                &hit.version,
+                packed.served_version.as_deref(),
+                packed.requested_text.as_deref(),
+                packed.pick_status,
+            );
+            to_result_item(hit, packed.requested_text.as_deref(), status, *score)
+        })
+        .collect();
+    Ok(ResultEnvelope {
+        results,
+        truncated: packed.truncated,
+        next_cursor: packed.next_cursor,
+        served_at: now_rfc3339(),
+    })
+}
+
+/// The search pipeline through fusion, cursor resume, and the budget pack,
+/// returning the packed hits instead of the envelope — callers that grade
+/// raw hits (the eval harness) skip the envelope mapping.
+///
+/// # Errors
+/// The same paths as [`search`].
+pub fn search_packed(
+    store: &Store,
+    query: &Query,
+    ctx: &ProjectContext,
+    plan: &Plan,
+) -> Result<PackedSearch, RetrieveError> {
+    let resolved = resolve(query, ctx);
 
     // Plan the rungs from the resolution. The headroom is 4× the requested
     // hits (docs/08 §Rungs, rungs 1 and 2).
@@ -91,25 +158,13 @@ pub fn search(
         usize::try_from(plan.limit).unwrap_or(usize::MAX),
         plan.max_tokens,
     );
-    let results: Vec<ResultItem> = packed
-        .items
-        .iter()
-        .map(|(hit, score)| {
-            let status = item_status(
-                &hit.version,
-                served_version.as_deref(),
-                requested_text.as_deref(),
-                pick_status,
-            );
-            to_result_item(hit, requested_text.as_deref(), status, *score)
-        })
-        .collect();
-
-    Ok(ResultEnvelope {
-        results,
+    Ok(PackedSearch {
+        items: packed.items,
         truncated: packed.truncated,
         next_cursor: packed.next_cursor,
-        served_at: now_rfc3339(),
+        pick_status,
+        served_version,
+        requested_text,
     })
 }
 

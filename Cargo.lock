@@ -1000,6 +1000,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "devdocs-model",
+ "devdocs-retrieve",
  "devdocs-store",
  "devdocs-testkit",
  "insta",

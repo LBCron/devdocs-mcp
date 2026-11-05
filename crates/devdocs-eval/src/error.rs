@@ -44,6 +44,13 @@ pub enum EvalError {
         /// What failed, in one line.
         String,
     ),
+    /// The retrieval pipeline failed outside the store: a broken request
+    /// shape or hash drift the harness's own inputs cannot cause.
+    #[error("retrieval failure: {0}")]
+    Retrieve(
+        /// What failed, in one line.
+        String,
+    ),
     /// A file could not be read or written.
     #[error("cannot {action} {path}: {source}")]
     Io {
@@ -73,7 +80,11 @@ impl EvalError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::InvalidSuite { .. } | Self::SuiteParse { .. } => 1,
-            Self::Store(_) | Self::Subprocess(_) | Self::Io { .. } | Self::Serialize { .. } => 3,
+            Self::Store(_)
+            | Self::Subprocess(_)
+            | Self::Retrieve(_)
+            | Self::Io { .. }
+            | Self::Serialize { .. } => 3,
         }
     }
 }
