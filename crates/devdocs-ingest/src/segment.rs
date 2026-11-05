@@ -17,6 +17,7 @@ use comrak::{Arena, Options, parse_document};
 use text_splitter::{ChunkConfig, ChunkSizer, MarkdownSplitter};
 
 use crate::error::IngestError;
+use crate::symbols::{ExtractedSymbol, extract, grammar_for};
 
 /// The segmentation target (docs/implementation/07: target 400 tokens,
 /// overlap 80 tokens).
@@ -138,7 +139,7 @@ pub(crate) fn fence_language_unknown(info: &str) -> bool {
 fn nested_fence_symbols<'a>(
     node: &'a comrak::nodes::AstNode<'a>,
     stats: &mut SegmentStats,
-) -> Vec<crate::symbols::ExtractedSymbol> {
+) -> Vec<ExtractedSymbol> {
     let mut symbols = Vec::new();
     for desc in node.descendants().skip(1) {
         if let NodeValue::CodeBlock(blocked) = &desc.data().value
@@ -157,7 +158,7 @@ fn nested_fence_symbols<'a>(
 fn fence_symbols(
     blocked: &comrak::nodes::NodeCodeBlock,
     stats: &mut SegmentStats,
-) -> Vec<crate::symbols::ExtractedSymbol> {
+) -> Vec<ExtractedSymbol> {
     let Some(lang) = fence_language(&blocked.info) else {
         return Vec::new();
     };
@@ -170,7 +171,7 @@ fn fence_symbols(
         return Vec::new();
     }
     let lang = lang.to_ascii_lowercase();
-    if crate::symbols::grammar_for(&lang).is_none() {
+    if grammar_for(&lang).is_none() {
         if SYMBOL_FENCE_LANGUAGES.iter().any(|known| known == &lang) {
             stats.unsupported_fence_languages += 1;
             tracing::debug!(
@@ -180,7 +181,7 @@ fn fence_symbols(
         }
         return Vec::new();
     }
-    crate::symbols::extract(&lang, &blocked.literal)
+    extract(&lang, &blocked.literal)
 }
 
 /// How chunk sizes are measured (docs/implementation/07: the chars-per-4
@@ -238,7 +239,7 @@ pub struct PreparedChunk {
     /// The symbols declared in the chunk's fenced code blocks, in block
     /// order. Empty when the chunk carries no fenced code or no grammar
     /// matched.
-    pub symbols: Vec<crate::symbols::ExtractedSymbol>,
+    pub symbols: Vec<ExtractedSymbol>,
 }
 
 /// The segmenter: one sizer plus the packed limits
@@ -385,7 +386,7 @@ impl Segmenter {
     /// merges until no boundary sits inside a fenced code block.
     fn pack_section(&self, section: &Section<'_>, stats: &mut SegmentStats) -> Vec<Candidate> {
         let mut candidates: Vec<Candidate> = Vec::new();
-        let mut current: Option<(Range<usize>, usize, Vec<crate::symbols::ExtractedSymbol>)> = None; // span, tokens, symbols
+        let mut current: Option<(Range<usize>, usize, Vec<ExtractedSymbol>)> = None; // span, tokens, symbols
 
         for block in &section.blocks {
             let range = block.start..block.end;
@@ -519,7 +520,7 @@ struct Block {
     start: usize,
     end: usize,
     fenced: bool,
-    symbols: Vec<crate::symbols::ExtractedSymbol>,
+    symbols: Vec<ExtractedSymbol>,
 }
 
 /// One section under construction.
@@ -534,7 +535,7 @@ struct Section<'a> {
 #[derive(Debug)]
 struct Candidate {
     span: Range<usize>,
-    symbols: Vec<crate::symbols::ExtractedSymbol>,
+    symbols: Vec<ExtractedSymbol>,
 }
 
 /// The absolute byte range of one top-level block node. Comrak's end
@@ -624,7 +625,7 @@ fn push_block<'a>(
     node: &comrak::nodes::AstNode,
     page_body: &'a str,
     offset: &impl Fn(usize, usize) -> usize,
-    symbols: Vec<crate::symbols::ExtractedSymbol>,
+    symbols: Vec<ExtractedSymbol>,
     stats: &mut SegmentStats,
 ) {
     let fenced = matches!(&node.data().value, NodeValue::CodeBlock(boxed) if boxed.fenced);

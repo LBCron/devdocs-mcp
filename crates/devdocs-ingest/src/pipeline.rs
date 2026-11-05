@@ -27,6 +27,23 @@ use crate::guard::FetchGuard;
 use crate::llms_txt::parse_llms_txt;
 use crate::relations::PageRelations;
 use crate::segment::Segmenter;
+use crate::symbols::ExtractedSymbol;
+
+impl From<&ExtractedSymbol> for devdocs_store::Symbol {
+    fn from(sym: &ExtractedSymbol) -> Self {
+        Self {
+            name: sym.name.clone(),
+            kind: sym.kind.clone(),
+        }
+    }
+}
+
+/// Converts extracted symbols into the store's symbol rows, name and kind
+/// carried over (docs/implementation/07 §Normalization pipeline, the
+/// symbol pass).
+fn store_symbols(symbols: &[ExtractedSymbol]) -> Vec<devdocs_store::Symbol> {
+    symbols.iter().map(devdocs_store::Symbol::from).collect()
+}
 
 /// The total ingest wall-time cap (docs/implementation/09 invariant 7: "by
 /// config"; the config key lands with the M6 network work, the cap holds
@@ -334,23 +351,13 @@ impl<'a> IngestJob<'a> {
                 // symbol whose name the contextual header names, else the
                 // first declared one (docs/implementation/07
                 // §Normalization pipeline, the symbol pass).
-                let symbols: Vec<devdocs_store::Symbol> = chunk
-                    .symbols
-                    .iter()
-                    .map(|sym| devdocs_store::Symbol {
-                        name: sym.name.clone(),
-                        kind: sym.kind.clone(),
-                    })
-                    .collect();
+                let symbols = store_symbols(&chunk.symbols);
                 let symbol = chunk
                     .symbols
                     .iter()
                     .find(|sym| header_names_symbol(&chunk.header, &sym.name))
                     .or_else(|| chunk.symbols.first())
-                    .map(|sym| devdocs_store::Symbol {
-                        name: sym.name.clone(),
-                        kind: sym.kind.clone(),
-                    });
+                    .map(devdocs_store::Symbol::from);
                 run.new_chunks.push(NewChunk {
                     section_path: chunk.section_path,
                     symbols,
