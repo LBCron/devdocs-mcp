@@ -434,6 +434,9 @@ fn served_item(
         version_status: VersionStatus::Verified,
         content_hash: crate::item::hex(&chunk.content_hash),
         license_status: chunk.license_status.clone(),
+        // Attribution rides on the source record once the M7 license-gate
+        // store step carries it into the read path.
+        attribution: None,
         confidence,
         token_count,
     }

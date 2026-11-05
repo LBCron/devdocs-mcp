@@ -112,8 +112,9 @@ impl Error {
 
     /// The stable `UPPER_SNAKE` code for the JSON error envelope
     /// (docs/implementation/08 §Error codes). A cold miss — the library
-    /// or the requested version absent — is `PKG_NOT_INDEXED`; every other
-    /// valid-query miss is `NO_RESULT`.
+    /// or the requested version absent — is `PKG_NOT_INDEXED`; a
+    /// license-blocked miss is `NOT_AVAILABLE`; every other valid-query
+    /// miss is `NO_RESULT`.
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
@@ -121,9 +122,8 @@ impl Error {
             Self::ConfigInvalid { .. } => "CONFIG_INVALID",
             Self::NoResult { reason } => match reason {
                 MissReason::NotIndexed | MissReason::VersionAbsent => "PKG_NOT_INDEXED",
-                MissReason::LicenseBlocked
-                | MissReason::QuarantinedOnly
-                | MissReason::LowConfidence => "NO_RESULT",
+                MissReason::LicenseBlocked => "NOT_AVAILABLE",
+                MissReason::QuarantinedOnly | MissReason::LowConfidence => "NO_RESULT",
             },
             Self::Upstream { code, .. } => match code {
                 UpstreamCode::FetchBlocked => "FETCH_BLOCKED",
@@ -251,7 +251,8 @@ mod tests {
 
     /// Every variant maps to a stable `UPPER_SNAKE` code; a cold miss —
     /// the library or the requested version absent — is
-    /// `PKG_NOT_INDEXED` (docs/implementation/08 §Error codes).
+    /// `PKG_NOT_INDEXED`, and a license-blocked miss is `NOT_AVAILABLE`
+    /// (docs/implementation/08 §Error codes).
     #[test]
     fn error_maps_to_stable_codes() {
         let codes = [
@@ -265,6 +266,9 @@ mod tests {
             },
             Error::NoResult {
                 reason: MissReason::VersionAbsent,
+            },
+            Error::NoResult {
+                reason: MissReason::LicenseBlocked,
             },
             Error::NoResult {
                 reason: MissReason::LowConfidence,
@@ -288,6 +292,7 @@ mod tests {
             "CONFIG_INVALID",
             "PKG_NOT_INDEXED",
             "PKG_NOT_INDEXED",
+            "NOT_AVAILABLE",
             "NO_RESULT",
             "FETCH_BLOCKED",
             "UPSTREAM_ERROR",
@@ -297,7 +302,21 @@ mod tests {
         for (error, code) in codes.iter().zip(expected) {
             assert_eq!(error.code(), code);
         }
-        assert_eq!(codes.iter().map(Error::code).collect::<Vec<_>>().len(), 9);
+        assert_eq!(codes.iter().map(Error::code).collect::<Vec<_>>().len(), 10);
+    }
+
+    /// A license-blocked miss keeps exit 2 (`NoResult`) and carries the
+    /// `license_blocked` miss reason with the `devdocs source list` hint.
+    #[test]
+    fn license_blocked_miss_maps_to_not_available() {
+        let error = Error::NoResult {
+            reason: MissReason::LicenseBlocked,
+        };
+        assert_eq!(error.exit_code(), 2);
+        assert_eq!(error.code(), "NOT_AVAILABLE");
+        let envelope = error.to_envelope();
+        assert_eq!(envelope.miss_reason, Some(MissReason::LicenseBlocked));
+        assert_eq!(envelope.hint.as_deref(), Some("run: devdocs source list"));
     }
 
     /// The exit-2 envelope carries `miss_reason`; the others do not. A

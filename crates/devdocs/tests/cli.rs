@@ -439,8 +439,7 @@ fn write_config(env: &Env, with_source: bool) -> PathBuf {
             "[sources.acme]\n",
             "kind = \"llms_txt\"\n",
             "url = \"https://docs.acme.test/llms.txt\"\n",
-            "license = \"MIT\"\n",
-            "status = \"approved_index\"\n"
+            "license = \"MIT\"\n"
         )
     } else {
         ""
@@ -608,135 +607,6 @@ fn add_rejects_an_unsupported_kind() {
     assert!(!db.exists(), "a rejected add must not create the database");
 }
 
-/// A terminal registry status withdraws the previously published
-/// generation before the refusal returns: the revoked source deactivates
-/// and leaves retrieval, while a refusal without a terminal status still
-/// writes nothing (docs/09 §License gate enforcement points, point 3).
-#[test]
-fn add_refuses_a_revoked_source_and_withdraws_it() {
-    let env = Env::new();
-    let fixture = write_fixture(&env);
-    let config = write_config(&env, true);
-    let db = env.root.join("withdraw.db");
-
-    // First run publishes the source.
-    let (code, _stdout, stderr) = run_acme_add(&env, &fixture, &config, &db);
-    assert_eq!(code, 0, "stderr: {stderr}");
-
-    // The registry status flips to revoked; the second run refuses.
-    std::fs::write(
-        &config,
-        concat!(
-            "[sources.acme]\n",
-            "kind = \"llms_txt\"\n",
-            "url = \"https://docs.acme.test/llms.txt\"\n",
-            "license = \"MIT\"\n",
-            "status = \"revoked\"\n"
-        ),
-    )
-    .expect("config rewritten");
-    let (code, _stdout, stderr) = run_acme_add(&env, &fixture, &config, &db);
-    assert_eq!(code, 3, "stderr: {stderr}");
-    assert!(stderr.contains("FETCH_BLOCKED"), "stderr: {stderr}");
-
-    // The withdrawal landed: the source is inactive with the recorded
-    // status, so retrieval no longer serves it.
-    let (code, stdout, stderr) = output(
-        env.cmd(),
-        &[
-            "list",
-            "--json",
-            "--config",
-            config.to_str().expect("config path"),
-            "--db",
-            db.to_str().expect("db path"),
-        ],
-    );
-    assert_eq!(code, 0, "stdout: {stdout} stderr: {stderr}");
-    let envelope: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
-    let source = &envelope["results"][0];
-    assert_eq!(source["license_status"], "revoked");
-    assert_eq!(source["active"], false);
-}
-
-/// A terminal refusal whose withdrawal cannot be recorded surfaces as
-/// `UPSTREAM_ERROR` instead of `FETCH_BLOCKED`, so the reported outcome
-/// never hides an unrecorded withdrawal (docs/09 §License gate enforcement
-/// points, point 3).
-#[test]
-fn add_reports_a_withdrawal_that_cannot_be_recorded() {
-    let env = Env::new();
-    let fixture = write_fixture(&env);
-    let config = write_config(&env, true);
-    let db = env.root.join("withdraw-fail.db");
-
-    // First run publishes the source.
-    let (code, _stdout, stderr) = run_acme_add(&env, &fixture, &config, &db);
-    assert_eq!(code, 0, "stderr: {stderr}");
-
-    // The registry status flips to revoked, and the store cannot record
-    // the withdrawal: the db file becomes read-only.
-    std::fs::write(
-        &config,
-        concat!(
-            "[sources.acme]\n",
-            "kind = \"llms_txt\"\n",
-            "url = \"https://docs.acme.test/llms.txt\"\n",
-            "license = \"MIT\"\n",
-            "status = \"revoked\"\n"
-        ),
-    )
-    .expect("config rewritten");
-    set_db_readonly(&db, true);
-
-    // A root process ignores the permission bits, so the seal cannot hold
-    // and the withdrawal would succeed; skip loudly in that case.
-    if std::fs::OpenOptions::new().append(true).open(&db).is_ok() {
-        set_db_readonly(&db, false);
-        eprintln!("skipping: the process ignores file permission bits");
-        return;
-    }
-
-    let (code, _stdout, stderr) = run_acme_add(&env, &fixture, &config, &db);
-    assert_eq!(code, 3, "stderr: {stderr}");
-    assert!(stderr.contains("UPSTREAM_ERROR"), "stderr: {stderr}");
-    assert!(
-        stderr.contains("withdrawal"),
-        "stderr should name the failed withdrawal: {stderr}"
-    );
-
-    set_db_readonly(&db, false);
-    // The withdrawal never landed, and the command said so instead of
-    // reporting the refusal alone.
-    assert_source_still_active(&env, &config, &db);
-}
-
-/// Flips the db file's read-only flag: on unix the write bits drop, on
-/// windows the read-only attribute set, and both stop a read-write open.
-fn set_db_readonly(db: &std::path::Path, readonly: bool) {
-    let mut perms = std::fs::metadata(db).expect("db metadata").permissions();
-    perms.set_readonly(readonly);
-    std::fs::set_permissions(db, perms).expect("read-only flag set");
-}
-
-/// The source is still active: the withdrawal never landed.
-fn assert_source_still_active(env: &Env, config: &std::path::Path, db: &std::path::Path) {
-    let (code, stdout, stderr) = output(
-        env.cmd(),
-        &[
-            "list",
-            "--json",
-            "--config",
-            config.to_str().expect("config path"),
-            "--db",
-            db.to_str().expect("db path"),
-        ],
-    );
-    assert_eq!(code, 0, "stdout: {stdout} stderr: {stderr}");
-    let envelope: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
-    assert_eq!(envelope["results"][0]["active"], true);
-}
-
 /// Writes a fixture manifest from raw entry objects and returns its path.
 fn write_manifest(env: &Env, entries: &Value) -> PathBuf {
     let dir = env.root.join("fixture-custom");
@@ -768,16 +638,6 @@ fn add_args<'a>(
         db.to_str().expect("db path"),
     ]);
     args
-}
-
-/// Runs the standard acme `add --fixture --json` and returns the output.
-fn run_acme_add(
-    env: &Env,
-    fixture: &std::path::Path,
-    config: &std::path::Path,
-    db: &std::path::Path,
-) -> (i32, String, String) {
-    output(env.cmd(), &add_args(fixture, config, db, true))
 }
 
 /// The human (non-`--json`) output paths: `add` prints the indexed summary
@@ -835,8 +695,7 @@ fn add_maps_a_guard_refusal_to_fetch_blocked() {
             "[sources.acme]\n",
             "kind = \"llms_txt\"\n",
             "url = \"https://docs.acme.test/llms.txt\"\n",
-            "license = \"MIT\"\n",
-            "status = \"approved_index\"\n"
+            "license = \"MIT\"\n"
         ),
     )
     .expect("config written");
@@ -1002,35 +861,6 @@ fn list_fails_when_the_data_directory_cannot_be_created() {
         .expect("mode restored");
     assert_eq!(code, 3, "stderr: {stderr}");
     assert!(stderr.contains("UPSTREAM_ERROR"), "stderr: {stderr}");
-}
-
-/// A revoked registry entry with no prior publish writes nothing: the
-/// withdrawal matches no row and the refusal still returns.
-#[test]
-fn add_with_a_revoked_source_and_no_prior_publish_writes_nothing() {
-    let env = Env::new();
-    let fixture = write_fixture(&env);
-    let config = write_config(&env, true);
-    let db = env.root.join("fresh-revoked.db");
-    std::fs::write(
-        &config,
-        concat!(
-            "[sources.acme]\n",
-            "kind = \"llms_txt\"\n",
-            "url = \"https://docs.acme.test/llms.txt\"\n",
-            "license = \"MIT\"\n",
-            "status = \"revoked\"\n"
-        ),
-    )
-    .expect("config written");
-
-    let (code, _stdout, stderr) = output(env.cmd(), &add_args(&fixture, &config, &db, true));
-    assert_eq!(code, 3, "stderr: {stderr}");
-    assert!(stderr.contains("FETCH_BLOCKED"), "stderr: {stderr}");
-    assert!(
-        devdocs_testkit::read_chunks(&db).unwrap().is_empty(),
-        "a fresh revoked add must publish nothing"
-    );
 }
 
 /// `db migrate` runs the startup migration and is idempotent.

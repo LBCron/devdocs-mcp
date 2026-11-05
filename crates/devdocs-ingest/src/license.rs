@@ -26,43 +26,23 @@ pub struct LicenseGrant {
 ///
 /// # Errors
 /// [`Error::Upstream`] with `FETCH_BLOCKED` when no registry entry matches
-/// the URL (the `pending_review` deny-by-default refusal) or when the
-/// recorded stage sits below `approved_fetch`; [`Error::ConfigInvalid`]
-/// when an entry carries an unparsable status string.
+/// the URL (the `pending_review` deny-by-default refusal).
 pub fn gate_fetch(config: &Config, url: &Url) -> Result<LicenseGrant, Error> {
     let Some((name, entry)) = find_entry(config, url)? else {
         return Err(Error::Upstream {
             code: UpstreamCode::FetchBlocked,
             detail: format!(
-                "source {url} is pending_review; record it under [sources.<name>] with a status of \
-                 approved_fetch or higher to allow fetching"
+                "source {url} is pending_review; record it under [sources.<name>] to allow fetching"
             ),
         });
     };
 
-    let status = entry
-        .status
-        .as_deref()
-        .map_or(LicenseStatus::PendingReview, |raw| {
-            LicenseStatus::parse(raw).unwrap_or(LicenseStatus::PendingReview)
-        });
-    if let Some(raw) = entry.status.as_deref()
-        && LicenseStatus::parse(raw).is_none()
-    {
-        return Err(Error::ConfigInvalid {
-            key_path: format!("sources.{name}.status"),
-            reason: format!("unknown license status {raw:?}"),
-        });
-    }
-
-    if !status.allows_fetch() {
-        return Err(Error::Upstream {
-            code: UpstreamCode::FetchBlocked,
-            detail: format!(
-                "source {url} has license status {status}; fetching needs approved_fetch or higher"
-            ),
-        });
-    }
+    // TEMPORARY until the M7 store-backed gate lands (step 3): the config
+    // no longer carries the mutable license status — the store owns it
+    // (docs/implementation/07 §License gate) — so a registered entry
+    // mechanically falls back to the index stage and the fetch and publish
+    // gates keep their current behavior.
+    let status = LicenseStatus::ApprovedIndex;
 
     Ok(LicenseGrant {
         name,
@@ -74,12 +54,15 @@ pub fn gate_fetch(config: &Config, url: &Url) -> Result<LicenseGrant, Error> {
 /// The registry status behind a gate refusal for `url`, when the URL has
 /// an entry with a parseable status. The add path uses it to withdraw a
 /// source whose license turned terminal before the refusal returns
-/// (docs/implementation/09 §License gate enforcement points); an unparsable
-/// status is a config error and withdraws nothing.
+/// (docs/implementation/09 §License gate enforcement points).
+///
+/// TEMPORARY until the M7 store-backed gate lands (step 3): the config no
+/// longer records a license status, so this always returns `None` and the
+/// add path withdraws nothing on a refusal.
 #[must_use]
 pub fn refused_status(config: &Config, url: &Url) -> Option<LicenseStatus> {
-    let (_, entry) = find_entry(config, url).ok().flatten()?;
-    entry.status.as_deref().and_then(LicenseStatus::parse)
+    let _ = (config, url);
+    None
 }
 
 /// Finds the registry entry whose URL equals `url` exactly.
@@ -110,8 +93,11 @@ mod tests {
     use devdocs_model::source::LicenseStatus;
     use url::Url;
 
-    /// A config with one registered source.
-    fn config_with(name: &str, url: &str, status: Option<&str>) -> Config {
+    /// A config with one registered source. The entry carries no license
+    /// status: the store owns that state (docs/implementation/07 §License
+    /// gate); until the store-backed gate lands, a registered entry falls
+    /// back to the index stage.
+    fn config_with(name: &str, url: &str) -> Config {
         let mut sources = BTreeMap::new();
         sources.insert(
             String::from(name),
@@ -119,7 +105,8 @@ mod tests {
                 kind: Some(String::from("llms_txt")),
                 url: Some(String::from(url)),
                 license: Some(String::from("MIT")),
-                status: status.map(str::to_owned),
+                attribution: None,
+                expires: None,
                 refresh_days: None,
             },
         );
@@ -159,11 +146,7 @@ mod tests {
     /// contract.
     #[test]
     fn missing_entry_denies_by_default() {
-        let config = config_with(
-            "other",
-            "https://docs.other.test/llms.txt",
-            Some("approved_index"),
-        );
+        let config = config_with("other", "https://docs.other.test/llms.txt");
         let error = gate_fetch(&config, &url("https://docs.acme.test/llms.txt")).unwrap_err();
         match error {
             Error::Upstream {
@@ -174,82 +157,29 @@ mod tests {
         }
     }
 
-    /// A registered source at `approved_index` passes and carries the grant.
+    /// A registered source passes and carries the grant with the
+    /// temporary index-stage fallback.
     #[test]
     fn registered_source_passes() {
-        let config = config_with(
-            "acme",
-            "https://docs.acme.test/llms.txt",
-            Some("approved_index"),
-        );
+        let config = config_with("acme", "https://docs.acme.test/llms.txt");
         let grant = gate_fetch(&config, &url("https://docs.acme.test/llms.txt")).unwrap();
         assert_eq!(grant.name, "acme");
         assert_eq!(grant.status, LicenseStatus::ApprovedIndex);
         assert_eq!(grant.license.as_deref(), Some("MIT"));
     }
 
-    /// A source below `approved_fetch` refuses with `FETCH_BLOCKED`.
+    /// A refusal never names a registry status while the config carries no
+    /// license state: nothing is withdrawn on a refusal.
     #[test]
-    fn below_fetch_stage_refuses() {
-        let config = config_with("acme", "https://docs.acme.test/llms.txt", Some("denied"));
-        let error = gate_fetch(&config, &url("https://docs.acme.test/llms.txt")).unwrap_err();
-        match error {
-            Error::Upstream {
-                code: UpstreamCode::FetchBlocked,
-                detail,
-            } => assert!(detail.contains("denied"), "{detail}"),
-            other => panic!("expected FetchBlocked, got {other:?}"),
-        }
-    }
-
-    /// A missing status string parses as `pending_review` and refuses.
-    #[test]
-    fn missing_status_stays_pending_review() {
-        let config = config_with("acme", "https://docs.acme.test/llms.txt", None);
-        let error = gate_fetch(&config, &url("https://docs.acme.test/llms.txt")).unwrap_err();
-        match error {
-            Error::Upstream {
-                code: UpstreamCode::FetchBlocked,
-                ..
-            } => {}
-            other => panic!("expected FetchBlocked, got {other:?}"),
-        }
-    }
-
-    /// An unknown status string is a config error naming the key path.
-    #[test]
-    fn unknown_status_is_a_config_error() {
-        let config = config_with("acme", "https://docs.acme.test/llms.txt", Some("approved"));
-        let error = gate_fetch(&config, &url("https://docs.acme.test/llms.txt")).unwrap_err();
-        match error {
-            Error::ConfigInvalid { key_path, .. } => {
-                assert_eq!(key_path, "sources.acme.status");
-            }
-            other => panic!("expected ConfigInvalid, got {other:?}"),
-        }
-    }
-
-    /// A refusal names the parsed registry status when one exists; a URL
-    /// without an entry or with an unparsable status withdraws nothing.
-    #[test]
-    fn refused_status_names_the_registry_entry() {
-        let revoked = config_with("acme", "https://docs.acme.test/llms.txt", Some("revoked"));
+    fn refused_status_is_none_without_config_status() {
+        let registered = config_with("acme", "https://docs.acme.test/llms.txt");
         assert_eq!(
-            super::refused_status(&revoked, &url("https://docs.acme.test/llms.txt")),
-            Some(LicenseStatus::Revoked)
-        );
-        let unregistered = config_with(
-            "other",
-            "https://docs.other.test/llms.txt",
-            Some("approved_index"),
-        );
-        assert_eq!(
-            super::refused_status(&unregistered, &url("https://docs.acme.test/llms.txt")),
+            super::refused_status(&registered, &url("https://docs.acme.test/llms.txt")),
             None
         );
-        let unparsable = config_with("acme", "https://docs.acme.test/llms.txt", Some("approved"));
+        let unregistered = config_with("other", "https://docs.other.test/llms.txt");
         assert_eq!(
-            super::refused_status(&unparsable, &url("https://docs.acme.test/llms.txt")),
+            super::refused_status(&unregistered, &url("https://docs.acme.test/llms.txt")),
             None
         );
     }
@@ -257,18 +187,15 @@ mod tests {
     /// A registry entry without a URL is skipped, not an error.
     #[test]
     fn entry_without_a_url_is_skipped() {
-        let mut config = config_with(
-            "acme",
-            "https://docs.acme.test/llms.txt",
-            Some("approved_index"),
-        );
+        let mut config = config_with("acme", "https://docs.acme.test/llms.txt");
         config.sources.insert(
             String::from("ghost"),
             devdocs_model::config::SourceConfig {
                 kind: None,
                 url: None,
                 license: None,
-                status: None,
+                attribution: None,
+                expires: None,
                 refresh_days: None,
             },
         );
@@ -276,7 +203,7 @@ mod tests {
         assert_eq!(grant.name, "acme");
         assert_eq!(
             super::refused_status(&config, &url("https://docs.acme.test/llms.txt")),
-            Some(LicenseStatus::ApprovedIndex)
+            None
         );
     }
 }

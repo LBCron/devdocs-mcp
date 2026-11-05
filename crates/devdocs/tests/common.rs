@@ -163,8 +163,7 @@ fn write_config(root: &Path) -> PathBuf {
             "[sources.acme]\n",
             "kind = \"llms_txt\"\n",
             "url = \"https://docs.acme.test/llms.txt\"\n",
-            "license = \"MIT\"\n",
-            "status = \"approved_index\"\n"
+            "license = \"MIT\"\n"
         ),
     )
     .expect("config written");

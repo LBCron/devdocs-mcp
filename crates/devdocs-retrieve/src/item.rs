@@ -39,6 +39,9 @@ pub fn to_result_item(
         version_status: status,
         content_hash: hex(&hit.content_hash),
         license_status: hit.license_status.clone(),
+        // Attribution rides on the source record once the M7 license-gate
+        // store step carries it into the read path.
+        attribution: None,
         confidence,
         token_count: u64::from(hit.token_count),
     }

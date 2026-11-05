@@ -639,7 +639,7 @@ fn user_config_template() -> String {
         "# kind = \"llms_txt\"\n",
         "# url = \"https://nextjs.org/docs/llms.txt\"\n",
         "# license = \"MIT\"\n",
-        "# status = \"approved_snippet\"\n",
+        "# expires = \"2027-11-06\"\n",
         "# refresh_days = 2\n",
     ))
 }

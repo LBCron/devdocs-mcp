@@ -67,7 +67,9 @@ impl fmt::Display for SourceKind {
 /// [`LicenseStatus::ApprovedSnippet`] form a progression: each later stage
 /// implies the earlier ones. [`LicenseStatus::Denied`],
 /// [`LicenseStatus::Expired`], and [`LicenseStatus::Revoked`] end the
-/// progression from any point.
+/// progression from any point; a `denied` source can re-enter review
+/// ([`LicenseStatus::can_transition_to`]), while `expired` and `revoked`
+/// absorb every transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LicenseStatus {
     /// Default state; nothing is allowed beyond a review.
@@ -138,9 +140,13 @@ impl LicenseStatus {
         }
     }
 
-    /// Whether the status is a terminal refusal: it ends the lifecycle, and
-    /// a source carrying it drops out of retrieval
-    /// (docs/implementation/09 §License gate enforcement points).
+    /// Whether the status is a terminal refusal for retrieval: a source
+    /// carrying it drops out of search and serves
+    /// `not_available` (docs/implementation/09 §License gate enforcement
+    /// points). Terminal for retrieval is not the same as absorbing for
+    /// transitions — a `denied` source can re-enter review, while
+    /// `expired` and `revoked` admit no move out
+    /// ([`Self::can_transition_to`]).
     #[must_use]
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Denied | Self::Expired | Self::Revoked)
@@ -167,21 +173,19 @@ impl LicenseStatus {
     /// Whether the state machine admits the transition `self → next`
     /// (docs/implementation/07 §License gate transition table).
     ///
-    /// The approval stages form a forward-only progression and a terminal
-    /// refusal (`denied`, `expired`, `revoked`) is reachable from any state.
-    /// Every other move — backwards, sideways, or onto the same state — is
-    /// refused.
+    /// The approval stages form a forward-only progression, and a terminal
+    /// refusal (`denied`, `expired`, `revoked`) is reachable from any
+    /// non-terminal state. `denied` is the one refusal a review can lift:
+    /// `denied → pending_review` re-opens the review and is the sole exit
+    /// from a refusal. `expired` and `revoked` are absorbing — no move
+    /// leaves them, not even into another refusal. Every other move —
+    /// backwards, sideways, or onto the same state — is refused.
     #[must_use]
     pub const fn can_transition_to(self, next: Self) -> bool {
         use LicenseStatus::{
             ApprovedCache, ApprovedEmbed, ApprovedFetch, ApprovedIndex, ApprovedSnippet, Denied,
             Expired, PendingReview, Revoked,
         };
-        // Terminal refusals are absorbing: no move leaves them, not even
-        // into another refusal.
-        if matches!(self, Denied | Expired | Revoked) {
-            return false;
-        }
         matches!(
             (self, next),
             (PendingReview, ApprovedFetch)
@@ -189,7 +193,16 @@ impl LicenseStatus {
                 | (ApprovedIndex, ApprovedEmbed)
                 | (ApprovedEmbed, ApprovedCache)
                 | (ApprovedCache, ApprovedSnippet)
-                | (_, Denied | Expired | Revoked)
+                | (Denied, PendingReview)
+                | (
+                    PendingReview
+                        | ApprovedFetch
+                        | ApprovedIndex
+                        | ApprovedEmbed
+                        | ApprovedCache
+                        | ApprovedSnippet,
+                    Denied | Expired | Revoked
+                )
         )
     }
 }
@@ -301,58 +314,65 @@ mod tests {
         assert!(!LicenseStatus::Revoked.allows_index());
     }
 
-    /// The state machine admits only the documented transitions: the
-    /// forward progression, plus a terminal refusal from any state.
+    /// The exhaustive 9×9 transition table mirrors docs/07 §License gate
+    /// exactly: the forward progression, `denied → pending_review` as the
+    /// sole exit from a refusal, a terminal refusal from every
+    /// non-terminal state, and nothing else — no self-moves, no
+    /// backwards or sideways moves, no exit from `expired` or `revoked`.
     #[test]
-    fn transitions_follow_the_state_machine() {
+    fn transition_table_matches_docs_07_exactly() {
         use LicenseStatus::{
             ApprovedCache, ApprovedEmbed, ApprovedFetch, ApprovedIndex, ApprovedSnippet, Denied,
             Expired, PendingReview, Revoked,
         };
-
-        // The forward progression from docs/07 §License gate.
-        assert!(PendingReview.can_transition_to(ApprovedFetch));
-        assert!(ApprovedFetch.can_transition_to(ApprovedIndex));
-        assert!(ApprovedIndex.can_transition_to(ApprovedEmbed));
-        assert!(ApprovedEmbed.can_transition_to(ApprovedCache));
-        assert!(ApprovedCache.can_transition_to(ApprovedSnippet));
-
-        // A terminal refusal is reachable from any state.
-        for from in [
+        let all = [
             PendingReview,
             ApprovedFetch,
             ApprovedIndex,
             ApprovedEmbed,
             ApprovedCache,
             ApprovedSnippet,
-        ] {
-            assert!(from.can_transition_to(Denied), "{from:?} → denied");
-            assert!(from.can_transition_to(Expired), "{from:?} → expired");
-            assert!(from.can_transition_to(Revoked), "{from:?} → revoked");
-        }
+            Denied,
+            Expired,
+            Revoked,
+        ];
+        let non_terminal = [
+            PendingReview,
+            ApprovedFetch,
+            ApprovedIndex,
+            ApprovedEmbed,
+            ApprovedCache,
+            ApprovedSnippet,
+        ];
 
-        // Everything else — backwards, sideways, self, and out of a
-        // terminal state — is refused.
-        assert!(!PendingReview.can_transition_to(ApprovedIndex));
-        assert!(!PendingReview.can_transition_to(PendingReview));
-        assert!(!ApprovedFetch.can_transition_to(ApprovedFetch));
-        assert!(!ApprovedIndex.can_transition_to(ApprovedFetch));
-        assert!(!ApprovedSnippet.can_transition_to(ApprovedEmbed));
-        for from in [Denied, Expired, Revoked] {
-            for to in [
-                PendingReview,
-                ApprovedFetch,
-                ApprovedIndex,
-                ApprovedEmbed,
-                ApprovedCache,
-                ApprovedSnippet,
-                Denied,
-                Expired,
-                Revoked,
-            ] {
-                assert!(!from.can_transition_to(to), "{from:?} → {to:?}");
+        let mut legal_count = 0;
+        for from in all {
+            for to in all {
+                let forward = matches!(
+                    (from, to),
+                    (PendingReview, ApprovedFetch)
+                        | (ApprovedFetch, ApprovedIndex)
+                        | (ApprovedIndex, ApprovedEmbed)
+                        | (ApprovedEmbed, ApprovedCache)
+                        | (ApprovedCache, ApprovedSnippet)
+                );
+                let legal = forward
+                    || (from, to) == (Denied, PendingReview)
+                    || (matches!(to, Denied | Expired | Revoked) && non_terminal.contains(&from));
+                assert_eq!(from.can_transition_to(to), legal, "{from:?} → {to:?}");
+                if legal {
+                    legal_count += 1;
+                }
             }
         }
+        // 5 forward steps + denied → pending_review + 6 × 3 refusals.
+        assert_eq!(legal_count, 24, "the documented table has 24 legal moves");
+
+        // `denied` stays terminal for retrieval while re-entering review,
+        // and the two absorbing refusals admit no move out.
+        assert!(Denied.is_terminal());
+        assert!(Expired.is_terminal());
+        assert!(Revoked.is_terminal());
     }
 
     /// Source ids render as plain integers for logs and envelopes.

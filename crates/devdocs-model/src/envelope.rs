@@ -65,6 +65,11 @@ pub struct ResultItem {
     pub content_hash: String,
     /// The license status of the source.
     pub license_status: String,
+    /// The attribution line the source's license requires, when one is
+    /// recorded (docs/implementation/07 §License gate). Absent from the
+    /// JSON when no attribution applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<String>,
     /// The fusion confidence score.
     pub confidence: f64,
     /// The token count of the snippet.
@@ -108,10 +113,17 @@ pub struct SourceSummary {
     /// The origin adapter that produced the content, for example
     /// `llms_txt`.
     pub kind: String,
+    /// The SPDX license id the source records, when one is known.
+    pub license: Option<String>,
     /// The license approval stage of the source.
     pub license_status: String,
     /// Whether the source is active in search.
     pub active: bool,
+    /// When the content was fetched, RFC 3339 UTC.
+    pub fetched_at: String,
+    /// The date the license approval lapses, when one is recorded
+    /// (docs/implementation/07 §License gate).
+    pub license_expires_at: Option<String>,
     /// The commit the content was captured at, when the adapter records
     /// one (git sources only).
     pub commit_sha: Option<String>,
@@ -154,20 +166,68 @@ mod tests {
     }
 
     /// A source summary round-trips through the envelope JSON, so the
-    /// `list` output parses on the consumer side.
+    /// `list` output parses on the consumer side; the license and expiry
+    /// fields ride along.
     #[test]
     fn source_summary_round_trips_through_json() {
         let summary = SourceSummary {
             library: String::from("acme"),
             version: String::from("1.0"),
             kind: String::from("llms_txt"),
+            license: Some(String::from("MIT")),
             license_status: String::from("approved_index"),
             active: true,
+            fetched_at: String::from("2026-11-06T00:00:00Z"),
+            license_expires_at: Some(String::from("2027-11-06")),
             commit_sha: None,
         };
         let text = serde_json::to_string(&summary).unwrap();
         let back: SourceSummary = serde_json::from_str(&text).unwrap();
         assert_eq!(back, summary);
+    }
+
+    /// The result item carries the attribution line only when the source's
+    /// license requires one: the field is skipped in the JSON when absent
+    /// and present when set (docs/implementation/07 §License gate).
+    #[test]
+    fn result_item_serializes_attribution_only_when_set() {
+        use super::{Example, ResultItem, VersionStatus};
+
+        let base = ResultItem {
+            doc_ref: String::from("docs://acme/v1.0/intro"),
+            title: String::from("Intro"),
+            section: String::from("Intro"),
+            snippet: String::from("text"),
+            examples: Vec::<Example>::new(),
+            source_url: String::from("https://docs.acme.test/intro.md"),
+            source_commit: String::from("abc"),
+            requested_version: None,
+            served_version: String::from("1.0"),
+            version_status: VersionStatus::Verified,
+            content_hash: String::from("deadbeef"),
+            license_status: String::from("approved_snippet"),
+            attribution: None,
+            confidence: 1.0,
+            token_count: 4,
+        };
+
+        let without = serde_json::to_string(&base).unwrap();
+        assert!(
+            !without.contains("attribution"),
+            "absent attribution must be skipped: {without}"
+        );
+
+        let with = ResultItem {
+            attribution: Some(String::from("CC-BY-4.0 — (c) Acme Corp")),
+            ..base.clone()
+        };
+        let text = serde_json::to_string(&with).unwrap();
+        assert!(
+            text.contains(r#""attribution":"CC-BY-4.0 — (c) Acme Corp""#),
+            "set attribution must serialize: {text}"
+        );
+        let back: ResultItem = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, with);
     }
 
     /// The empty envelope carries the documented top-level shape and an
