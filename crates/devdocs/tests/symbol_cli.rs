@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{output, symbol_env};
+use common::{output, symbol_env, two_symbol_env};
 use devdocs_model::{ErrorEnvelope, ResultEnvelope};
 use serde_json::Value;
 
@@ -227,6 +227,57 @@ fn symbol_absent_is_no_result_with_the_search_hint() {
         envelope.hint.as_deref(),
         Some("run: devdocs search <symbol>")
     );
+}
+
+/// A symbol page cut by the token budget carries `next_cursor`, and
+/// `--cursor` resumes after it (docs/implementation/08 §CLI contract):
+/// the second page exits 0, serves the hit the budget cut, and closes
+/// the page.
+#[test]
+fn symbol_cursor_resumes_a_truncated_page() {
+    let (env, config) = two_symbol_env();
+    let cfg = ["--config", config.to_str().expect("config path")];
+
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "symbol",
+            "acme@1.0",
+            "makeWidget",
+            "--max-tokens",
+            "1",
+            "--json",
+            cfg[0],
+            cfg[1],
+        ],
+    );
+    assert_eq!(code, 0, "symbol failed: {stderr}");
+    let page: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
+    assert!(page.truncated, "a one-token budget truncates");
+    assert_eq!(page.results.len(), 1, "rank 1 stays: {stdout}");
+    let cursor = page.next_cursor.expect("resume cursor present");
+
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "symbol",
+            "acme@1.0",
+            "makeWidget",
+            "--max-tokens",
+            "1",
+            "--cursor",
+            &cursor,
+            "--json",
+            cfg[0],
+            cfg[1],
+        ],
+    );
+    assert_eq!(code, 0, "symbol resume failed: {stderr}");
+    let resumed: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("envelope");
+    assert_eq!(resumed.results.len(), 1, "the cut hit serves: {stdout}");
+    assert_ne!(resumed.results[0].doc_ref, page.results[0].doc_ref);
+    assert_eq!(resumed.next_cursor, None);
+    assert!(!resumed.truncated);
 }
 
 /// A malformed target is a usage error: exit 1.

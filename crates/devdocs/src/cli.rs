@@ -113,10 +113,13 @@ pub enum Command {
     },
     /// Exact symbol lookup.
     Symbol {
-        /// The library@version to search.
+        /// The library[@version] to search.
         target: String,
         /// The symbol name.
         symbol: String,
+        /// Resume after the last served chunk id from a truncated page.
+        #[arg(long)]
+        cursor: Option<u64>,
     },
     /// Read one section by ref.
     Open {
@@ -336,7 +339,11 @@ pub fn run(cli: &Cli) -> Result<(), Error> {
         Command::Open { doc_ref, cursor } => run_open_command(cli, doc_ref, *cursor),
         Command::Verify { doc_ref } => run_verify_command(cli, doc_ref),
         Command::Versions { library } => run_versions_command(cli, library),
-        Command::Symbol { target, symbol } => run_symbol_command(cli, target, symbol),
+        Command::Symbol {
+            target,
+            symbol,
+            cursor,
+        } => run_symbol_command(cli, target, symbol, *cursor),
         Command::Sync { .. }
         | Command::Source { .. }
         | Command::Skill { .. }
@@ -365,9 +372,14 @@ fn run_search_command(
 }
 
 /// Runs `devdocs symbol` and prints the exact-lookup envelope.
-fn run_symbol_command(cli: &Cli, target: &str, symbol: &str) -> Result<(), Error> {
+fn run_symbol_command(
+    cli: &Cli,
+    target: &str,
+    symbol: &str,
+    cursor: Option<u64>,
+) -> Result<(), Error> {
     let config = Config::load(&overrides(cli))?;
-    let envelope = crate::commands::run_symbol(&config, target, symbol)?;
+    let envelope = crate::commands::run_symbol(&config, target, symbol, cursor)?;
     if cli.json {
         print_line(&envelope)
     } else {

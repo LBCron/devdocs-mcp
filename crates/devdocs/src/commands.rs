@@ -140,21 +140,26 @@ fn split_symbol_target(target: &str) -> Result<(&str, Option<&str>), Error> {
 /// Runs `devdocs symbol <target> <symbol>` (docs/implementation/08 §CLI
 /// contract): the exact symbol lookup over the resolved target. The limit
 /// is the documented search default — docs/08 defines no `--limit` flag
-/// for the symbol command.
+/// for the symbol command; `--cursor` resumes a truncated page.
 ///
 /// # Errors
 /// [`Error::NoResult`] on the miss paths (exit 2: `PKG_NOT_INDEXED` for an
 /// absent target, `NO_RESULT`/`symbol_absent` for an identifier the target
-/// does not carry), [`Error::Usage`] for a malformed target,
+/// does not carry), [`Error::Usage`] for a malformed target or cursor,
 /// [`Error::Upstream`] for store failures.
-pub fn run_symbol(config: &Config, target: &str, symbol: &str) -> Result<ResultEnvelope, Error> {
+pub fn run_symbol(
+    config: &Config,
+    target: &str,
+    symbol: &str,
+    cursor: Option<u64>,
+) -> Result<ResultEnvelope, Error> {
     let (library, version) = split_symbol_target(target)?;
     let store = open_store(config, false)?;
     let plan = devdocs_retrieve::Plan {
         limit: config.search.limit_default,
         max_tokens: config.search.max_tokens_default,
         rrf_k: config.search.rrf_k,
-        cursor: None,
+        cursor,
     };
     devdocs_retrieve::serve::symbol(&store, library, version, symbol, &plan)
         .map_err(map_retrieve_error)

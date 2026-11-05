@@ -229,6 +229,47 @@ pub fn symbol_env() -> (Env, PathBuf) {
     (env, config)
 }
 
+/// A second symbol page: `makeWidget` declared again, in its own chunk.
+const WIDGETS_SYMBOL: &str = concat!(
+    "# Widgets\n\n",
+    "The factory grows a second form.\n\n",
+    "## Overloads\n\n",
+    "```js\n",
+    "export function makeWidget(name, zone) {\n",
+    "  return { name, zone };\n",
+    "}\n",
+    "```\n"
+);
+
+/// The index listing both symbol pages.
+const SYMBOL_INDEX: &str = concat!(
+    "# Acme\n\n> Acme widgets documentation.\n\n",
+    "## Guides\n\n",
+    "- [Intro](https://docs.acme.test/intro.md): Start here\n",
+    "- [Widgets](https://docs.acme.test/widgets.md): The widget factory\n"
+);
+
+/// The replay responses the two-symbol corpus serves.
+fn symbol_responses() -> Value {
+    serde_json::json!([
+        { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": SYMBOL_INDEX },
+        { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": INTRO_SYMBOL },
+        { "url": "https://docs.acme.test/widgets.md", "status": 200, "headers": {}, "body": WIDGETS_SYMBOL },
+    ])
+}
+
+/// An indexed fixture corpus where the symbol query `makeWidget` matches
+/// two chunks (the declaration appears on both pages): the shape the
+/// cursor-resume tests need. Returns the environment and the config path.
+pub fn two_symbol_env() -> (Env, PathBuf) {
+    let env = Env::new();
+    let dir = env.root.join("fixture");
+    std::fs::create_dir_all(&dir).expect("fixture dir");
+    let config = write_config(&env.root);
+    add_fixture_version(&env, &dir, &config, "1.0", &symbol_responses());
+    (env, config)
+}
+
 /// Search the indexed corpus and return the first result: the doc the
 /// open/verify surfaces exercise.
 pub fn indexed_doc(env: &Env, config: &Path) -> ResultItem {

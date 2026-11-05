@@ -220,6 +220,7 @@ pub fn symbol(
     if fused.is_empty() {
         return Err(MissReason::SymbolAbsent.into());
     }
+    let fused = resume_after_cursor(fused, plan.cursor)?;
     let pick_status = if served_version.is_some() {
         VersionStatus::Verified
     } else {
