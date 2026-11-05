@@ -4,8 +4,9 @@
 //! Every `git` invocation is an argv vector against the system binary —
 //! no shell, no interpolated command line — with the subprocess-safety
 //! hardening of docs/implementation/09 §Git subprocess safety: the
-//! ambient `GIT_*` location variables stripped, prompting and the system
-//! config disabled, and hooks and LFS filters disabled per command. The
+//! ambient `GIT_*` location and control variables stripped, prompting and
+//! the system config disabled, and hooks and LFS filters disabled per
+//! command. The
 //! clone lands in a mode-0700 directory under `<data_root>/tmp` that a
 //! `Drop` guard removes, and a SIGINT/SIGTERM handler (installed once per
 //! process, idempotent) removes the registered path before exiting 130.
@@ -23,7 +24,10 @@ use crate::error::IngestError;
 
 /// The `GIT_*` environment variables every invocation strips, so an
 /// ambient value cannot redirect the child to another repository or
-/// object store (docs/implementation/09 §Git subprocess safety).
+/// object store, inject config, or hijack prompting and SSH
+/// (docs/implementation/09 §Git subprocess safety). Removing
+/// `GIT_CONFIG_COUNT` disables the whole ambient
+/// `GIT_CONFIG_KEY_i`/`GIT_CONFIG_VALUE_i` config family.
 const STRIPPED_ENV: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -31,6 +35,11 @@ const STRIPPED_ENV: &[&str] = &[
     "GIT_OBJECT_DIRECTORY",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_COMMON_DIR",
+    "GIT_CONFIG_COUNT",
+    "GIT_ASKPASS",
+    "GIT_SSH_COMMAND",
+    "GIT_SSH_VARIANT",
+    "GIT_STDERR",
 ];
 
 /// Per-command git config, applied to every invocation: checkout hooks
@@ -46,7 +55,9 @@ const BASE_CONFIG: &[&str] = &[
 
 /// The process-global one-slot registry the SIGINT/SIGTERM handler reads.
 /// A second live clone replaces the registration; each guard still
-/// removes its own path on drop.
+/// removes its own path on drop. The single slot assumes one git ingest
+/// per process (true today); it must become a set when concurrent git
+/// runs land.
 static REGISTERED_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// Guards the one-time `ctrlc` handler installation.
@@ -74,6 +85,36 @@ pub fn install_signal_cleanup() {
     });
 }
 
+/// Removes every `devdocs-git-*` entry under `tmp` except the currently
+/// registered path (one slot; the clone of the slot is taken first). The
+/// sweep is best effort — every error is ignored — and covers clone dirs
+/// left behind when the total-cap timeout drops the `spawn_blocking`
+/// future and the process exits before the guard's drop runs
+/// (docs/implementation/09 §Local storage controls). It runs at the next
+/// `TempClone::create`, i.e. the next `add` run of this short-lived CLI
+/// process.
+fn sweep_stale_clones(tmp: &Path) {
+    let registered = REGISTERED_PATH.lock().ok().and_then(|slot| slot.clone());
+    let Ok(entries) = std::fs::read_dir(tmp) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_clone_entry = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("devdocs-git-"));
+        if !is_clone_entry || Some(path.as_path()) == registered.as_deref() {
+            continue;
+        }
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(&path);
+        } else {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 /// What kind of pin a plan resolved to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PinKind {
@@ -95,10 +136,13 @@ pub struct TempClone {
 
 impl TempClone {
     /// Creates `<data_root>/tmp` with mode 0700, then a random-named
-    /// subdirectory inside it, and verifies both modes on Unix.
+    /// subdirectory inside it, and verifies both modes on Unix. A
+    /// best-effort sweep first removes stale clone dirs left by an
+    /// aborted run.
     fn create(data_root: &Path) -> Result<Self, IngestError> {
         let tmp = data_root.join("tmp");
         create_private_dir(&tmp)?;
+        sweep_stale_clones(&tmp);
         let handle = tempfile::Builder::new()
             .prefix("devdocs-git-")
             .tempdir_in(&tmp)
@@ -399,10 +443,8 @@ fn verify_private_dir(_path: &Path) -> Result<(), IngestError> {
 /// Runs one `git` invocation from `cwd` and returns trimmed stdout.
 ///
 /// The command is an argv vector: `git`, the per-command `-c` config
-/// (base plus extras), then `args`. The child env pins
-/// `GIT_TERMINAL_PROMPT=0` and `GIT_CONFIG_NOSYSTEM=1` and strips the
-/// ambient `GIT_*` location variables
-/// (docs/implementation/09 §Git subprocess safety).
+/// (base plus extras), then `args`. The child env comes from
+/// [`pin_env`] (docs/implementation/09 §Git subprocess safety).
 fn run_git(cwd: &Path, args: &[&str], extra_config: &[&str]) -> Result<String, IngestError> {
     let mut command = Command::new("git");
     for config in BASE_CONFIG
@@ -413,11 +455,7 @@ fn run_git(cwd: &Path, args: &[&str], extra_config: &[&str]) -> Result<String, I
         command.arg("-c").arg(config);
     }
     command.args(args).current_dir(cwd);
-    command.env("GIT_TERMINAL_PROMPT", "0");
-    command.env("GIT_CONFIG_NOSYSTEM", "1");
-    for key in STRIPPED_ENV {
-        command.env_remove(key);
-    }
+    pin_env(&mut command);
     let output = command.output().map_err(|error| match error.kind() {
         io::ErrorKind::NotFound => IngestError::GitBinaryMissing,
         _ => IngestError::GitSpawn {
@@ -431,6 +469,19 @@ fn run_git(cwd: &Path, args: &[&str], extra_config: &[&str]) -> Result<String, I
         });
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// Applies the child env every invocation carries: the prompt and system
+/// config pins, then the removal of every [`STRIPPED_ENV`] variable so an
+/// ambient value cannot reach the git child (docs/implementation/09 §Git
+/// subprocess safety). Extracted so tests assert on the builder's env
+/// handling exactly as `run_git` applies it.
+fn pin_env(command: &mut Command) {
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    command.env("GIT_CONFIG_NOSYSTEM", "1");
+    for key in STRIPPED_ENV {
+        command.env_remove(key);
+    }
 }
 
 /// The bounded stderr tail for an error: the last 512 characters, cut on
@@ -798,6 +849,82 @@ mod tests {
         drop(guard);
         assert_eq!(*super::REGISTERED_PATH.lock().unwrap(), None);
         assert!(!path.exists());
+    }
+
+    /// Planted ambient `GIT_*` control and location variables never reach
+    /// the git child: the builder removes them the way `run_git` applies
+    /// the env (docs/implementation/09 §Git subprocess safety).
+    #[test]
+    fn planted_ambient_git_env_never_reaches_the_child() {
+        let mut command = StdCommand::new("git");
+        // What an operator shell may carry into the process.
+        for (key, value) in [
+            ("GIT_CONFIG_COUNT", "1"),
+            ("GIT_CONFIG_KEY_0", "core.fsmonitor"),
+            ("GIT_CONFIG_VALUE_0", "/evil/fsmonitor"),
+            ("GIT_ASKPASS", "/evil/askpass"),
+            ("GIT_SSH_COMMAND", "evil-ssh"),
+            ("GIT_SSH_VARIANT", "evil"),
+            ("GIT_STDERR", "/evil/stderr"),
+            ("GIT_DIR", "/evil/dir"),
+        ] {
+            command.env(key, value);
+        }
+
+        super::pin_env(&mut command);
+
+        let envs: std::collections::HashMap<_, _> = command.get_envs().collect();
+        for key in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+            "GIT_CONFIG_COUNT",
+            "GIT_ASKPASS",
+            "GIT_SSH_COMMAND",
+            "GIT_SSH_VARIANT",
+            "GIT_STDERR",
+        ] {
+            assert_eq!(
+                envs.get(std::ffi::OsStr::new(key)),
+                Some(&None),
+                "{key} must be removed from the child env"
+            );
+        }
+        for key in ["GIT_TERMINAL_PROMPT", "GIT_CONFIG_NOSYSTEM"] {
+            assert!(
+                envs.get(std::ffi::OsStr::new(key))
+                    .is_some_and(Option::is_some),
+                "{key} must be pinned on the child env"
+            );
+        }
+    }
+
+    /// A stale clone dir planted under the tmp root is swept at the next
+    /// `TempClone::create`, and the freshly created dir survives
+    /// (docs/implementation/09 §Local storage controls).
+    #[test]
+    fn a_stale_clone_dir_is_swept_at_the_next_create() {
+        let _order = TEMP_CLONE_ORDER.lock().unwrap();
+        let data = tempdir().unwrap();
+        // The tmp root exists at mode 0700 in production; the sweep must
+        // not depend on `create` bootstrapping it.
+        let tmp = data.path().join("tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let stale = tmp.join("devdocs-git-stale");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("leftover"), "x").unwrap();
+
+        let guard = super::TempClone::create(data.path()).unwrap();
+        assert!(!stale.exists(), "the stale clone dir must be swept");
+        assert!(guard.path().exists(), "the new clone dir must survive");
     }
 
     /// A 40-hex uppercase pin normalizes to lowercase; a 40-char
