@@ -113,6 +113,7 @@ Some tasks point into the design docs instead — they are the deeper source of 
 Apply to every commit you make, always — read this before committing anything:
 
 - Never squash a whole feature, fix, ticket, or GitHub issue into a single big commit. Split the work into meaningful commits — one per logical step (e.g. model/types, store/schema, retrieval, CLI/MCP wiring, docs).
+- Never dump a batch of accumulated uncommitted changes into one huge commit. Group the changes by concern and commit each group on its own — every commit carries one meaningful step.
 - Each commit must keep the application in a working state: it compiles and `just test` stays green at that commit. Never leave a commit half-migrated or mid-refactor.
 - Commit messages follow one unified structure:
 
