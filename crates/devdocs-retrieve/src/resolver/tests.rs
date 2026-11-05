@@ -400,6 +400,20 @@ fn mentions_that_match_nothing_stay_unfiltered() {
     assert_eq!(blank.source, ResolutionSource::Unfiltered);
 }
 
+/// An English word followed by a digit token is a mention — "use 3"
+/// resolves to the library `use`. The lexical rule cannot separate this
+/// from a real `next.js 16` mention without a dictionary; the serve
+/// layer guards the false positive instead: an absent weak-hint library
+/// falls back to the unfiltered search.
+#[test]
+fn an_english_word_before_a_digit_is_a_weak_mention() {
+    let empty = ProjectContext::empty();
+    let resolved = resolve(&Query::new("how to use 3 hooks", None, None), &empty);
+    assert_eq!(resolved.source, ResolutionSource::QueryMention);
+    assert_eq!(resolved.library.as_deref(), Some("use"));
+    assert_eq!(resolved.version.as_deref(), Some("3"));
+}
+
 /// An empty crate name in a Cargo.lock row is skipped.
 #[test]
 fn cargo_lock_rows_with_empty_names_are_skipped() {

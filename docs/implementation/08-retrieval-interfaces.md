@@ -37,7 +37,7 @@ Order, highest first:
 | `Gemfile.lock` | internal line parser | `GEM specs` section (phase 2) |
 
 3. Query text mentions (`next.js 16`) as a weak hint. A leading `v` on a mention version is stripped, so the hint matches the index's bare version spelling.
-4. Fallback: no library filter. Search all approved sources. An explicit version that the index carries narrows the fallback to that version; an absent version follows the fallback ladder (§Version policy).
+4. Fallback: no library filter. Search all approved sources. An explicit version that the index carries narrows the fallback to that version; an absent version follows the fallback ladder (§Version policy). A library the lockfile or a query mention named that is absent from the index degrades to this fallback too — the flag layer is the only source that names a library hard.
 
 The precedence applies per field: a flag beats the lockfile in the field it fills, and a field the flags leave open falls to the lockfile — but a lockfile entry never donates its version to a library a flag named unless the entry is that library.
 
@@ -50,7 +50,7 @@ Policy (research: retrieval-design.md §3.4): never serve `latest` silently when
 | `verified` | Served version equals the requested exact version |
 | `alias` | Requested `latest` or a major alias, resolved by the declared rule, stated in the result |
 | `fallback` | Requested version absent. Served the nearest available version, named in the result. Counts as a miss for grading |
-| `absent` | Library absent from the index. Exit 2 with `miss_reason` |
+| `absent` | Library absent from the index and named by an explicit flag. Exit 2 with `miss_reason` |
 
 The declared rules the implementation applies: the alias rule serves the highest active version, and the highest active version within the requested major for a major alias (`16`); a request with no version at all serves the highest active version under the same alias rule. The fallback rule serves the nearest available version — same major first, closest numeric distance `|Δmajor|·10⁶ + |Δminor|·10³ + |Δpatch|`; with no shared major the same distance rule applies across majors, so the closest major serves.
 
@@ -200,7 +200,7 @@ Stable `UPPER_SNAKE` codes in JSON errors and MCP errors:
 | `USAGE` | 1 | Bad flags or config |
 | `CONFIG_INVALID` | 1 | Config file failed validation |
 | `NO_RESULT` | 2 | Valid query, nothing served |
-| `PKG_NOT_INDEXED` | 2 | Library or version absent. Hint names the add command |
+| `PKG_NOT_INDEXED` | 2 | Library or version absent from an explicitly named request. Hint names the add command. A lockfile- or mention-named absent library falls through to the fallback search instead |
 | `FETCH_BLOCKED` | 3 | Fetch guard or license gate refused |
 | `UPSTREAM_ERROR` | 3 | Network, git, or parse failure |
 | `BUDGET_EXCEEDED` | 4 | Budget consumed with no deliverable content |

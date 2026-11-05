@@ -108,10 +108,42 @@ pub fn search(
     })
 }
 
+/// The fallback rungs (docs/08 §Version resolution, step 4): search every
+/// approved source. A version that the index carries narrows the fallback
+/// to it — the flags carry top precedence (docs/08 §Version resolution,
+/// step 1). An absent version follows the fallback ladder instead: serve
+/// the nearest available and label it (docs/08 §Version policy). Per-item
+/// status stays the alias default; an exact-request hit verifies through
+/// `item_status`.
+///
+/// # Errors
+/// [`RetrieveError::Store`] for store failures.
+fn fallback_rung_hits(
+    store: &Store,
+    query: &Query,
+    version: Option<&str>,
+    headroom: u32,
+    rung_hits: &mut Vec<Vec<Hit>>,
+) -> Result<(VersionStatus, Option<String>, Option<String>), RetrieveError> {
+    match version {
+        Some(version) => {
+            let expr = rung_match_expr(&query.text);
+            let scoped = store.search_fts_version(&expr, version, headroom)?;
+            if scoped.is_empty() {
+                rung_hits.push(fts_rung(store, &query.text, Scope::All, headroom)?);
+            } else {
+                rung_hits.push(scoped);
+            }
+        }
+        None => rung_hits.push(fts_rung(store, &query.text, Scope::All, headroom)?),
+    }
+    Ok((VersionStatus::Alias, None, version.map(str::to_owned)))
+}
+
 /// The version-resolution rungs (docs/08 §Version resolution): with a
 /// resolved library, the served source's FTS rung plus the
 /// migration-question rung via [`nearest_older`]; without one, the
-/// unfiltered fallback over all approved sources. Appends the rungs to
+/// fallback rungs via [`fallback_rung_hits`]. Appends the rungs to
 /// `rung_hits` and returns the per-item status inputs — the pick status,
 /// the served version, and the requested version.
 ///
@@ -127,27 +159,15 @@ fn version_rung_hits(
     rung_hits: &mut Vec<Vec<Hit>>,
 ) -> Result<(VersionStatus, Option<String>, Option<String>), RetrieveError> {
     let Some(library) = &resolved.library else {
-        // The fallback: without a library, search every approved source
-        // (docs/08 §Version resolution, step 4). An explicit version that
-        // the index carries filters the fallback to it — the flags carry
-        // top precedence (docs/08 §Version resolution, step 1). An absent
-        // version follows the fallback ladder instead: serve the nearest
-        // available and label it (docs/08 §Version policy). Per-item
-        // status stays the alias default; an exact-request hit verifies
-        // through `item_status`.
-        match resolved.version.as_deref() {
-            Some(version) => {
-                let expr = rung_match_expr(&query.text);
-                let scoped = store.search_fts_version(&expr, version, headroom)?;
-                if scoped.is_empty() {
-                    rung_hits.push(fts_rung(store, &query.text, Scope::All, headroom)?);
-                } else {
-                    rung_hits.push(scoped);
-                }
-            }
-            None => rung_hits.push(fts_rung(store, &query.text, Scope::All, headroom)?),
-        }
-        return Ok((VersionStatus::Alias, None, resolved.version.clone()));
+        // Without a library, search every approved source (docs/08
+        // §Version resolution, step 4).
+        return fallback_rung_hits(
+            store,
+            query,
+            resolved.version.as_deref(),
+            headroom,
+            rung_hits,
+        );
     };
     let available: Vec<Version> = store
         .library_versions(library)?
@@ -155,6 +175,15 @@ fn version_rung_hits(
         .map(Version::from)
         .collect();
     if available.is_empty() {
+        if query.library.is_none() {
+            // The library came from a lockfile or a query mention — a
+            // weak hint (docs/08 §Version resolution, steps 2 and 3). An
+            // absent weak-hint library degrades to the fallback (step 4);
+            // only a flag-named library is a hard miss. A version rides
+            // along only from the flags (step 1), never from the weak
+            // hint that named the absent library.
+            return fallback_rung_hits(store, query, query.version.as_deref(), headroom, rung_hits);
+        }
         return Err(MissReason::NotIndexed.into());
     }
     let pick = pick(&available, resolved.version.as_deref());

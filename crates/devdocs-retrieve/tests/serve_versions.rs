@@ -161,6 +161,118 @@ fn a_version_only_request_filters_to_that_version() {
     );
 }
 
+/// Seeds `acme` 1.0.0 with one chunk phrased so a query can carry a
+/// false-positive mention ("use 3") and still match the text.
+fn seeded_mention_texts() -> (tempfile::TempDir, Store) {
+    let dir = tempdir().unwrap();
+    let store = devdocs_testkit::open_migrated_and(&dir.path().join("docs.db"), |conn| {
+        let source = devdocs_testkit::seed_source(conn, "acme", true)?;
+        devdocs_testkit::seed_chunk(
+            conn,
+            source,
+            0,
+            "[\"Routing\"]",
+            None,
+            "how to use 3 hooks in the routing layer",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    (dir, store)
+}
+
+/// A query mention that names an unindexed library — "use 3": any name
+/// followed by a digit token is a mention — degrades to the fallback
+/// search over all approved sources instead of a hard miss. The mention
+/// is a weak hint (docs/08 §Version resolution, steps 3 and 4).
+#[test]
+fn a_query_mention_for_an_unindexed_library_falls_back() {
+    let (dir, store) = seeded_mention_texts();
+    let query = Query::new("how to use 3 hooks in routing", None, None);
+    let envelope = search(&store, &query, dir.path(), &Plan::defaults()).unwrap();
+    assert!(
+        !envelope.results.is_empty(),
+        "the weak-hint mention must fall back to the unfiltered search"
+    );
+    assert!(
+        envelope
+            .results
+            .iter()
+            .all(|item| item.version_status == VersionStatus::Alias),
+        "the fallback serves the alias default, got {:?}",
+        envelope
+            .results
+            .iter()
+            .map(|item| item.version_status)
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A lockfile entry for a library the index does not carry degrades to
+/// the fallback search — the lockfile is a weak hint, and its first
+/// entry is an arbitrary dependency (docs/08 §Version resolution, steps
+/// 2 and 4).
+#[test]
+fn a_lockfile_library_missing_from_the_index_falls_back() {
+    let (_dir, store) = seeded_two_versions();
+    let project = tempdir().unwrap();
+    std::fs::write(
+        project.path().join("Cargo.lock"),
+        "[[package]]\nname = \"zlib\"\nversion = \"1.2.3\"\n",
+    )
+    .unwrap();
+    let query = Query::new("routing", None, None);
+    let envelope = search(&store, &query, project.path(), &Plan::defaults()).unwrap();
+    assert!(
+        !envelope.results.is_empty(),
+        "the weak-hint lockfile must fall back to the unfiltered search"
+    );
+}
+
+/// A weak-hint library with an explicit version flag falls back scoped
+/// to the flag version — the flag carries top precedence even when the
+/// library hint came from a lockfile (docs/08 §Version resolution,
+/// steps 1, 2, and 4).
+#[test]
+fn a_weak_hint_library_with_a_version_flag_falls_back_scoped() {
+    let (_dir, store) = seeded_two_versions();
+    let project = tempdir().unwrap();
+    std::fs::write(
+        project.path().join("Cargo.lock"),
+        "[[package]]\nname = \"zlib\"\nversion = \"1.2.3\"\n",
+    )
+    .unwrap();
+    let query = Query::new("routing", None, Some("0.9.0"));
+    let envelope = search(&store, &query, project.path(), &Plan::defaults()).unwrap();
+    let versions: Vec<&str> = envelope
+        .results
+        .iter()
+        .map(|item| item.served_version.as_str())
+        .collect();
+    assert_eq!(versions, vec!["0.9.0"]);
+    assert!(
+        envelope
+            .results
+            .iter()
+            .all(|item| item.version_status == VersionStatus::Verified),
+        "the exact-request hits must verify"
+    );
+}
+
+/// A flag-named library that the index does not carry still misses with
+/// `not_indexed` — only the weak hints (lockfile, mention) degrade to
+/// the fallback (docs/08 §Version policy: `absent`).
+#[test]
+fn a_flag_named_absent_library_still_misses_not_indexed() {
+    let (dir, store) = seeded_two_versions();
+    let query = Query::new("routing", Some("missing"), None);
+    let error = search(&store, &query, dir.path(), &Plan::defaults()).unwrap_err();
+    assert!(
+        matches!(error, RetrieveError::Miss(MissReason::NotIndexed)),
+        "a flag-named absent library must miss, got {error}"
+    );
+}
+
 /// Searching an empty migrated store misses with `not_indexed`, not
 /// `low_confidence` — there is no active source to search.
 #[test]
