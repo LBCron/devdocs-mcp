@@ -58,6 +58,7 @@ fn chunk(ordinal: u32, symbol: Option<(&str, &str)>, body: &str) -> NewChunk {
         token_count: 16,
         content_hash: content_hash(body),
         ordinal,
+        page_url: None,
     }
 }
 

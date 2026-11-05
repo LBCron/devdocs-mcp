@@ -28,6 +28,9 @@ pub struct NewChunk {
     pub content_hash: [u8; 32],
     /// Position of the chunk inside its source, zero-based.
     pub ordinal: u32,
+    /// The linked-page URL the chunk's body came from; `None` for chunks
+    /// without one (docs/implementation/07 §llms.txt adapter).
+    pub page_url: Option<String>,
 }
 
 /// A documented symbol and its kind, stored in `chunks.symbol` and
@@ -185,7 +188,7 @@ fn insert_chunks(
     let mut insert = tx
         .prepare(
             "INSERT INTO chunks(source_id, content_hash, section_path, symbol, text, \
-             token_count, ordinal) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             token_count, ordinal, page_url) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )
         .map_err(StoreError::Sql)?;
     for chunk in chunks {
@@ -199,6 +202,7 @@ fn insert_chunks(
                 chunk.text,
                 i64::from(chunk.token_count),
                 i64::from(chunk.ordinal),
+                chunk.page_url.as_deref(),
             ])
             .map_err(StoreError::Sql)?;
         if let Some(sym) = &chunk.symbol {

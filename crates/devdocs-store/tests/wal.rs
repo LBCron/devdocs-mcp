@@ -122,7 +122,7 @@ fn a_second_writer_reports_busy() {
 }
 
 /// Two stores can open the same file at once and both migrate: the first
-/// applies schema 0001, the second applies nothing.
+/// applies the schema, the second applies nothing.
 #[test]
 fn concurrent_open_and_migrate_succeed() {
     let dir = tempdir().unwrap();
@@ -132,7 +132,7 @@ fn concurrent_open_and_migrate_succeed() {
     let store_b = devdocs_store::Store::open(&path).unwrap();
 
     let applied_a = store_a.migrate().unwrap();
-    assert_eq!(applied_a.len(), 1, "the first migrator applies schema 0001");
+    assert_eq!(applied_a.len(), 2, "the first migrator applies the schema");
     let applied_b = store_b.migrate().unwrap();
     assert!(applied_b.is_empty(), "the second migrator must be a no-op");
 }

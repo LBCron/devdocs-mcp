@@ -51,6 +51,9 @@ pub struct Hit {
     pub content_hash: [u8; 32],
     /// The source's upstream origin URL.
     pub source_url: String,
+    /// The linked-page URL the chunk's body came from; `None` when the
+    /// chunk carries none (docs/implementation/07 §llms.txt adapter).
+    pub page_url: Option<String>,
     /// The upstream commit the source was captured at, when known.
     pub source_commit: Option<String>,
     /// The source's license approval stage.
@@ -77,8 +80,8 @@ fn section_path(
 
 /// The chunk and source columns both queries share, in a fixed order:
 /// `chunk_id, source_id, library, version, section_path, symbol, text,
-/// token_count, content_hash, origin_url, commit_sha, license_status` at
-/// indices 0..12.
+/// token_count, content_hash, origin_url, commit_sha, license_status,
+/// page_url` at indices 0..13.
 struct BaseColumns {
     chunk_id: i64,
     source_id: i64,
@@ -92,6 +95,7 @@ struct BaseColumns {
     source_url: String,
     source_commit: Option<String>,
     license_status: String,
+    page_url: Option<String>,
 }
 
 /// Reads [`BaseColumns`] from a row laid out at the shared column order.
@@ -110,6 +114,7 @@ fn base_columns(row: &rusqlite::Row<'_>) -> rusqlite::Result<BaseColumns> {
         source_url: row.get(9)?,
         source_commit: row.get(10)?,
         license_status: row.get(11)?,
+        page_url: row.get(12)?,
     })
 }
 
@@ -127,7 +132,7 @@ fn hash_bytes(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<[u8; 32]>
 }
 
 /// Maps an FTS row laid out at the shared column order to a [`Hit`] with
-/// its `snippet()` fragment and bm25 rank (indices 12, 13).
+/// its `snippet()` fragment and bm25 rank (indices 13, 14).
 fn fts_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<Hit> {
     let base = base_columns(row)?;
     Ok(Hit {
@@ -138,14 +143,15 @@ fn fts_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<Hit> {
         section_path: base.section_path,
         symbol: base.symbol,
         symbol_kind: None,
-        snippet: Some(row.get(12)?),
+        snippet: Some(row.get(13)?),
         text: base.text,
         token_count: base.token_count,
-        rank: Some(row.get(13)?),
+        rank: Some(row.get(14)?),
         content_hash: base.content_hash,
         source_url: base.source_url,
         source_commit: base.source_commit,
         license_status: base.license_status,
+        page_url: base.page_url,
     })
 }
 
@@ -160,7 +166,7 @@ fn plain_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<Hit> {
         version: base.version,
         section_path: base.section_path,
         symbol: base.symbol,
-        symbol_kind: row.get(12)?,
+        symbol_kind: row.get(13)?,
         snippet: None,
         text: base.text,
         token_count: base.token_count,
@@ -169,6 +175,7 @@ fn plain_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<Hit> {
         source_url: base.source_url,
         source_commit: base.source_commit,
         license_status: base.license_status,
+        page_url: base.page_url,
     })
 }
 
@@ -176,14 +183,14 @@ fn plain_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<Hit> {
 /// fixed order the row readers ([`base_columns`]) index: `chunk_id`,
 /// `source_id`, `library`, `version`, `section_path`, `symbol`, `text`,
 /// `token_count`, `content_hash`, `origin_url`, `commit_sha`,
-/// `license_status` at indices 0..12. Each query appends its
+/// `license_status`, `page_url` at indices 0..13. Each query appends its
 /// query-specific suffix columns behind them.
 const BASE_COLUMNS: &str = "c.chunk_id, c.source_id, s.library, s.version, c.section_path, \
      c.symbol, c.text, c.token_count, c.content_hash, s.origin_url, s.commit_sha, \
-     s.license_status";
+     s.license_status, c.page_url";
 
 /// The FTS suffix columns behind [`BASE_COLUMNS`]: the `snippet()` fragment
-/// at index 12 and the bm25 rank at index 13, with the documented weights.
+/// at index 13 and the bm25 rank at index 14, with the documented weights.
 const FTS_COLUMNS: &str = "snippet(chunks_fts, 1, '<mark>', '</mark>', '…', 16), \
      bm25(chunks_fts, 5.0, 1.0)";
 
@@ -269,7 +276,7 @@ fn fts_source_set_clause(count: usize) -> String {
 }
 
 /// Composes one ordinal-ordered query (symbol lookups, full-chunk reads):
-/// the shared projection, one query-specific suffix column at index 12,
+/// the shared projection, one query-specific suffix column at index 13,
 /// the FROM/JOIN, and the clause. Deterministic in its arguments, so the
 /// same shape yields the same SQL string on every call and
 /// `prepare_cached` stays effective.

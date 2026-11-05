@@ -155,6 +155,66 @@ fn source_scoped_hits_carry_envelope_metadata() {
     assert!(hit.rank.is_some());
 }
 
+/// Hits carry the chunk's linked-page URL next to the origin URL: a chunk
+/// with a stored `page_url` reads it back, and a chunk without one reads
+/// `None` (docs/implementation/07 §llms.txt adapter).
+#[test]
+fn hits_carry_the_chunk_page_url() {
+    let dir = tempdir().unwrap();
+    let store = devdocs_testkit::open_migrated(&dir.path().join("docs.db")).unwrap();
+    let conn = Connection::open(dir.path().join("docs.db")).unwrap();
+    let source_id = devdocs_testkit::seed_source(&conn, "next.js", true).unwrap();
+    devdocs_testkit::seed_chunk(
+        &conn,
+        source_id,
+        0,
+        "[\"Routing\"]",
+        None,
+        "The routing layer maps requests to handlers.",
+    )
+    .unwrap();
+    devdocs_testkit::seed_chunk(
+        &conn,
+        source_id,
+        1,
+        "[\"Parse\"]",
+        None,
+        "parse validates input.",
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE chunks SET page_url = 'https://example.test/16/routing.html' WHERE ordinal = 0",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let expr = build_match_query("routing").into_owned();
+    let hits = store.search_fts(&expr, 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    let with_page = &hits[0];
+    assert_eq!(
+        with_page.page_url.as_deref(),
+        Some("https://example.test/16/routing.html")
+    );
+    assert_eq!(with_page.source_url, "https://example.test/next.js");
+
+    let expr = build_match_query("parse").into_owned();
+    let hits = store.search_fts(&expr, 10).unwrap();
+    assert_eq!(hits.len(), 1);
+    let without_page = &hits[0];
+    assert_eq!(without_page.page_url, None);
+    assert_eq!(without_page.source_url, "https://example.test/next.js");
+
+    // The full-chunk read carries the column on the plain path too.
+    let chunks = store.source_chunks(source_id).unwrap();
+    assert_eq!(
+        chunks[0].page_url.as_deref(),
+        Some("https://example.test/16/routing.html")
+    );
+    assert_eq!(chunks[1].page_url, None);
+}
+
 /// An inactive source never serves, on any read path.
 #[test]
 fn inactive_sources_never_serve() {

@@ -43,6 +43,7 @@ fn published_sources_list_in_order() {
         token_count: 4,
         content_hash: devdocs_store::content_hash("hello"),
         ordinal: 0,
+        page_url: None,
     }];
     store
         .publish_generation(

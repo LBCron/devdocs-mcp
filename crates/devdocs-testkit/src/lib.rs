@@ -78,6 +78,7 @@ pub fn sample_hit(chunk_id: i64, token_count: u32) -> devdocs_store::Hit {
         rank: None,
         content_hash: [0u8; 32],
         source_url: String::new(),
+        page_url: None,
         source_commit: None,
         license_status: "approved_index".to_owned(),
     }

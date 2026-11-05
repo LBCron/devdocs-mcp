@@ -21,15 +21,26 @@ struct EmbeddedMigration {
 /// header comment carries `devdocs: destructive` sets the flag; applying
 /// one without `--force` refuses
 /// (docs/implementation/06 §Migrations).
-const MIGRATIONS: &[EmbeddedMigration] = &[EmbeddedMigration {
-    version: 1,
-    name: "0001_init",
-    sql: include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/migrations/0001_init.sql"
-    )),
-    destructive: false,
-}];
+const MIGRATIONS: &[EmbeddedMigration] = &[
+    EmbeddedMigration {
+        version: 1,
+        name: "0001_init",
+        sql: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/0001_init.sql"
+        )),
+        destructive: false,
+    },
+    EmbeddedMigration {
+        version: 2,
+        name: "0002_page_url",
+        sql: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/0002_page_url.sql"
+        )),
+        destructive: false,
+    },
+];
 
 /// Options for the migration runner.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -204,7 +215,7 @@ mod tests {
 
         // Another connection wins the race and applies the migration.
         let applied = apply_all(&mut first, super::MIGRATIONS, MigrateOptions::default()).unwrap();
-        assert_eq!(applied.len(), 1);
+        assert_eq!(applied.len(), super::MIGRATIONS.len());
 
         // The loser's `apply_all` fast path would still see the migration
         // as pending if its read happened before the winner committed;
@@ -256,5 +267,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(applied.len(), 1);
+    }
+
+    /// The shipped run ends at `user_version` 2, adds the `chunks.page_url`
+    /// column, and re-running on the migrated database applies nothing.
+    #[test]
+    fn shipped_migrations_land_the_page_url_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = rusqlite::Connection::open(dir.path().join("docs.db")).unwrap();
+
+        let applied = apply_all(&mut conn, super::MIGRATIONS, MigrateOptions::default()).unwrap();
+        assert_eq!(applied.len(), super::MIGRATIONS.len());
+
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+
+        let page_url: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('chunks') WHERE name = 'page_url'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(page_url, 1, "chunks.page_url must exist after 0002");
+
+        let rerun = apply_all(&mut conn, super::MIGRATIONS, MigrateOptions::default()).unwrap();
+        assert!(
+            rerun.is_empty(),
+            "an up-to-date database must apply nothing: {rerun:?}"
+        );
     }
 }

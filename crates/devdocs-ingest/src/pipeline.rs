@@ -511,6 +511,7 @@ impl<'a> IngestJob<'a> {
                     token_count: chunk.token_count,
                     content_hash: chunk.content_hash,
                     ordinal: u32::try_from(run.new_chunks.len()).unwrap_or(u32::MAX),
+                    page_url: None,
                 });
             }
             run.events.pages += 1;
