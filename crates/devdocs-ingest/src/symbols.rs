@@ -95,8 +95,10 @@ fn visit(node: Node<'_>, src: &[u8], out: &mut Vec<ExtractedSymbol>, depth: usiz
         "struct_item" => push(node, "struct", src, out),
         "enum_item" => push(node, "enum", src, out),
         "trait_item" => push(node, "trait", src, out),
-        // Rust `type_item` and the Go `type_spec` (under `type_declaration`).
-        "type_item" | "type_spec" => push(node, "type", src, out),
+        // Rust `type_item` and the Go `type_spec` (under `type_declaration`);
+        // a Go `type_spec` whose type child is an `interface_type` node is
+        // an interface declaration (docs/implementation/06 §Symbol columns).
+        "type_item" | "type_spec" => push(node, go_type_kind(node), src, out),
         // Rust `const_item`/`static_item` and the Go `const_spec`.
         "const_item" | "static_item" | "const_spec" => push(node, "constant", src, out),
         "mod_item" => push(node, "module", src, out),
@@ -138,6 +140,21 @@ fn push(node: Node<'_>, kind: &str, src: &[u8], out: &mut Vec<ExtractedSymbol>) 
             kind: kind.to_owned(),
             line: u32::try_from(node.start_position().row + 1).unwrap_or(u32::MAX),
         });
+    }
+}
+
+/// The kind of a mapped type declaration: a Go `type_spec` whose `type`
+/// field child is an `interface_type` node is an `interface`; everything
+/// else (including every Rust `type_item`) stays a `type`.
+fn go_type_kind(node: Node<'_>) -> &'static str {
+    if node.kind() == "type_spec"
+        && node
+            .child_by_field_name("type")
+            .is_some_and(|child| child.kind() == "interface_type")
+    {
+        "interface"
+    } else {
+        "type"
     }
 }
 

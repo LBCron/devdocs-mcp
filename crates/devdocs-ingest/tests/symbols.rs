@@ -43,7 +43,8 @@ fn rust_fixture_extracts_declarations_in_source_order() {
     assert_eq!(symbols[0].line, 6, "lines are 1-based within the block");
 }
 
-/// The Go grammar extracts the declarations; the method stays a method.
+/// The Go grammar extracts the declarations; the method stays a method
+/// and the `interface` type declaration carries the `interface` kind.
 #[test]
 fn go_fixture_extracts_declarations_in_source_order() {
     let code = include_str!("fixtures/symbols/go.sample");
@@ -54,7 +55,7 @@ fn go_fixture_extracts_declarations_in_source_order() {
             ("ErrRejected", "variable"),
             ("MaxRetries", "constant"),
             ("Target", "type"),
-            ("Planner", "type"),
+            ("Planner", "interface"),
             ("DefaultPlanner", "type"),
             ("Plan", "method"),
             ("mu", "variable"),
