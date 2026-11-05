@@ -1,0 +1,6 @@
+---
+source: crates/devdocs-ingest/tests/llms_txt_snapshots.rs
+assertion_line: 70
+expression: error.to_string()
+---
+LLMS_TXT_EMPTY: no link lines in https://docs.acme.dev/llms.txt

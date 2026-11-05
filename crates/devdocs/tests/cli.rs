@@ -471,12 +471,13 @@ fn config_show_snapshot() {
     });
 }
 
-/// The index and page bodies the fixture replay serves.
+/// The index and page bodies the fixture replay serves. The index links
+/// the printable HTML page only: its `Link` header names the markdown
+/// twin, which is what gets ingested (llmstxt.org v2).
 const INDEX: &str = concat!(
     "# Acme\n\n> Acme widgets documentation.\n\n",
     "## Guides\n\n",
-    "- [Intro](https://docs.acme.test/intro.md): Start here\n",
-    "- [Printable](https://docs.acme.test/intro.html): The HTML twin\n"
+    "- [Intro](https://docs.acme.test/intro.html): Start here\n"
 );
 
 const INTRO: &str = concat!(
@@ -492,6 +493,9 @@ fn write_fixture(env: &Env) -> PathBuf {
     std::fs::create_dir_all(&dir).expect("fixture dir");
     let responses = serde_json::json!([
         { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": INDEX },
+        // The printable HTML page names its markdown twin in a `Link`
+        // header (llmstxt.org v2), so the twin is what gets ingested.
+        { "url": "https://docs.acme.test/intro.html", "status": 200, "headers": { "link": "<https://docs.acme.test/intro.md>; rel=\"alternate\"; type=\"text/markdown\"" }, "body": "<!doctype html><html><body>printable</body></html>" },
         { "url": "https://docs.acme.test/intro.md", "status": 200, "headers": {}, "body": INTRO },
     ]);
     std::fs::write(
@@ -549,7 +553,10 @@ fn add_with_a_fixture_ingests_offline() {
     let added: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
     assert_eq!(added["library"], "acme");
     assert_eq!(added["version"], "1.0");
-    assert_eq!(added["pages"], 1, "the HTML twin is skipped: {added}");
+    assert_eq!(
+        added["events"]["markdown_twins_used"], 1,
+        "the printable page ingested through its markdown twin: {added}"
+    );
     assert!(added["chunks"].as_u64().expect("chunks") > 0);
 
     assert_list_names_acme(&env, &config, &db);
@@ -969,8 +976,8 @@ fn add_maps_an_unresolvable_link() {
     assert!(stderr.contains("does not resolve"), "stderr: {stderr}");
 }
 
-/// An index whose links are all non-markdown fails with no ingestable
-/// pages.
+/// An index whose only page carries no markdown twin fails with no
+/// ingestable pages: the HTML path falls back and skips.
 #[test]
 fn add_maps_no_ingestable_pages() {
     let env = Env::new();
@@ -978,6 +985,7 @@ fn add_maps_no_ingestable_pages() {
         &env,
         &serde_json::json!([
             { "url": "https://docs.acme.test/llms.txt", "status": 200, "headers": {}, "body": "# Acme\n\n- [Printable](https://docs.acme.test/intro.html)\n" },
+            { "url": "https://docs.acme.test/intro.html", "status": 200, "headers": {}, "body": "<!doctype html><html><body>printable</body></html>" },
         ]),
     );
     let config = write_config(&env, true);

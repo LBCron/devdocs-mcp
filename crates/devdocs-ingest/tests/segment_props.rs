@@ -11,6 +11,7 @@ use proptest::prelude::*;
 use proptest::test_runner::{Config, TestCaseResult};
 
 use devdocs_ingest::PreparedChunk;
+use devdocs_ingest::chrome::{PageDocument, strip_chrome};
 use devdocs_ingest::segment::Segmenter;
 
 /// `n` synthetic words with the given prefix.
@@ -150,12 +151,16 @@ fn assert_no_content_lost(page: &str, chunks: &[PreparedChunk]) -> TestCaseResul
         }
     }
     if let Some(last) = chunks.last() {
-        // The last chunk reaches the end of the page content.
+        // The last chunk reaches the end of the page content: the tail it
+        // leaves may hold only whitespace and heading lines — a section
+        // boundary is a legal hole, including at the very end, and a
+        // section whose only blocks dropped as chrome leaves exactly that.
+        let tail = &page[last.page_range.end..];
         prop_assert!(
-            last.page_range.end >= page.trim_end().len(),
-            "page tail uncovered: covered {}, page len {}",
-            last.page_range.end,
-            page.trim_end().len()
+            tail.lines()
+                .all(|line| line.trim().is_empty() || line.trim_start().starts_with('#')),
+            "page tail uncovered: {tail:?} after {}",
+            last.page_range.end
         );
     }
     Ok(())
@@ -196,6 +201,54 @@ fn generated_pages_satisfy_the_segmentation_properties() {
                 devdocs_store::content_hash(&chunk.body)
             );
             prop_assert_eq!(&page[chunk.page_range.clone()], &chunk.body);
+        }
+    });
+}
+
+/// The corpus generator: three to four distinct content pages, each
+/// wrapped in shared chrome — a leading navigation list and a trailing
+/// footer paragraph identical across the corpus.
+fn chrome_corpus_strategy() -> impl Strategy<Value = Vec<String>> {
+    prop::collection::vec(page_strategy(), 3..=4).prop_map(|pages| {
+        pages
+            .into_iter()
+            .map(|body| format!("- [Nav](/nav)\n- [Docs](/docs)\n\n{body}\n\n© Shared footer.\n"))
+            .collect()
+    })
+}
+
+/// The chrome strip plus segmentation property over a whole corpus
+/// (docs/implementation/04 §Property tests): after the strip, chunk
+/// bodies are byte-exact slices of the stripped body and the non-overlap
+/// spans reassemble the stripped body minus dropped chrome — the only
+/// gaps are whitespace and heading lines, and the tail is covered.
+#[test]
+fn stripped_corpora_reassemble_from_their_chunks() {
+    proptest!(Config::with_cases(64), |(pages in chrome_corpus_strategy())| {
+        let mut docs: Vec<PageDocument> = pages
+            .iter()
+            .enumerate()
+            .map(|(index, body)| PageDocument {
+                path: format!("https://x/p{index}.md"),
+                body: body.clone(),
+            })
+            .collect();
+        let report = strip_chrome(&mut docs);
+        prop_assert!(
+            report.pattern_drops > 0 && report.frequency_drops > 0,
+            "the generated chrome never dropped: {report:?}"
+        );
+
+        for doc in &docs {
+            let chunks = segment(&doc.body);
+            assert_no_content_lost(&doc.body, &chunks)?;
+            for chunk in &chunks {
+                prop_assert_eq!(
+                    &doc.body[chunk.page_range.clone()],
+                    &chunk.body,
+                    "chunk bodies are byte-exact slices of the stripped body"
+                );
+            }
         }
     });
 }

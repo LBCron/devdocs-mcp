@@ -1,0 +1,12 @@
+# Acme Widgets v2
+
+> Documentation for the Acme Widgets API and SDKs, with the llms.txt v2 link relations: the parenthesized per-page hints name a markdown twin and a covering subpath index.
+
+## Guides
+
+- [Intro](https://docs.acme.dev/intro.html) (rel="alternate" type="text/markdown" https://docs.acme.dev/intro.md): Start here, the markdown twin wins over the HTML page
+- [Auth](https://docs.acme.dev/api/auth.html) (rel="describedby" https://docs.acme.dev/api/llms.txt): API authentication, covered by the api subpath index
+
+## Optional
+
+- [Blog](https://docs.acme.dev/blog.html): No twin, the page falls back to its HTML path

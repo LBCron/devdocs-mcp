@@ -335,6 +335,22 @@ impl FetchGuard {
     /// # Errors
     /// [`GuardError`] when any check refuses or the transport fails.
     pub async fn get(&self, url: &Url) -> Result<(bytes::Bytes, Url), GuardError> {
+        self.get_with_link_headers(url)
+            .await
+            .map(|(bytes, url, _)| (bytes, url))
+    }
+
+    /// Fetches like [`Self::get`] and additionally returns every `Link`
+    /// header value of the final response, lower-cased name — the v2 link
+    /// relations ride these (llmstxt.org v2: HTML `<link>` elements or an
+    /// HTTP `Link:` header).
+    ///
+    /// # Errors
+    /// [`GuardError`] when any check refuses or the transport fails.
+    pub async fn get_with_link_headers(
+        &self,
+        url: &Url,
+    ) -> Result<(bytes::Bytes, Url, Vec<String>), GuardError> {
         self.check(url)?;
         // One deadline spans the DNS lookup and the request: the lookup
         // spends from it, and the request gets only the time left
@@ -342,25 +358,7 @@ impl FetchGuard {
         let deadline = Instant::now() + self.timeout;
         let pinned = self.resolve_pinned(url, deadline).await?;
 
-        let port = url.port_or_known_default().unwrap_or(443);
-        let builder = reqwest::Client::builder()
-            .user_agent(&self.user_agent)
-            // Ambient proxies are off: HTTPS_PROXY and friends must not pull
-            // the request away from the pinned address, and a proxy resolves
-            // hostnames itself, which would bypass the pinned resolver
-            // (docs/implementation/09 invariant 3).
-            .no_proxy()
-            .redirect(self.redirect_policy())
-            .dns_resolver(PinnedResolver {
-                allow_loopback_for_tests: self.policy.allow_loopback_for_tests,
-            })
-            // The one resolution happened above; connect only to that
-            // address, with SNI intact (docs/09 invariant 3).
-            .resolve_to_addrs(
-                url.host_str().unwrap_or_default(),
-                &[SocketAddr::new(pinned, port)],
-            );
-        let client = builder.build().map_err(GuardError::Transport)?;
+        let client = self.build_pinned_client(url, pinned)?;
 
         // The request spends only the budget left after the lookup; an
         // exhausted budget refuses before any connection attempt.
@@ -403,7 +401,46 @@ impl FetchGuard {
             }
             body.extend_from_slice(&chunk);
         }
-        Ok((bytes::Bytes::from(body), final_url))
+        // The link relations of the final response: every `Link` header
+        // value, verbatim, for the v2 relations parser.
+        let link_headers: Vec<String> = response
+            .headers()
+            .get_all(reqwest::header::LINK)
+            .iter()
+            .filter_map(|value| value.to_str().ok().map(str::to_owned))
+            .collect();
+        Ok((bytes::Bytes::from(body), final_url, link_headers))
+    }
+
+    /// Builds the client pinned to `pinned`: ambient proxies off, every
+    /// hop re-checked by the redirect policy, and the one resolution done
+    /// by the caller — connect only to that address, with SNI intact
+    /// (docs/implementation/09 invariants 3 and 5).
+    fn build_pinned_client(
+        &self,
+        url: &Url,
+        pinned: IpAddr,
+    ) -> Result<reqwest::Client, GuardError> {
+        let port = url.port_or_known_default().unwrap_or(443);
+        reqwest::Client::builder()
+            .user_agent(&self.user_agent)
+            // Ambient proxies are off: HTTPS_PROXY and friends must not pull
+            // the request away from the pinned address, and a proxy resolves
+            // hostnames itself, which would bypass the pinned resolver
+            // (docs/implementation/09 invariant 3).
+            .no_proxy()
+            .redirect(self.redirect_policy())
+            .dns_resolver(PinnedResolver {
+                allow_loopback_for_tests: self.policy.allow_loopback_for_tests,
+            })
+            // The one resolution happened above; connect only to that
+            // address, with SNI intact (docs/09 invariant 3).
+            .resolve_to_addrs(
+                url.host_str().unwrap_or_default(),
+                &[SocketAddr::new(pinned, port)],
+            )
+            .build()
+            .map_err(GuardError::Transport)
     }
 
     /// The redirect policy: every hop re-runs the URL checks before the

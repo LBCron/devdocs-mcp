@@ -412,3 +412,41 @@ fn fence_probe_handles_marker_lines_and_unclosed_fences() {
     let unclosed = "before\n```\nbody\n";
     assert!(probe(unclosed, unclosed.len() + 10));
 }
+
+/// A fence whose language is named but unknown is counted; known languages
+/// and unnamed fences are not
+/// (docs/implementation/07 §Normalization pipeline, the ingest events).
+#[test]
+fn unknown_fence_languages_are_counted() {
+    let (chunks, stats) = Segmenter::new().unwrap().segment_with_stats(
+        "lib",
+        "1.0",
+        "# T\n\n```cobol\nMOVE A TO B.\n```\n\nbody\n",
+    );
+    assert_ne!(chunks, [] as [super::PreparedChunk; 0]);
+    assert_eq!(stats.unknown_fence_languages, 1);
+    assert_eq!(stats.skipped_blocks, 0);
+
+    let (_, stats) = Segmenter::new().unwrap().segment_with_stats(
+        "lib",
+        "1.0",
+        "# T\n\n```rust\nlet x = 1;\n```\n\nbody\n",
+    );
+    assert_eq!(stats.unknown_fence_languages, 0);
+
+    // An unnamed fence names no language, where it is not counted.
+    let (_, stats) = Segmenter::new().unwrap().segment_with_stats(
+        "lib",
+        "1.0",
+        "# T\n\n```\nplain\n```\n\nbody\n",
+    );
+    assert_eq!(stats.unknown_fence_languages, 0);
+
+    // The `language-*` prefix convention is stripped before the lookup.
+    let (_, stats) = Segmenter::new().unwrap().segment_with_stats(
+        "lib",
+        "1.0",
+        "# T\n\n```language-python\nx\n```\n\nbody\n",
+    );
+    assert_eq!(stats.unknown_fence_languages, 0);
+}
