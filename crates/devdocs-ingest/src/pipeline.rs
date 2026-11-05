@@ -345,7 +345,7 @@ impl<'a> IngestJob<'a> {
                 let symbol = chunk
                     .symbols
                     .iter()
-                    .find(|sym| chunk.header.contains(&sym.name))
+                    .find(|sym| header_names_symbol(&chunk.header, &sym.name))
                     .or_else(|| chunk.symbols.first())
                     .map(|sym| devdocs_store::Symbol {
                         name: sym.name.clone(),
@@ -797,6 +797,20 @@ fn is_page_url(url: &Url) -> bool {
     matches!(ext.as_str(), "md" | "mdx" | "html" | "htm" | "xhtml")
 }
 
+/// Whether the contextual header names `symbol`: a whole `›`-separated
+/// breadcrumb segment equals the symbol name, case-insensitively. The
+/// leading `[library version` segment is not a breadcrumb and never
+/// matches, and a substring inside a longer segment does not either, so
+/// `push` does not match the breadcrumb `pushState`
+/// (docs/implementation/07 §Normalization pipeline, the symbol pass).
+fn header_names_symbol(header: &str, symbol: &str) -> bool {
+    header.split('›').skip(1).any(|segment| {
+        segment
+            .trim_matches(|c: char| c.is_whitespace() || c == ']')
+            .eq_ignore_ascii_case(symbol)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -882,6 +896,31 @@ mod tests {
         assert!(is_index_url(&url("/docs/api/llms.txt")));
         assert!(!is_index_url(&url("/llms-full.txt")));
         assert!(!is_index_url(&url("/docs/page.md")));
+    }
+
+    /// The primary-symbol header match takes whole breadcrumb segments,
+    /// case-insensitively; a near-name inside a longer segment does not
+    /// match, and the `[library version` part is not a breadcrumb
+    /// (docs/implementation/07 §Normalization pipeline, the symbol pass).
+    #[test]
+    fn header_names_symbol_matches_whole_segments() {
+        let header = "[acme 2.1.0 › Routing › Push State]";
+        assert!(header_names_symbol(header, "push state"));
+        assert!(header_names_symbol(header, "PUSH STATE"));
+        assert!(header_names_symbol("[acme 2.1.0 › push]", "push"));
+        // `push` does not match the breadcrumb `pushState`.
+        assert!(!header_names_symbol("[acme 2.1.0 › pushState]", "push"));
+        // The library/version part is not a breadcrumb segment.
+        assert!(!header_names_symbol("[acme 2.1.0]", "acme 2.1.0"));
+        // A dotted identifier matches only as the whole segment.
+        assert!(header_names_symbol(
+            "[acme 2.1.0 › obj.method]",
+            "obj.method"
+        ));
+        assert!(!header_names_symbol(
+            "[acme 2.1.0 › use obj.method]",
+            "obj.method"
+        ));
     }
 
     /// The most specific index governs: the deepest directory whose path

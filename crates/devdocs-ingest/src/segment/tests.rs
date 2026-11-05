@@ -519,3 +519,116 @@ fn unsupported_and_unknown_fences_are_counted_but_never_fail() {
     assert_eq!(stats.unknown_fence_languages, 0);
     assert_eq!(stats.unsupported_fence_languages, 0);
 }
+
+/// A fenced code block nested in a list item extracts its symbols onto the
+/// chunk its container block packs into; the extraction sees the fence at
+/// any container depth (docs/implementation/07 §Symbol extraction).
+#[test]
+fn nested_fences_extract_symbols() {
+    let page = "# Guide\n\n- step one:\n\n  ```rust\n  fn nested_in_list() {}\n  ```\n";
+    let (chunks, _) = Segmenter::new()
+        .unwrap()
+        .segment_with_stats("lib", "1.0", page);
+    let names: Vec<&str> = chunks
+        .iter()
+        .flat_map(|chunk| chunk.symbols.iter().map(|s| s.name.as_str()))
+        .collect();
+    assert_eq!(names, vec!["nested_in_list"]);
+
+    // A fence inside a blockquote.
+    let page = "# Guide\n\n> run this:\n>\n> ```go\n> func Nested() {}\n> ```\n";
+    let (chunks, _) = Segmenter::new()
+        .unwrap()
+        .segment_with_stats("lib", "1.0", page);
+    let names: Vec<&str> = chunks
+        .iter()
+        .flat_map(|chunk| chunk.symbols.iter().map(|s| s.name.as_str()))
+        .collect();
+    assert_eq!(names, vec!["Nested"]);
+
+    // A fence inside a list nested in a list.
+    let page =
+        "# Guide\n\n- outer:\n\n  - inner:\n\n    ```python\n    def deep(): pass\n    ```\n";
+    let (chunks, _) = Segmenter::new()
+        .unwrap()
+        .segment_with_stats("lib", "1.0", page);
+    let names: Vec<&str> = chunks
+        .iter()
+        .flat_map(|chunk| chunk.symbols.iter().map(|s| s.name.as_str()))
+        .collect();
+    assert_eq!(names, vec!["deep"]);
+}
+
+/// The fence counters cover nested fences too: an unknown nested language
+/// counts, and an unnamed nested fence stays uncounted
+/// (docs/implementation/07 §Symbol extraction, the counters).
+#[test]
+fn nested_fence_counters_match_top_level_ones() {
+    // Unknown nested language.
+    let page = "# T\n\n- item:\n\n  ```wasm,foo\n  (module)\n  ```\n";
+    let (chunks, stats) = Segmenter::new()
+        .unwrap()
+        .segment_with_stats("lib", "1.0", page);
+    assert_eq!(stats.unknown_fence_languages, 1);
+    assert_eq!(stats.unsupported_fence_languages, 0);
+    assert!(chunks.iter().all(|chunk| chunk.symbols.is_empty()));
+
+    // Unsupported nested language (TypeScript has no grammar by design).
+    let page = "# T\n\n> ```ts\n> const x = 1;\n> ```\n";
+    let (_, stats) = Segmenter::new()
+        .unwrap()
+        .segment_with_stats("lib", "1.0", page);
+    assert_eq!(stats.unsupported_fence_languages, 1);
+
+    // An unnamed nested fence names no language, so it counts in neither.
+    let page = "# T\n\n- item:\n\n  ```\n  plain\n  ```\n";
+    let (_, stats) = Segmenter::new()
+        .unwrap()
+        .segment_with_stats("lib", "1.0", page);
+    assert_eq!(stats.unknown_fence_languages, 0);
+    assert_eq!(stats.unsupported_fence_languages, 0);
+}
+
+/// The fence language is the first token up to whitespace or a comma, so
+/// attribute-bearing info strings name their language
+/// (docs/implementation/07 §Symbol extraction).
+#[test]
+fn fence_info_attributes_do_not_hide_the_language() {
+    // A comma-joined attribute (`rust,ignore` is one whitespace token).
+    let (chunks, stats) = Segmenter::new().unwrap().segment_with_stats(
+        "lib",
+        "1.0",
+        "# T\n\n```rust,ignore\nfn tagged() {}\n```\n\nbody\n",
+    );
+    assert_eq!(stats.unknown_fence_languages, 0);
+    assert!(
+        chunks
+            .iter()
+            .any(|chunk| chunk.symbols.iter().any(|s| s.name == "tagged")),
+        "the comma attribute keeps the language symbol-capable"
+    );
+
+    // A colon-joined attribute after a comma.
+    let (_, stats) = Segmenter::new().unwrap().segment_with_stats(
+        "lib",
+        "1.0",
+        "# T\n\n```python,name: x\nvalue = 1\n```\n\nbody\n",
+    );
+    assert_eq!(stats.unknown_fence_languages, 0);
+
+    // A genuinely unknown comma token still counts as unknown.
+    let (_, stats) = Segmenter::new().unwrap().segment_with_stats(
+        "lib",
+        "1.0",
+        "# T\n\n```wasm,foo\n(module)\n```\n\nbody\n",
+    );
+    assert_eq!(stats.unknown_fence_languages, 1);
+
+    // The whitespace-separated attribute form keeps working.
+    let (_, stats) = Segmenter::new().unwrap().segment_with_stats(
+        "lib",
+        "1.0",
+        "# T\n\n```rust ignore\nfn spaced() {}\n```\n\nbody\n",
+    );
+    assert_eq!(stats.unknown_fence_languages, 0);
+}

@@ -16,6 +16,8 @@ fn pairs(symbols: &[devdocs_ingest::ExtractedSymbol]) -> Vec<(&str, &str)> {
 }
 
 /// The Rust grammar extracts the module's declarations in source order.
+/// Impl members carry `method`; the trait's `run` declaration and the
+/// free functions stay `function`.
 #[test]
 fn rust_fixture_extracts_declarations_in_source_order() {
     let code = include_str!("fixtures/symbols/rust.sample");
@@ -25,12 +27,12 @@ fn rust_fixture_extracts_declarations_in_source_order() {
         vec![
             ("MAX_RETRIES", "constant"),
             ("Command", "struct"),
-            ("execute", "function"),
+            ("execute", "method"),
             ("RunError", "enum"),
             ("Executor", "trait"),
             ("run", "function"),
             ("LocalExecutor", "struct"),
-            ("run", "function"),
+            ("run", "method"),
             ("TargetKind", "type"),
             ("RELOAD_LOCK", "constant"),
             ("deploy", "module"),
@@ -105,6 +107,36 @@ fn javascript_fixture_extracts_declarations_classes_and_variables() {
             ("deploy", "function"),
             ("planOne", "function"),
         ]
+    );
+}
+
+/// A Rust declaration inside an `impl_item` body is a method; a trait
+/// default method and a function nested in a method body stay functions
+/// (docs/implementation/06 §Symbol columns).
+#[test]
+fn rust_impl_members_are_methods() {
+    let symbols = extract(
+        "rust",
+        "trait T {\n    fn provided(&self) {}\n}\n\nimpl T for S {\n    fn provided(&self) {}\n}\n\nfn free() {}\n",
+    );
+    assert_eq!(
+        pairs(&symbols),
+        vec![
+            ("T", "trait"),
+            ("provided", "function"),
+            ("provided", "method"),
+            ("free", "function"),
+        ]
+    );
+
+    // A function nested in a method body is not a method.
+    let symbols = extract(
+        "rust",
+        "struct S;\nimpl S {\n    fn outer() {\n        fn inner() {}\n    }\n}\n",
+    );
+    assert_eq!(
+        pairs(&symbols),
+        vec![("S", "struct"), ("outer", "method"), ("inner", "function")]
     );
 }
 

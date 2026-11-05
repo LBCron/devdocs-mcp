@@ -3,7 +3,7 @@ type: guide
 title: Ingest Pipeline (L1 + L2)
 description: The source adapters, the fetch guard, the license gate, the normalization and segmentation pipeline, dedup, the injection filter, and the refresh policy for devdocs.
 tags: [devdocs, ingest, llms-txt, git, openapi, html, segmentation]
-timestamp: 2026-11-06T12:30:00Z
+timestamp: 2026-11-06T18:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -150,7 +150,7 @@ Order matters. Each stage is a pure function over `RawDocument` streams, so snap
    Implemented shape (M5, fences only):
 
    - **Grammars are features.** `devdocs-ingest` carries per-grammar features `grammar-rust`, `grammar-go`, `grammar-python`, and `grammar-javascript`; the aggregate feature `symbols` (all four) is default-on. tree-sitter core is a required dependency; a grammar crate is optional. TypeScript is deliberately absent ([01](01-tech-stack-decision.md)). A build with grammars disabled extracts nothing and still ingests.
-   - **The pass runs during segmentation.** Every prepared chunk carries its extracted symbols. A fence body is parsed with the language its fence-info string names. A chunk with no fenced code carries no symbols.
+   - **The pass runs during segmentation.** Every prepared chunk carries its extracted symbols. A fence body is parsed with the language its fence-info string names: the first token up to whitespace or a comma, so `rust,ignore` names `rust`. Fences at any depth count — one nested in a list item or a blockquote extracts against the chunk its container block packs into, and its unnamed status or unknown language counts the same way a top-level fence's does. A chunk with no fenced code carries no symbols.
    - **Public shape.** `ExtractedSymbol { name, kind, line }`; `extract(lang, code) -> Vec<ExtractedSymbol>`; `grammar_for(lang) -> Option<Language>`. The kind vocabulary and the per-grammar node kinds are the data-model contract ([06](06-data-model.md) §Symbol columns).
    - **Parse failures never fail the source.** A parse with error nodes still yields the definitions it found; the walk stays defensive. A skipped fence is a counted event, not an error.
    - **Counters.** A named fence language outside the known set counts `unknown_fence_languages`. A symbol-capable language with no enabled grammar — including the `typescript`, `ts`, and `tsx` aliases — counts `unsupported_fence_languages`. Unnamed fences count in neither. Both flow into the `--json` add envelope.

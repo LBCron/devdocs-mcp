@@ -76,13 +76,22 @@ fn visit(node: Node<'_>, src: &[u8], out: &mut Vec<ExtractedSymbol>, depth: usiz
         return;
     }
     match node.kind() {
-        // Rust `function_item`/`function_signature_item` (a trait method
-        // declaration) and the Go/JavaScript declarations share the
-        // `function` kind; `impl_item` carries no `name` and stays unmapped.
+        // Rust `function_item`/`function_signature_item` and the
+        // Go/JavaScript declarations carry the `function` kind, except a
+        // Rust declaration inside an `impl_item` body, which is a method
+        // (inherent or trait impl alike). `impl_item` itself carries no
+        // `name` and stays unmapped.
         "function_item"
         | "function_signature_item"
         | "function_declaration"
-        | "generator_function_declaration" => push(node, "function", src, out),
+        | "generator_function_declaration" => {
+            let kind = if rust_impl_member(node) {
+                "method"
+            } else {
+                "function"
+            };
+            push(node, kind, src, out);
+        }
         "struct_item" => push(node, "struct", src, out),
         "enum_item" => push(node, "enum", src, out),
         "trait_item" => push(node, "trait", src, out),
@@ -130,6 +139,15 @@ fn push(node: Node<'_>, kind: &str, src: &[u8], out: &mut Vec<ExtractedSymbol>) 
             line: u32::try_from(node.start_position().row + 1).unwrap_or(u32::MAX),
         });
     }
+}
+
+/// Whether a Rust declaration is a member of an `impl_item` body: its
+/// direct parent is the impl's `declaration_list`. A declaration anywhere
+/// else — a free function, a trait default method, a function nested in a
+/// method body — stays a `function`.
+fn rust_impl_member(node: Node<'_>) -> bool {
+    matches!(node.parent(), Some(parent) if parent.kind() == "declaration_list"
+        && parent.parent().is_some_and(|impl_node| impl_node.kind() == "impl_item"))
 }
 
 /// Whether a Python `function_definition` is a member of a class body:

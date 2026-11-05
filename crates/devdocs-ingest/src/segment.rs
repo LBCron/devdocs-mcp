@@ -102,10 +102,13 @@ pub struct SegmentStats {
     pub unsupported_fence_languages: usize,
 }
 
-/// The fence language of an info string: the first token, lower-cased. An
+/// The fence language of an info string: the first token, lower-cased. A
+/// token ends at whitespace or a comma, so `rust,ignore` names `rust`. An
 /// empty info string names no language.
 fn fence_language(info: &str) -> Option<&str> {
-    let token = info.split_whitespace().next()?;
+    let token = info
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .find(|token| !token.is_empty())?;
     let token = token.strip_prefix("language-").unwrap_or(token);
     let token = token.strip_prefix("lang-").unwrap_or(token);
     Some(token)
@@ -124,6 +127,27 @@ fn fence_language_known_or_unnamed(info: &str) -> bool {
 /// Whether a fence info string names a language outside the known set.
 pub(crate) fn fence_language_unknown(info: &str) -> bool {
     !fence_language_known_or_unnamed(info)
+}
+
+/// Extracts the symbols of every fenced code block nested inside a
+/// container node (a list, blockquote, or their nesting) and accumulates
+/// the fence counters on the way. Top-level fences take the direct-child
+/// arm of the section walk, so this only sees fenced blocks a container
+/// wraps; they attach to the container's single block and land on the
+/// chunk that block packs into.
+fn nested_fence_symbols<'a>(
+    node: &'a comrak::nodes::AstNode<'a>,
+    stats: &mut SegmentStats,
+) -> Vec<crate::symbols::ExtractedSymbol> {
+    let mut symbols = Vec::new();
+    for desc in node.descendants().skip(1) {
+        if let NodeValue::CodeBlock(blocked) = &desc.data().value
+            && blocked.fenced
+        {
+            symbols.extend(fence_symbols(blocked, stats));
+        }
+    }
+    symbols
 }
 
 /// Extracts the symbols of one fenced code block and accumulates the fence
@@ -346,14 +370,10 @@ impl Segmenter {
                     let symbols = fence_symbols(blocked, &mut stats);
                     push_block(&mut sections, node, page_body, &offset, symbols, &mut stats);
                 }
-                _ => push_block(
-                    &mut sections,
-                    node,
-                    page_body,
-                    &offset,
-                    Vec::new(),
-                    &mut stats,
-                ),
+                _ => {
+                    let symbols = nested_fence_symbols(node, &mut stats);
+                    push_block(&mut sections, node, page_body, &offset, symbols, &mut stats);
+                }
             }
         }
         sections.retain(|section| !section.blocks.is_empty());
@@ -386,16 +406,24 @@ impl Segmenter {
             } else if oversized {
                 // Between the target and twice the target: split at
                 // semantic boundaries with the overlap. Only non-fenced
-                // blocks split, so the pieces carry no symbols.
+                // blocks split; a container block's nested-fence symbols
+                // ride on the first piece.
                 if let Some((span, _, symbols)) = current.take() {
                     candidates.push(Candidate { span, symbols });
                 }
-                candidates.extend(self.split_oversized(text, block.start).into_iter().map(
-                    |span| Candidate {
-                        span,
-                        symbols: Vec::new(),
-                    },
-                ));
+                candidates.extend(
+                    self.split_oversized(text, block.start)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, span)| Candidate {
+                            span,
+                            symbols: if i == 0 {
+                                block.symbols.clone()
+                            } else {
+                                Vec::new()
+                            },
+                        }),
+                );
             } else if tokens > 0 {
                 // The packed span slices the page from the first block's
                 // start to the last block's end, so the bytes between

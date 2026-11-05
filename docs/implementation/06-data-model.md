@@ -3,7 +3,7 @@ type: guide
 title: Data Model
 description: The complete SQLite schema for devdocs, the FTS5 configuration, the migration system, and the hashing policy. Targets SQLite 3.54 bundled in rusqlite 0.41.
 tags: [devdocs, sqlite, fts5, schema, migrations]
-timestamp: 2026-11-06T00:00:00Z
+timestamp: 2026-11-06T18:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -124,7 +124,7 @@ CREATE TABLE session_trajectory (
 
 The publish path fills both symbol surfaces ([07](07-ingest-pipeline.md) §Symbol extraction):
 
-- `chunks.symbol` carries the primary symbol of the chunk: the extracted symbol the section header names, else the first extracted symbol, else NULL.
+- `chunks.symbol` carries the primary symbol of the chunk: the extracted symbol whose whole name equals one `›`-separated breadcrumb segment of the header (case-insensitive), else the first extracted symbol, else NULL.
 - The `symbols` table carries every extracted symbol of the chunk. Writes use `INSERT OR IGNORE`, so the `(symbol, chunk_id)` primary key makes a repeat publish idempotent inside the same transaction.
 
 The extraction pass emits this kind vocabulary: `function`, `method`, `class`, `struct`, `enum`, `trait`, `type`, `interface`, `constant`, `variable`, `module`. A grammar that names no node kind for a construct does not emit a row for it.
