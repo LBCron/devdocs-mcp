@@ -11,7 +11,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use devdocs_ingest::guard::FetchGuard;
-use devdocs_ingest::{IngestJob, gate_fetch};
+use devdocs_ingest::{GitPin, IngestJob, gate_fetch};
 use devdocs_model::config::{Config, FetchConfig, IndexConfig, SearchConfig, SourceConfig};
 use devdocs_model::source::LicenseStatus;
 use devdocs_testkit::git_repo::{bare_mirror, docs_repo};
@@ -115,7 +115,7 @@ async fn git_run_publishes_chunks_with_commit_provenance() {
             &url,
             "acme",
             "1.0",
-            "v1.0.0",
+            GitPin::from("v1.0.0"),
             data.path(),
         )
         .await
@@ -124,6 +124,13 @@ async fn git_run_publishes_chunks_with_commit_provenance() {
     assert_eq!(outcome.pages, 2, "README.md and docs/guide.md ingest");
     assert!(outcome.chunks > 0);
     assert_eq!(outcome.license_status, LicenseStatus::ApprovedIndex);
+    // The outcome carries the commit provenance the report publishes; no
+    // store readback needed.
+    assert_eq!(
+        outcome.commit_sha.as_deref(),
+        Some(repo.tag_sha.as_str()),
+        "the outcome carries the tag's commit"
+    );
     assert_eq!(
         outcome.events.sha_fetch_fallbacks, 0,
         "a tag pin never takes the commit-pin fallback"
@@ -184,7 +191,7 @@ async fn git_run_counts_the_sha_fetch_fallback_in_the_events() {
             &url,
             "acme",
             "1.0",
-            &mid_history,
+            GitPin::from(mid_history.as_str()),
             data.path(),
         )
         .await
@@ -244,7 +251,14 @@ async fn git_run_refuses_a_corpus_with_no_allowlisted_files() {
 
     let guard = guard(&config);
     let error = IngestJob::new(&config, &guard, None)
-        .run_git(Arc::clone(&store), &url, "acme", "1.0", &head, data.path())
+        .run_git(
+            Arc::clone(&store),
+            &url,
+            "acme",
+            "1.0",
+            GitPin::from(head.as_str()),
+            data.path(),
+        )
         .await
         .unwrap_err();
     match error {
@@ -285,7 +299,7 @@ async fn a_second_git_run_republishes_the_generation() {
             &url,
             "acme",
             "1.0",
-            "v1.0.0",
+            GitPin::from("v1.0.0"),
             data.path(),
         )
         .await
@@ -298,7 +312,7 @@ async fn a_second_git_run_republishes_the_generation() {
             &url,
             "acme",
             "1.0",
-            "v1.0.0",
+            GitPin::from("v1.0.0"),
             data.path(),
         )
         .await

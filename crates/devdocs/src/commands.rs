@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use devdocs_ingest::{FixtureSet, IngestJob, gate_fetch};
+use devdocs_ingest::{FixtureSet, GitPin, IngestJob, gate_fetch};
 use devdocs_model::config::Config;
 use devdocs_model::envelope::{ResultEnvelope, SourceSummary};
 use devdocs_model::error::{Error, UpstreamCode};
@@ -286,7 +286,7 @@ pub fn run_add(
     // blocking task running; do not wait for it when the runtime drops.
     runtime.shutdown_background();
     let outcome = result.map_err(map_ingest_error)?;
-    add_report(&outcome, None)
+    add_report(&outcome)
 }
 
 /// Runs the git branch of `devdocs add`: the pin is the `--version` value
@@ -298,8 +298,7 @@ pub fn run_add(
 ///
 /// # Errors
 /// [`Error`] for any ingest failure (`IngestJob::run_git` maps the whole
-/// plan/fetch/segment/publish chain), and store failures when reading back
-/// the published commit.
+/// plan/fetch/segment/publish chain).
 fn run_add_git(
     config: &Config,
     repo_url: &Url,
@@ -323,33 +322,26 @@ fn run_add_git(
         std::path::Path::to_path_buf,
     );
     let job = IngestJob::new(config, &guard, None);
-    let result =
-        runtime.block_on(job.run_git(Arc::clone(&store), repo_url, library, pin, pin, &data_root));
+    let result = runtime.block_on(job.run_git(
+        Arc::clone(&store),
+        repo_url,
+        library,
+        pin,
+        GitPin::from(pin),
+        &data_root,
+    ));
     // A run that hit the total cap can leave its in-flight segmentation
     // blocking task running; do not wait for it when the runtime drops.
     runtime.shutdown_background();
     let outcome = result.map_err(map_ingest_error)?;
-
-    // The commit provenance lives in the published source row, so the
-    // report reads it back from the store instead of threading it through
-    // the outcome type.
-    let commit_sha = store
-        .list_sources()
-        .map_err(|error| map_store_error(&error))?
-        .into_iter()
-        .find(|source| source.library == outcome.library && source.version == outcome.version)
-        .and_then(|source| source.commit_sha);
-    add_report(&outcome, commit_sha.as_deref())
+    add_report(&outcome)
 }
 
 /// The `add --json` report both adapters return; the event report also
 /// goes to stderr as log lines (the default filter is `warn`, so the lines
 /// surface only under `--verbose`)
 /// (docs/implementation/07 §Normalization pipeline).
-fn add_report(
-    outcome: &devdocs_ingest::IngestOutcome,
-    commit_sha: Option<&str>,
-) -> Result<serde_json::Value, Error> {
+fn add_report(outcome: &devdocs_ingest::IngestOutcome) -> Result<serde_json::Value, Error> {
     tracing::info!(
         pages = outcome.pages,
         skipped = outcome.skipped_pages,
@@ -372,7 +364,7 @@ fn add_report(
         "pages": outcome.pages,
         "skipped_pages": outcome.skipped_pages,
         "chunks": outcome.chunks,
-        "commit_sha": commit_sha,
+        "commit_sha": outcome.commit_sha,
         "events": events,
     }))
 }
@@ -457,7 +449,7 @@ fn map_ingest_error(error: devdocs_ingest::IngestError) -> Error {
         },
         E::NoIngestablePages { index } => Error::Upstream {
             code: UpstreamCode::UpstreamError,
-            detail: format!("no ingestable markdown pages linked from {index}"),
+            detail: format!("no ingestable pages for {index}"),
         },
         E::GitBinaryMissing => Error::Upstream {
             code: UpstreamCode::UpstreamError,

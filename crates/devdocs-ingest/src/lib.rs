@@ -24,5 +24,5 @@ pub use fixture::{FixtureSet, RecordedResponse};
 pub use guard::{FetchGuard, GuardError};
 pub use license::{LicenseGrant, gate_fetch, refused_status};
 pub use llms_txt::{LlmsLink, LlmsSection, LlmsTxtIndex, parse_llms_txt};
-pub use pipeline::{IngestJob, IngestOutcome, TOTAL_INGEST_CAP};
+pub use pipeline::{GitPin, IngestJob, IngestOutcome, TOTAL_INGEST_CAP};
 pub use segment::{PreparedChunk, Segmenter, contextual_header};

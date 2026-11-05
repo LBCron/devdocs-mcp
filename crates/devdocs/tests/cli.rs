@@ -920,10 +920,7 @@ fn add_maps_no_ingestable_pages() {
 
     let (code, _stdout, stderr) = output(env.cmd(), &add_args(&fixture, &config, &db, true));
     assert_eq!(code, 3, "stderr: {stderr}");
-    assert!(
-        stderr.contains("no ingestable markdown pages"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("no ingestable pages"), "stderr: {stderr}");
 }
 
 /// A fixture directory without a manifest fails with the fixture error.

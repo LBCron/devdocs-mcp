@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use devdocs_ingest::guard::FetchGuard;
-use devdocs_ingest::{IngestJob, gate_fetch};
+use devdocs_ingest::{GitPin, IngestJob, gate_fetch};
 use devdocs_model::config::{
     Config, DEFAULT_GIT_EXTENSIONS, FetchConfig, IndexConfig, IngestConfig, SearchConfig,
     SourceConfig,
@@ -80,7 +80,14 @@ async fn public_repo_clone_yields_allowlisted_docs_at_the_pinned_tag() {
     let guard = FetchGuard::from_fetch_config(&config.fetch);
 
     let outcome = IngestJob::new(&config, &guard, None)
-        .run_git(Arc::clone(&store), &url, "acme", "1.0", TAG, data.path())
+        .run_git(
+            Arc::clone(&store),
+            &url,
+            "acme",
+            "1.0",
+            GitPin::from(TAG),
+            data.path(),
+        )
         .await
         .unwrap();
 

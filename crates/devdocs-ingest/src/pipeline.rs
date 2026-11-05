@@ -46,6 +46,9 @@ pub struct IngestOutcome {
     pub version: String,
     /// The index URL.
     pub origin_url: String,
+    /// The commit the git adapter published (`rev-parse HEAD`); `None`
+    /// for the llms.txt path.
+    pub commit_sha: Option<String>,
     /// The license stage the run published under.
     pub license_status: LicenseStatus,
     /// Markdown pages ingested.
@@ -57,6 +60,18 @@ pub struct IngestOutcome {
     /// The ingest event report: what the run skipped, dropped, and detoured
     /// (docs/implementation/07 §Normalization pipeline).
     pub events: IngestEvents,
+}
+
+/// The pin a git source clones: a tag name or a 40-hex commit SHA. Its
+/// own type so the pin cannot transpose with the adjacent `version`
+/// label in [`IngestJob::run_git`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitPin(pub String);
+
+impl From<&str> for GitPin {
+    fn from(pin: &str) -> Self {
+        Self(pin.to_owned())
+    }
 }
 
 /// One ingest run: the resolved config, the guard, the optional fixture
@@ -154,13 +169,13 @@ impl<'a> IngestJob<'a> {
         repo_url: &Url,
         library: &str,
         version: &str,
-        pin: &str,
+        pin: GitPin,
         data_root: &std::path::Path,
     ) -> Result<IngestOutcome, IngestError> {
         let grant = self.gate(repo_url, library)?;
         let prepared = tokio::time::timeout(
             TOTAL_INGEST_CAP,
-            self.prepare_git(repo_url, library, version, pin, data_root, &grant),
+            self.prepare_git(repo_url, library, version, &pin.0, data_root, &grant),
         )
         .await
         .map_err(|_| IngestError::TotalTimeout {
@@ -654,6 +669,7 @@ impl<'a> IngestJob<'a> {
             events,
         } = prepared;
         let chunks_len = new_chunks.len();
+        let commit_sha = record.commit_sha.clone();
         let publish_result =
             tokio::task::spawn_blocking(move || store.publish_generation(&record, &new_chunks))
                 .await
@@ -664,6 +680,7 @@ impl<'a> IngestJob<'a> {
             library: library.to_owned(),
             version: version.to_owned(),
             origin_url: origin_url.to_string(),
+            commit_sha,
             license_status: grant.status,
             pages: events.pages,
             skipped_pages: events.skipped_pages,

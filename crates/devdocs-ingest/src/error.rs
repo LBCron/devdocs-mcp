@@ -69,8 +69,9 @@ pub enum IngestError {
     /// A blocking task failed to join.
     #[error("blocking task failed: {0}")]
     Join(String),
-    /// The index carried links but none was an ingestable markdown page.
-    #[error("no ingestable markdown pages linked from {index}")]
+    /// The source produced no ingestable pages: an index with no markdown
+    /// links, or a git tree with no allowlisted file.
+    #[error("no ingestable pages for {index}")]
     NoIngestablePages {
         /// The index URL.
         index: String,
