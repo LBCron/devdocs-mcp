@@ -81,8 +81,9 @@ pub fn strip_chrome(pages: &mut [PageDocument]) -> ChromeReport {
 }
 
 /// The chrome texts of the corpus under the frequency rule: normalized
-/// block texts carried by more than 60% of the pages. With fewer than two
-/// pages there is nothing to compare, so nothing is chrome.
+/// block texts carried by more than 60% of the pages, headings excluded.
+/// With fewer than two pages there is nothing to compare, so nothing is
+/// chrome.
 fn frequency_chrome_texts(
     pages: &[PageDocument],
     page_blocks: &[Vec<PageBlock>],
@@ -95,6 +96,11 @@ fn frequency_chrome_texts(
     let mut occurrences: HashMap<&str, HashSet<usize>> = HashMap::new();
     for (page_index, (page, blocks)) in pages.iter().zip(page_blocks).enumerate() {
         for block in blocks {
+            // Headings anchor sections; dropping a repeated one corrupts
+            // the section paths of later chunks, so they never count here.
+            if block.is_heading {
+                continue;
+            }
             let text = page.body[block.range.clone()].trim();
             if text.is_empty() {
                 continue;
@@ -475,6 +481,36 @@ mod tests {
             "2/4 pages is under the 60% threshold"
         );
         assert!(pages[0].body.contains("© Acme Inc."));
+    }
+
+    /// A heading identical across pages never frequency-drops: dropping it
+    /// would corrupt the section paths of the chunks below it.
+    #[test]
+    fn frequency_rule_never_drops_headings() {
+        let mut pages = vec![
+            page(
+                "https://x/a.md",
+                "# Guide\n\nGuide content one.\n\n## Parameters\n\nParameter content.\n",
+            ),
+            page(
+                "https://x/b.md",
+                "# Storage\n\nStorage content two.\n\n## Parameters\n\nOther content.\n",
+            ),
+            page("https://x/c.md", "# Routing\n\nRouting content three.\n"),
+        ];
+        let report = strip_chrome(&mut pages);
+        assert_eq!(
+            report.frequency_drops, 0,
+            "headings never count under the frequency rule"
+        );
+        assert!(
+            pages[0].body.contains("## Parameters"),
+            "the repeated heading survives in the body"
+        );
+        assert!(
+            pages[1].body.contains("## Parameters"),
+            "the repeated heading survives in the body"
+        );
     }
 
     /// A one-page corpus never frequency-drops: with a single page every
