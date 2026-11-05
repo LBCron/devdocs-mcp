@@ -45,3 +45,19 @@ def _retry(fn, retries=MAX_RETRIES):
         except Exception:
             if attempt == retries - 1:
                 raise
+
+
+async def fetch_plan(target):
+    """Plans one target asynchronously."""
+    return plan_all([target])
+
+
+def cached(fn):
+    """Marks a planner step cached."""
+    return fn
+
+
+@cached
+async def refresh(zone):
+    """Refreshes one zone asynchronously."""
+    return await fetch_plan(zone)

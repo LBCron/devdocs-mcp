@@ -66,7 +66,9 @@ fn go_fixture_extracts_declarations_in_source_order() {
 }
 
 /// The Python grammar extracts classes and their methods; decorated
-/// class members stay methods and module-level assignments stay out.
+/// class members stay methods, module-level assignments stay out, and
+/// `async def` — bare and under a decorator — extracts like a plain
+/// function (the `decorated_definition` wrapper is descended).
 #[test]
 fn python_fixture_extracts_classes_methods_and_functions() {
     let code = include_str!("fixtures/symbols/python.sample");
@@ -82,6 +84,9 @@ fn python_fixture_extracts_classes_methods_and_functions() {
             ("plan", "method"),
             ("plan_all", "function"),
             ("_retry", "function"),
+            ("fetch_plan", "function"),
+            ("cached", "function"),
+            ("refresh", "function"),
         ]
     );
 }
