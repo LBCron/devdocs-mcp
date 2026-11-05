@@ -15,7 +15,8 @@ This project is a local, read-only documentation MCP server for coding agents. I
 - `lefthook` runs the git hooks; they delegate to justfile recipes, so a hook failure means the same command CI runs failed. Run `lefthook install` after changing `lefthook.yml`.
 - Its commit-msg hook enforces Conventional Commits: `type(scope): subject`, scope optional, subject ≤ 72 chars.
 - `just test` runs nextest with `.config/nextest.toml` (`retries = 0`, `fail-fast = false`): a failing test surfaces immediately and is never retried.
-- Use `bash` as your primary terminal and `rg` instead of plain `grep`.
+- Must run commands in `zsh` on macOS and `bash` everywhere else. When `bash` is absent, must fall back to the next bash-like shell (Git Bash and similar); when no bash-like shell exists, must use the OS-default terminal.
+- Must search with `rg`; plain `grep` does not satisfy this.
 - Optional cargo tools (`nextest`, `cargo-deny`, `cargo-audit`, `cargo-machete`, `cargo-llvm-cov`, `cargo-mutants`, `cargo-semver-checks`) are installed via `cargo binstall`.
 - `just test` and `just deny` hard-fail when nextest/cargo-deny are missing (with a binstall hint). CI installs the tools explicitly, so a missing tool there means the install step failed and fails the job loudly; there is no fallback.
 - The dev toolchain is pinned to 1.99.1, but code must compile on MSRV 1.90 (`just msrv`): no std APIs newer than 1.90.
@@ -71,10 +72,12 @@ Crate sources live under `crates/`: `devdocs` (CLI/MCP binary), `devdocs-model`,
 
 These apply to every task:
 
-- Study official sources first — library docs, wikis, changelogs. Use the Context7 MCP tools for official documentation when they are available; add other relevant sources on top.
-- Dispatch subagents for leg work. Every task gets at least one subagent for research, exploration, or verification before the main work.
-- Write all communication and documentation in ASD-STE100: replies to the user, commit messages, design docs, and everything you publish on GitHub — PRs, issues, and review comments.
+- **Orchestrator role**: the main agent acts as the orchestrator — it decides, sequences, and verifies; subagents do the leg work. Must dispatch at least one subagent for research, exploration, or verification before the main work starts. Must keep broad exploration off the orchestrator's own context: subagents gather details and report back in agent-friendly form, and the orchestrator acts on the reports.
+- **Subagent skill routing**: every dispatched subagent must load the skill that matches its task, from the global skills directory `~/.agents/skills`. General tasks, and any task with no better match, must use `/caveman full`. Small code changes must use `/ponytail`. Research or exploration tasks must use `/agent-reach`. If the matching skill is absent from `~/.agents/skills`, the subagent must report the missing skill to the orchestrator and, when `/caveman` is present, use `/caveman full` instead.
+- **Official sources first**: must study library docs, wikis, and changelogs before writing code. When the Context7 MCP tools are available, must use them for official documentation; add other relevant sources on top.
+- Must write all communication and documentation in ASD-STE100: replies to the user, commit messages, design docs, and everything you publish on GitHub — PRs, issues, and review comments.
 - Label new issues with the ticket-set pattern: `ready-for-agent`, one `phase-*`, and the relevant `area:*` labels.
+- Task subagents with fixed roles live in `.agents/subagents/` in the zcode subagent definition format; the workflows in `.agents/instructions/` link to them. Write a new definition there when a role repeats across tasks.
 
 ## Instructions
 
@@ -110,6 +113,7 @@ Some tasks point into the design docs instead — they are the deeper source of 
 Apply to every commit you make, always — read this before committing anything:
 
 - Never squash a whole feature, fix, ticket, or GitHub issue into a single big commit. Split the work into meaningful commits — one per logical step (e.g. model/types, store/schema, retrieval, CLI/MCP wiring, docs).
+- Never dump a batch of accumulated uncommitted changes into one huge commit. Group the changes by concern and commit each group on its own — every commit carries one meaningful step.
 - Each commit must keep the application in a working state: it compiles and `just test` stays green at that commit. Never leave a commit half-migrated or mid-refactor.
 - Commit messages follow one unified structure:
 

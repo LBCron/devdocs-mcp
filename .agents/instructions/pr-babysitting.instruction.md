@@ -1,14 +1,16 @@
 # PR Babysitting
 
-Run only when the user explicitly asks to review the comments on a PR or to babysit the PR.
+Run only when the user explicitly asks to review the bot comments on a PR or to babysit the PR.
 
-Review bots (CodeRabbit, Codacy, and similar) add comments on recently pushed changes. Work the comments in order:
+Review bots (CodeRabbit, Codacy, and similar) add comments on recently pushed changes. The orchestrator works the comments through subagents; it judges and fixes nothing by itself without a subagent report.
 
-1. Read all bot comments, one by one.
-2. Dispatch parallel research and validation subagents — one per claim — to judge each claim: legit, false positive, or does not apply here.
-3. Implement a fix for every legit concern. Split a concern into logical-step commits per AGENTS.md §Git commits; each commit stays green.
-4. Review the fixes with the `code-review` skill — or the closest review process the harness offers — before you push.
-5. Push the fixes.
-6. Reply on each bot conversation. Start the reply with "This is a legit claim…", "This is a false positive…", or "This does not apply here…". Write the reply in ASD-STE100. Then mark the conversation as resolved.
+1. **Read all bot comments, one by one.**
+2. **Validate.** Dispatch parallel validation subagents ([pr-claim-validator.md](../subagents/pr-claim-validator.md)) — one per claim — to judge each claim: legit, false positive, or does not apply here. Validators dispatch their own `/agent-reach` research subagents for external facts. The orchestrator spot-checks each verdict against the cited evidence before it acts.
+3. **Fix stage.** Implement a fix for every legit concern through fix subagents ([fix-implementer.md](../subagents/fix-implementer.md)). Run fix subagents in parallel only when they touch disjoint parts of the repo, and give each parallel fix subagent its own worktree (`wt switch --create <branch>`, AGENTS.md §Worktrees) — disjoint files alone do not isolate the shared Git index, and commits return to the PR branch via `wt merge --no-squash`. Sequence everything else. Split a concern into logical-step commits per AGENTS.md §Git commits; each commit stays green. When a fix subagent returns a flag instead of a commit, route the concern to the major-refactor route (step 4) when it needs a cross-repo refactor; otherwise ask the user how to proceed before resolving.
+4. **Major-refactor route.** When a legit fix needs a major refactor that reaches across the repo, hand it to one independent subagent. That subagent must not commit to the PR branch: it creates a new branch off the PR branch and implements the refactor there. It reviews the branch with the `code-review` skill — or the closest review process the harness offers — and addresses the findings. Then it pushes the branch and raises a stacked PR that targets the existing PR. The orchestrator replies on the bot conversation with the stacked-PR link and marks the conversation resolved only when the stacked PR is up. The orchestrator keeps the main PR moving on the remaining concerns.
+5. **Review the fixes** with the `code-review` skill — or the closest review process the harness offers — before you push. Dispatch fix subagents for every reported issue, or record on the bot conversation why the issue does not apply, then repeat this step until the review reports no issues.
+6. **Push the fixes.**
+7. **Wait for each review bot's incremental re-review after the push.** Read any new bot comments and route each through the validation stage before the done check. Then work the new claims through steps 3 to 6 before the done check. Treat a rate-limited or paused bot as no new comments.
+8. **Reply on each bot conversation, in the bot's own inline thread.** Start the reply with "This is a legit claim…", "This is a false positive…", or "This does not apply here…". Reply inside the inline thread the bot created — never as a PR-level comment, and never in a thread of your own making. A claim without a bot thread, such as a review-body follow-up, needs no posted reply: the pushed fix and the bot's re-review answer it, and the validation report holds the verdict. Reply at PR level only when the bot itself posted at PR level. Write the reply in ASD-STE100. For a legit claim, mark the conversation resolved only after its fix commit is pushed or its stacked PR is up; mark false-positive and does-not-apply verdicts resolved without a fix commit.
 
-**Done means**: every bot conversation carries a verdict reply and is resolved, and every legit claim has a pushed fix commit.
+**Done means**: every bot conversation carries a verdict reply and is resolved, every legit claim has a pushed fix commit, every major-refactor concern carries a stacked-PR link, and the latest push triggered no new unresolved bot comments.
