@@ -3,7 +3,7 @@ type: guide
 title: Ingest Pipeline (L1 + L2)
 description: The source adapters, the fetch guard, the license gate, the normalization and segmentation pipeline, dedup, the injection filter, and the refresh policy for devdocs.
 tags: [devdocs, ingest, llms-txt, git, openapi, html, segmentation]
-timestamp: 2026-11-05T12:30:00Z
+timestamp: 2026-11-06T12:30:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -67,7 +67,7 @@ Implemented shape (M3b): the rules above land as follows.
 - **Twin preference.** An HTML page with a markdown twin ingests the twin (a markdown-twin event counts it). A page without a twin falls back to its HTML path; the media split skips it, because no HTML extractor exists in this slice. The same page never buffers twice: routes and twins dedup by URL, and the corpus dedup collapses equal bodies.
 - **Subpath scoping.** The walk is a FIFO queue of scopes: a link naming an `llms.txt` opens a deeper scope, a page's `rel="describedby"` response can open one, and the queue drains breadth-first. A page ingests under the scope with the longest directory path prefix — the most specific index wins; a page listed by a shallower scope defers to the deeper scope's turn. A page the shallower turn already buffered is re-fetched at that turn, and the deeper listing's document — with its own twin hints — replaces the buffered one in place, so the corpus keeps one document per page and the most specific listing governs it. Each scope joins its links against the redirect-aware base its index response came from.
 - **llms-full probe.** Every scope probes `llms-full.txt` at its directory. Absence is an expected outcome: a 404 or 410 on the wire, a missing replay response, or a non-UTF-8 body all read as "not there"; every other fetch error still fails the run and the guard policy still applies. When present, the export is one pre-built document that joins the corpus and is segmented like any other markdown body.
-- **Ingest events.** The run reports pages, skipped pages, skipped blocks (content-less blocks), unknown fence languages (a named language outside the known set; unnamed fences never count), chrome pattern drops, chrome drops (frequency-rule drops), dedup dropped pages, markdown twins used, subpath indexes, and llms-full exports. The counts surface as stderr log lines under `--verbose` and as the `events` object of the `--json` add envelope; they carry provenance only, never chunk text.
+- **Ingest events.** The run reports pages, skipped pages, skipped blocks (content-less blocks), unknown fence languages (a named language outside the known set; unnamed fences never count), unsupported fence languages (a symbol-capable language whose grammar feature is off, including the `typescript`, `ts`, and `tsx` aliases), chrome pattern drops, chrome drops (frequency-rule drops), dedup dropped pages, markdown twins used, subpath indexes, and llms-full exports. The counts surface as stderr log lines under `--verbose` and as the `events` object of the `--json` add envelope; they carry provenance only, never chunk text.
 
 ## Git adapter
 
@@ -146,6 +146,15 @@ Order matters. Each stage is a pure function over `RawDocument` streams, so snap
 4. **Segmentation.** Algorithm below.
 5. **Contextual headers.** Prepend the breadcrumb and version to every chunk body: `[{library} {version} › {section path}]` (research: architecture.md §L2. Measured effect −49% retrieval failures, −67% with reranking).
 6. **Symbol extraction.** Tree-sitter pass over fenced code blocks (per grammar) plus structured sources (OpenAPI operations, front-matter routes). Populates `chunks.symbol` and `symbols`.
+
+   Implemented shape (M5, fences only):
+
+   - **Grammars are features.** `devdocs-ingest` carries per-grammar features `grammar-rust`, `grammar-go`, `grammar-python`, and `grammar-javascript`; the aggregate feature `symbols` (all four) is default-on. tree-sitter core is a required dependency; a grammar crate is optional. TypeScript is deliberately absent ([01](01-tech-stack-decision.md)). A build with grammars disabled extracts nothing and still ingests.
+   - **The pass runs during segmentation.** Every prepared chunk carries its extracted symbols. A fence body is parsed with the language its fence-info string names. A chunk with no fenced code carries no symbols.
+   - **Public shape.** `ExtractedSymbol { name, kind, line }`; `extract(lang, code) -> Vec<ExtractedSymbol>`; `grammar_for(lang) -> Option<Language>`. The kind vocabulary and the per-grammar node kinds are the data-model contract ([06](06-data-model.md) §Symbol columns).
+   - **Parse failures never fail the source.** A parse with error nodes still yields the definitions it found; the walk stays defensive. A skipped fence is a counted event, not an error.
+   - **Counters.** A named fence language outside the known set counts `unknown_fence_languages`. A symbol-capable language with no enabled grammar — including the `typescript`, `ts`, and `tsx` aliases — counts `unsupported_fence_languages`. Unnamed fences count in neither. Both flow into the `--json` add envelope.
+   - **Structured sources stay unimplemented.** The OpenAPI and front-matter half of this step is not built in M5; fences are the only symbol source for now.
 7. **Injection filter.** Rules below. Quarantine, never silent edit: a flagged chunk is stored with a quarantine flag and excluded from serving until reviewed.
 8. **Publish.** Atomic write, below.
 

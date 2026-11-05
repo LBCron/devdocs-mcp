@@ -3,7 +3,7 @@ type: guide
 title: Roadmap and Milestones
 description: The phased roadmap for devdocs with concrete milestones, scope, acceptance criteria, and effort. Each phase gate matches the research validation gates.
 tags: [devdocs, roadmap, milestones, gates]
-timestamp: 2026-10-28T00:00:00Z
+timestamp: 2026-11-06T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -43,6 +43,8 @@ Effort is in focused working days for one engineer.
 | M12 | Phase 3 optional | Embedding feature, binary-quantized vectors, RRF hybrid, sync jobs | Hybrid improves hit@3 on the golden set at p95 < 400 ms. Feature-off build unchanged | 5 d |
 
 Total to the Phase 1 gate (M0–M10): about 27 working days. Phases 2 and 3 add about 9 to 12 more.
+
+Status note (2026-11-06): M5 is implemented. Its partial gate waits for the fixture corpus: the pilot golden set exists, the fixture DB behind it does not, so the pilot run reports placeholder zeros until the corpus lands ([14](14-benchmark-eval.md)). The ≥ 0.95 symbol-recall criterion stands.
 
 ## Definition of done
 

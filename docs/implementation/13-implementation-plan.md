@@ -3,7 +3,7 @@ type: guide
 title: Implementation Plan
 description: The step-by-step build order for devdocs with concrete commands, module sketches, and function signatures, plus the risk register and the do-not-build list.
 tags: [devdocs, implementation, plan, risks]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-06T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -116,14 +116,16 @@ Tests: budget properties (proptest). Resolver precedence. Version-status policy 
 
 ## M5 — Symbol index (3 days)
 
-Work in `devdocs-ingest` (extraction) and `devdocs-retrieve` (rung).
+Work in `devdocs-ingest` (extraction) and `devdocs-retrieve` (rung). All four steps landed on 2026-11-06. The implemented shape lives in [07](07-ingest-pipeline.md) §Symbol extraction and [08](08-retrieval-interfaces.md) §Rungs.
 
-1. Grammar registry with feature-gated grammars (rust, go, python, javascript. TS deferred — see [01](01-tech-stack-decision.md)).
-2. Extraction pass: for each fenced code block, parse with the fence-info language, walk for definition nodes, emit `(symbol, kind, position)`. Store to `symbols`. Unknown or missing fence info: skip, count, report in ingest events.
-3. Query-side normalization: strip call punctuation (`useRouter()` → `useRouter`), try exact, then case-sensitive prefix, then case-insensitive.
-4. Wire the symbol rung into the planner with its rank list for fusion.
+1. Landed. Grammar registry with feature-gated grammars (rust, go, python, javascript. TS deferred — see [01](01-tech-stack-decision.md)). The aggregate feature `symbols` carries all four and is default-on.
+2. Landed, with one extension. Extraction runs during segmentation: for each fenced code block, parse with the fence-info language, walk for definition nodes, emit `(symbol, kind, line)`. Store to `symbols`. Unknown or missing fence info: skip, count, report in ingest events. The events carry two counters — `unknown_fence_languages` (a named language outside the known set) and `unsupported_fence_languages` (a symbol-capable language whose grammar feature is off).
+3. Landed. Query-side normalization: strip trailing balanced call, index, and generic groups (`useRouter()` → `useRouter`), keep dots, then try exact, the last dot-segment of a dotted form as a second exact attempt, case-sensitive prefix, case-insensitive.
+4. Landed. The symbol rung is live in the planner's fusion list. `devdocs symbol` serves the rung alone; an empty fusion is the `symbol_absent` miss.
 
-Tests: per-grammar extraction fixtures (a known sample file per language with the expected symbol list). Symbol recall measured on the pilot golden set (the first partial gate run).
+Tests: per-grammar extraction fixtures (a known sample file per language with the expected symbol list). Symbol recall measured on the pilot golden set (the first partial gate run). The pilot run waits for the fixture corpus; the numbers it reports today are placeholders ([14](14-benchmark-eval.md)).
+
+Decision against the risk register: extraction landed without the trait. The regex fallback is not built. A trait earns its seat only when a second extraction source exists — the structured-source half of ingest step 6 is that trigger.
 
 ## M6 — Git adapter (3 days)
 
@@ -178,7 +180,7 @@ Tests: transition table (every legal and illegal move). The revoke-then-query dr
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| tree-sitter grammar churn breaks extraction | Medium | Medium | Pinned binding 0.25.8 + grammar pins. Extraction behind a trait so a regex fallback can serve. TS already deferred |
+| tree-sitter grammar churn breaks extraction | Medium | Medium | Pinned binding 0.25.8 + grammar pins. Landed without the extraction trait: the regex fallback is not built, and the structured-source half of ingest step 6 is the trigger to add the seam. TS already deferred |
 | FTS5 query builder produces invalid MATCH on odd input | Medium | Low | Property test with an escaper. Every token quoted. Fuzz in CI monthly |
 | reqwest DNS hook changes in a future 0.x | Low | High | The guard wraps reqwest behind one type. The connect-time re-check is independent code that works with or without the hook |
 | rust-trafilatura or dom_smoothie stalls | Low | Low | Both are interchangeable behind the extractor boundary. Htmd is the noted alternate ([10](10-dependency-audit.md)) |

@@ -58,7 +58,7 @@ Migration questions: when the query matches a migration pattern ("upgrade", "mig
 
 ## Rungs
 
-1. **Symbol exact.** `SELECT ... FROM symbols JOIN chunks` on the normalized identifier. Cheap, decisive for API names. Exact identifiers beat dense retrieval for API names (research: retrieval-design.md §3.1).
+1. **Symbol exact.** `SELECT ... FROM symbols JOIN chunks` on the normalized identifier. Cheap, decisive for API names. Exact identifiers beat dense retrieval for API names (research: retrieval-design.md §3.1). The rung normalizes the query first: trim it, then strip trailing balanced `(...)`, `[...]`, and `<...>` groups repeatedly (`useRouter()` becomes `useRouter`). Dots stay: `obj.method` keeps its path. The ladder tries, in order: exact, the last dot-segment of a dotted form as a second exact attempt, case-sensitive prefix, case-insensitive. The first non-empty list wins. The rung requests 4× the hit count for fusion headroom, the same shape the FTS rung applies.
 2. **FTS5 BM25.** Build the MATCH expression from the query: split on whitespace, drop operators, wrap each token as a quoted literal, append `*` to the last token of each run for prefix matching. Example: query `rewrite proxy request` becomes `"rewrite" "proxy" "request" *`. This construction is a property-tested invariant ([04](04-testing-strategy.md)). Ranking: `bm25(chunks_fts, 5.0, 1.0)` with `LIMIT` at 4× the requested hits for fusion headroom. Attach `snippet(chunks_fts, 1, '⟦', '⟧', '…', 12)` for highlight offsets.
 3. **Vector scan** (feature `embeddings`, phase 3). Embed the query with the same model that built the index, scan `chunks_vec` in-process by hamming distance, take the top 4× hits.
 
@@ -147,6 +147,8 @@ Contract properties (research: architecture.md §L4, GEM §5 checklist):
 - Deterministic ordering: fusion order, ties by chunk id. Identical DB state gives byte-identical `--json` output. Byte-identity excludes the `served_at` wall-clock field (the comparison rule for the CLI, the MCP (#12), and the embeddings (#20) tickets).
 - Pagination: `--cursor C` resumes a truncated page — for `search` the cursor is the last served chunk id, for `open` the character offset into the chunk.
 - Exit codes 0/1/2/3/4 per [05](05-architecture.md) (usage errors remap clap's default 2 to 1).
+
+`devdocs symbol <library@version> <symbol>` resolves the target first. A library the index lacks is `PKG_NOT_INDEXED` (`not_indexed`), a version it lacks is `PKG_NOT_INDEXED` (`version_absent`) — both exit 2. The target resolved, the symbol rung runs alone through the same fusion-and-pack path as `search`. An empty fusion is the `symbol_absent` miss with the `devdocs search <symbol>` hint. The command defines no `--limit` flag; the limit is the search default (8). A malformed or empty target is a usage error, exit 1.
 - Progressive disclosure: `devdocs list --json` is the ~20-token discovery surface. `devdocs versions <lib> --json` the per-library surface. `search` and `open` the full read. No prose man page. `--help` stays short.
 - No secrets in argv or stdout. The tool holds no credentials in v1 (public sources only). A future private-source feature will read tokens from the environment or an OS keystore, never from config files.
 - One static binary. No daemon. `devdocs mcp` reuses the same process.

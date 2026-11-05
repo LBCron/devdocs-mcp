@@ -3,7 +3,7 @@ type: guide
 title: Benchmark and Eval Harness
 description: The golden-set format, the eval harness implementation, the gate metrics with thresholds, run artifacts, and the regression policy that wires the research benchmark protocol into devdocs.
 tags: [devdocs, eval, benchmark, golden-set, gates]
-timestamp: 2026-11-04T00:00:00Z
+timestamp: 2026-11-06T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -18,7 +18,7 @@ The research bundle states that no controlled docs-domain benchmark exists, and 
 - `eval/golden/*.jsonl` — golden question files, one suite per file. A `<suite>.meta.json` sidecar next to a suite records the curation minutes.
 - `eval/runs/<date>-<suite>/` — run artifacts. Gitignored.
 - `eval/baseline/*.json` — the standing Phase 0 baseline records (schema rent, per-query cost of the current docs workflow) that each run report carries.
-- `just eval` — runs the default pilot suite through the harness binary and prints the gate table. A gate that is not PASS exits 2, so the recipe reports the honest state until the retrieval core lands at M4 ([13](13-implementation-plan.md)).
+- `just eval` — runs the default pilot suite through the harness binary and prints the gate table. A gate that is not PASS exits 2, so the recipe reports the honest state: until the fixture corpus lands, the gate numbers are placeholders (§Pilot, status note).
 
 ## Golden-set format
 
@@ -48,6 +48,8 @@ Field rules:
 ## Pilot (Phase 0)
 
 Build a 20-question suite across 3 libraries before writing retrieval code. This calibrates curation effort and produces the baseline the gates need (research: architecture.md Phase 0). Suggested start: Next.js, Zod, and one library the project's own lockfiles use. Include at least 2 `unanswerable` questions. Record curation minutes in the run report. The research protocol treats that cost as a measurement, not trivia.
+
+Status (2026-11-06): the pilot suite is curated (`eval/golden/pilot.jsonl`, 20 questions, `pilot.meta.json`). The fixture corpus behind it is not: the pilot runs against an empty migrated fixture DB, so a run reports placeholder zeros and the gates stay unjudged. The gate run uses real numbers once the corpus lands (the Phase 1 gate run, [12](12-roadmap-milestones.md)).
 
 ## Harness flow
 

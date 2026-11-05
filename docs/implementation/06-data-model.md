@@ -3,7 +3,7 @@ type: guide
 title: Data Model
 description: The complete SQLite schema for devdocs, the FTS5 configuration, the migration system, and the hashing policy. Targets SQLite 3.54 bundled in rusqlite 0.41.
 tags: [devdocs, sqlite, fts5, schema, migrations]
-timestamp: 2026-11-02T00:00:00Z
+timestamp: 2026-11-06T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -107,11 +107,10 @@ END;
 CREATE TABLE symbols (
   symbol     TEXT NOT NULL,
   chunk_id   INTEGER NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
-  kind       TEXT NOT NULL,                 -- 'function','class','method','route','operation', ...
+  kind       TEXT NOT NULL,                 -- 'function','method','class','struct','enum','trait','type','interface','constant','variable','module'
   PRIMARY KEY (symbol, chunk_id)
 );
 CREATE INDEX idx_symbols_chunk ON symbols(chunk_id);
-
 -- session_trajectory: per-session served-chunk dedup (phase 2)
 CREATE TABLE session_trajectory (
   session_id TEXT NOT NULL,
@@ -120,6 +119,15 @@ CREATE TABLE session_trajectory (
   PRIMARY KEY (session_id, chunk_id)
 );
 ```
+
+## Symbol columns
+
+The publish path fills both symbol surfaces ([07](07-ingest-pipeline.md) §Symbol extraction):
+
+- `chunks.symbol` carries the primary symbol of the chunk: the extracted symbol the section header names, else the first extracted symbol, else NULL.
+- The `symbols` table carries every extracted symbol of the chunk. Writes use `INSERT OR IGNORE`, so the `(symbol, chunk_id)` primary key makes a repeat publish idempotent inside the same transaction.
+
+The extraction pass emits this kind vocabulary: `function`, `method`, `class`, `struct`, `enum`, `trait`, `type`, `interface`, `constant`, `variable`, `module`. A grammar that names no node kind for a construct does not emit a row for it.
 
 ## FTS5 design decisions
 
