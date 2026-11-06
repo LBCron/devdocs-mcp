@@ -280,48 +280,17 @@ pub fn run(cli: &Cli) -> Result<(), Error> {
             version,
             kind,
             fixture,
-        } => {
-            // Only the llms.txt adapter exists in this slice; a silent flag
-            // drop would run the wrong pipeline with no error.
-            if let Some(kind) = kind
-                && kind != "llms_txt"
-            {
-                return Err(Error::Usage(format!(
-                    "--kind {kind} is not supported yet; this slice ingests llms_txt sources only"
-                )));
-            }
-            let config = Config::load(&overrides(cli))?;
-            let result =
-                crate::commands::run_add(&config, source, version.as_deref(), fixture.as_deref())?;
-            if cli.json {
-                print_line(&result)
-            } else {
-                write_stdout_line(&summarize_add(&result))
-            }
-        }
-        Command::List => {
-            let config = Config::load(&overrides(cli))?;
-            let envelope = crate::commands::run_list(&config)?;
-            if cli.json {
-                print_line(&envelope)
-            } else {
-                for item in &envelope.results {
-                    let state = if item.active { "active" } else { "inactive" };
-                    write_stdout_line(&format!(
-                        "{} {} ({} · {} · {})",
-                        item.library, item.version, item.kind, item.license_status, state
-                    ))?;
-                }
-                Ok(())
-            }
-        }
+        } => run_add_command(
+            cli,
+            source,
+            version.as_deref(),
+            kind.as_deref(),
+            fixture.as_deref(),
+        ),
+        Command::List => run_list_command(cli),
         Command::Db {
             op: DbOp::Migrate { force },
-        } => {
-            let config = Config::load(&overrides(cli))?;
-            let result = crate::commands::run_db_migrate(&config, *force)?;
-            print_line(&result)
-        }
+        } => run_db_migrate_command(cli, *force),
         Command::Search {
             query,
             library,
@@ -351,6 +320,57 @@ pub fn run(cli: &Cli) -> Result<(), Error> {
         | Command::Db { .. }
         | Command::Eval { .. } => print_placeholder(),
     }
+}
+
+/// Runs `devdocs add` and prints the ingest summary.
+fn run_add_command(
+    cli: &Cli,
+    source: &str,
+    version: Option<&str>,
+    kind: Option<&str>,
+    fixture: Option<&std::path::Path>,
+) -> Result<(), Error> {
+    // Only the llms.txt adapter exists in this slice; a silent flag
+    // drop would run the wrong pipeline with no error.
+    if let Some(kind) = kind
+        && kind != "llms_txt"
+    {
+        return Err(Error::Usage(format!(
+            "--kind {kind} is not supported yet; this slice ingests llms_txt sources only"
+        )));
+    }
+    let config = Config::load(&overrides(cli))?;
+    let result = crate::commands::run_add(&config, source, version, fixture)?;
+    if cli.json {
+        print_line(&result)
+    } else {
+        write_stdout_line(&summarize_add(&result))
+    }
+}
+
+/// Runs `devdocs list` and prints the source envelope.
+fn run_list_command(cli: &Cli) -> Result<(), Error> {
+    let config = Config::load(&overrides(cli))?;
+    let envelope = crate::commands::run_list(&config)?;
+    if cli.json {
+        print_line(&envelope)
+    } else {
+        for item in &envelope.results {
+            let state = if item.active { "active" } else { "inactive" };
+            write_stdout_line(&format!(
+                "{} {} ({} · {} · {})",
+                item.library, item.version, item.kind, item.license_status, state
+            ))?;
+        }
+        Ok(())
+    }
+}
+
+/// Runs `devdocs db migrate` and prints the result.
+fn run_db_migrate_command(cli: &Cli, force: bool) -> Result<(), Error> {
+    let config = Config::load(&overrides(cli))?;
+    let result = crate::commands::run_db_migrate(&config, force)?;
+    print_line(&result)
 }
 
 /// Runs `devdocs search` and prints the envelope.

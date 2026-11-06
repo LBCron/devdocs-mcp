@@ -45,6 +45,23 @@ fn store_symbols(symbols: &[ExtractedSymbol]) -> Vec<devdocs_store::Symbol> {
     symbols.iter().map(devdocs_store::Symbol::from).collect()
 }
 
+/// Builds a chunk's symbol rows plus its primary symbol: the declared
+/// symbol whose name the contextual header names, else the first declared
+/// one (docs/implementation/07 §Normalization pipeline, the symbol pass).
+fn chunk_symbols(
+    header: &str,
+    symbols: &[ExtractedSymbol],
+) -> (Vec<devdocs_store::Symbol>, Option<devdocs_store::Symbol>) {
+    (
+        store_symbols(symbols),
+        symbols
+            .iter()
+            .find(|sym| header_names_symbol(header, &sym.name))
+            .or_else(|| symbols.first())
+            .map(devdocs_store::Symbol::from),
+    )
+}
+
 /// The total ingest wall-time cap (docs/implementation/09 invariant 7: "by
 /// config"; the config key lands with the M6 network work, the cap holds
 /// from M3a).
@@ -340,36 +357,7 @@ impl<'a> IngestJob<'a> {
 
         // Segment every stripped document (docs/implementation/07
         // §Segmentation algorithm), one spawn_blocking per page.
-        for doc in &docs {
-            let (chunks, stats) =
-                segment_page(&segmenter, library, version, doc.body.clone()).await?;
-            run.events.skipped_blocks += stats.skipped_blocks;
-            run.events.unknown_fence_languages += stats.unknown_fence_languages;
-            run.events.unsupported_fence_languages += stats.unsupported_fence_languages;
-            for chunk in chunks {
-                // The primary symbol for `chunks.symbol`: the declared
-                // symbol whose name the contextual header names, else the
-                // first declared one (docs/implementation/07
-                // §Normalization pipeline, the symbol pass).
-                let symbols = store_symbols(&chunk.symbols);
-                let symbol = chunk
-                    .symbols
-                    .iter()
-                    .find(|sym| header_names_symbol(&chunk.header, &sym.name))
-                    .or_else(|| chunk.symbols.first())
-                    .map(devdocs_store::Symbol::from);
-                run.new_chunks.push(NewChunk {
-                    section_path: chunk.section_path,
-                    symbols,
-                    symbol,
-                    text: chunk.text,
-                    token_count: chunk.token_count,
-                    content_hash: chunk.content_hash,
-                    ordinal: u32::try_from(run.new_chunks.len()).unwrap_or(u32::MAX),
-                });
-            }
-            run.events.pages += 1;
-        }
+        Self::segment_docs(&segmenter, library, version, &docs, &mut run).await?;
 
         // A run that segments to zero chunks — no markdown links at all, or
         // only heading-only pages — must not publish an empty generation
@@ -396,6 +384,38 @@ impl<'a> IngestJob<'a> {
             new_chunks: run.new_chunks,
             events: run.events,
         })
+    }
+
+    /// Segments every stripped document into `run`, one `spawn_blocking` per
+    /// page (docs/implementation/07 §Segmentation algorithm).
+    async fn segment_docs(
+        segmenter: &Segmenter,
+        library: &str,
+        version: &str,
+        docs: &[PageDocument],
+        run: &mut RunState,
+    ) -> Result<(), IngestError> {
+        for doc in docs {
+            let (chunks, stats) =
+                segment_page(segmenter, library, version, doc.body.clone()).await?;
+            run.events.skipped_blocks += stats.skipped_blocks;
+            run.events.unknown_fence_languages += stats.unknown_fence_languages;
+            run.events.unsupported_fence_languages += stats.unsupported_fence_languages;
+            for chunk in chunks {
+                let (symbols, symbol) = chunk_symbols(&chunk.header, &chunk.symbols);
+                run.new_chunks.push(NewChunk {
+                    section_path: chunk.section_path,
+                    symbols,
+                    symbol,
+                    text: chunk.text,
+                    token_count: chunk.token_count,
+                    content_hash: chunk.content_hash,
+                    ordinal: u32::try_from(run.new_chunks.len()).unwrap_or(u32::MAX),
+                });
+            }
+            run.events.pages += 1;
+        }
+        Ok(())
     }
 
     /// Ingests one already-resolved page link: fetch, prefer the v2
