@@ -422,6 +422,144 @@ fn publish_wins_while_the_stored_state_is_non_terminal() {
     assert_eq!(status, "denied");
 }
 
+/// Mixed stored rows (one `pending_review`, one `denied`): the recheck
+/// refuses when ANY stored state is terminal. A rank-based minimum could
+/// pick `pending_review` (rank 0, same as `denied`), drop it in the
+/// terminal filter, and let the publish resurrect the `denied` row.
+#[test]
+fn publish_refuses_when_any_stored_row_is_terminal() {
+    let rig = rig();
+    let mut older = source(LicenseStatus::ApprovedIndex);
+    older.version = "16.1.0".to_owned();
+    older.origin_url = Url::parse("https://example.test/next/llms-16.1.txt").unwrap();
+    for src in [&source(LicenseStatus::ApprovedIndex), &older] {
+        rig.store
+            .publish_generation(src, &[chunk(0, None, "a published generation.")])
+            .unwrap();
+    }
+    // Per-row divergence: one row re-enters review, the other stays denied.
+    rig.conn
+        .execute(
+            "UPDATE sources SET license_status = 'denied' WHERE version = '16.2.9'",
+            [],
+        )
+        .unwrap();
+    rig.conn
+        .execute(
+            "UPDATE sources SET license_status = 'pending_review' WHERE version = '16.1.0'",
+            [],
+        )
+        .unwrap();
+
+    let audit_before: i64 = rig
+        .conn
+        .query_row(
+            "SELECT count(*) FROM meta WHERE key LIKE 'audit:%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    // The stale re-sync still carries the approved record.
+    let error = rig
+        .store
+        .publish_generation(
+            &source(LicenseStatus::ApprovedIndex),
+            &[chunk(0, None, "a stale republication that never lands.")],
+        )
+        .unwrap_err();
+    match error {
+        devdocs_store::StoreError::LicenseNotApproved { status: refused } => {
+            assert_eq!(refused, LicenseStatus::Denied);
+        }
+        other => panic!("expected LicenseNotApproved, got {other:?}"),
+    }
+
+    let rows: Vec<(String, String, i64)> = rig
+        .conn
+        .prepare("SELECT version, license_status, active FROM sources ORDER BY version")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("16.1.0".to_owned(), "pending_review".to_owned(), 0),
+            ("16.2.9".to_owned(), "denied".to_owned(), 0),
+        ],
+        "every row of the library deactivates, stored states stay"
+    );
+
+    let chunks: i64 = rig
+        .conn
+        .query_row("SELECT count(*) FROM chunks", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(chunks, 2, "the stale chunk set must not land");
+
+    let audit_after: i64 = rig
+        .conn
+        .query_row(
+            "SELECT count(*) FROM meta WHERE key LIKE 'audit:%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        audit_after, audit_before,
+        "the refusal must write no audit line"
+    );
+}
+
+/// Mixed non-terminal stored rows: the publish proceeds with its existing
+/// behavior — the record's state wins for the matching row and the other
+/// row keeps its own state.
+#[test]
+fn publish_proceeds_with_mixed_non_terminal_stored_rows() {
+    let rig = rig();
+    let mut older = source(LicenseStatus::ApprovedIndex);
+    older.version = "16.1.0".to_owned();
+    older.origin_url = Url::parse("https://example.test/next/llms-16.1.txt").unwrap();
+    for src in [&source(LicenseStatus::ApprovedIndex), &older] {
+        rig.store
+            .publish_generation(src, &[chunk(0, None, "a published generation.")])
+            .unwrap();
+    }
+    rig.conn
+        .execute(
+            "UPDATE sources SET license_status = 'approved_fetch' WHERE version = '16.1.0'",
+            [],
+        )
+        .unwrap();
+
+    rig.store
+        .publish_generation(
+            &source(LicenseStatus::ApprovedSnippet),
+            &[chunk(0, None, "the republished generation.")],
+        )
+        .unwrap();
+
+    let rows: Vec<(String, String, i64)> = rig
+        .conn
+        .prepare("SELECT version, license_status, active FROM sources ORDER BY version")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            // The sibling row keeps its state and stays active from its own
+            // earlier publish.
+            ("16.1.0".to_owned(), "approved_fetch".to_owned(), 1),
+            ("16.2.9".to_owned(), "approved_snippet".to_owned(), 1),
+        ],
+        "the republished row activates, the sibling row keeps its state"
+    );
+}
+
 /// A source whose stored status turns terminal while it stays active —
 /// exactly the state a revoked registry entry leaves behind when the gate
 /// refuses before any publish runs — drops out of retrieval at query time

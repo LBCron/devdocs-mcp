@@ -84,22 +84,19 @@ impl Store {
         let mut conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        // TOCTOU recheck: the caller-supplied record is stale when the
-        // library's authoritative stored state turned terminal after the
+        // TOCTOU recheck: the caller-supplied record is stale when any of
+        // the library's rows carries a terminal stored state after the
         // fetch gate read it. The withdrawal lands inside this committed
         // transaction, so the refusal cannot roll it back.
-        if let Some(stored) = stored_library_states(&tx, &src.library)?
-            .into_iter()
-            .min_by_key(|state| state.rank())
-            .filter(|state| state.is_terminal())
-        {
+        let stored = stored_library_states(&tx, &src.library)?;
+        if let Some(terminal) = stored.iter().copied().find(|state| state.is_terminal()) {
             tx.execute(
                 "UPDATE sources SET active = 0 WHERE library = ?1 COLLATE NOCASE",
                 params![src.library],
             )
             .map_err(StoreError::Sql)?;
             tx.commit().map_err(StoreError::Sql)?;
-            return Err(StoreError::LicenseNotApproved { status: stored });
+            return Err(StoreError::LicenseNotApproved { status: terminal });
         }
 
         let result = publish_inside(&tx, src, chunks);
@@ -156,13 +153,16 @@ impl Store {
 }
 
 /// The distinct license states the library's rows carry inside `tx`,
-/// case-insensitive on the library (docs/implementation/07 §License gate).
+/// case-insensitive on the library, ordered by the storage spelling
+/// (docs/implementation/07 §License gate).
 fn stored_library_states(
     tx: &rusqlite::Transaction<'_>,
     library: &str,
 ) -> Result<Vec<LicenseStatus>, StoreError> {
-    let mut statement = tx
-        .prepare("SELECT DISTINCT license_status FROM sources WHERE library = ?1 COLLATE NOCASE")?;
+    let mut statement = tx.prepare(
+        "SELECT DISTINCT license_status FROM sources \
+         WHERE library = ?1 COLLATE NOCASE ORDER BY license_status",
+    )?;
     let rows = statement
         .query_map(params![library], |row| row.get::<_, String>(0))
         .map_err(StoreError::Sql)?;
