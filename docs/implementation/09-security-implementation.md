@@ -3,7 +3,7 @@ type: guide
 title: Security Implementation
 description: The mapping from the research threat model to concrete controls in code, the fetch-guard invariants and tests, injection-filter operations, storage controls, and the security checklist.
 tags: [devdocs, security, ssrf, injection, licensing]
-timestamp: 2026-11-07T03:05:11Z
+timestamp: 2026-11-07T14:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
