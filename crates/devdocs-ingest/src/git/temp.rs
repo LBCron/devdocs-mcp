@@ -219,6 +219,41 @@ mod tests {
 
     use super::super::test_util::{TEMP_CLONE_ORDER, fixture_git};
     use super::{REGISTERED_PATH, TempClone, install_signal_cleanup};
+    #[cfg(unix)]
+    use super::{create_private_dir, verify_private_dir};
+
+    /// A path that already exists as a file refuses the private-dir
+    /// create: the error names the path (`GitTempDir` mapping).
+    #[cfg(unix)]
+    #[test]
+    fn create_private_dir_refuses_an_occupied_path() {
+        let data = tempdir().unwrap();
+        let path = data.path().join("occupied");
+        std::fs::write(&path, "x").unwrap();
+
+        let error = create_private_dir(&path).unwrap_err();
+        assert!(
+            matches!(error, crate::error::IngestError::GitTempDir { .. }),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("occupied"));
+    }
+
+    /// A missing path refuses the private-dir verification: the stat
+    /// failure maps to `GitTempDir` naming the path.
+    #[cfg(unix)]
+    #[test]
+    fn verify_private_dir_refuses_a_missing_path() {
+        let data = tempdir().unwrap();
+        let path = data.path().join("absent");
+
+        let error = verify_private_dir(&path).unwrap_err();
+        assert!(
+            matches!(error, crate::error::IngestError::GitTempDir { .. }),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("absent"));
+    }
 
     /// Dropping the plan removes the clone directory, the `tmp` parent
     /// keeps its mode 0700, and the clone directory itself was created
@@ -351,6 +386,85 @@ mod tests {
         // registered path.
         let _second = TempClone::create(data.path()).unwrap();
         assert!(registered.exists(), "the registered clone must survive");
+    }
+
+    /// A tmp root left at 0755 fails the private-dir contract: the create
+    /// refuses with `GitTempDir` naming the wrong mode
+    /// (docs/implementation/09 §Local storage controls).
+    #[test]
+    fn an_unprivate_tmp_root_refuses_the_create() {
+        let _order = TEMP_CLONE_ORDER.lock().unwrap();
+        let data = tempdir().unwrap();
+        let tmp = data.path().join("tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let error = TempClone::create(data.path()).unwrap_err();
+        let message = match &error {
+            crate::error::IngestError::GitTempDir { message } => message.clone(),
+            other => panic!("expected GitTempDir, got {other:?}"),
+        };
+        assert!(message.contains("755"), "message: {message}");
+    }
+
+    /// A guard whose clone dir cannot be removed logs the failure and
+    /// clears the registry slot anyway (the `Drop` warn path).
+    #[test]
+    fn an_unremovable_clone_dir_warns_on_drop() {
+        let _order = TEMP_CLONE_ORDER.lock().unwrap();
+        let data = tempdir().unwrap();
+        let guard = TempClone::create(data.path()).unwrap();
+        let path = guard.path().to_path_buf();
+        // Content inside: removal must unlink it, which the revoked write
+        // bit below forbids.
+        std::fs::write(path.join("leftover"), "x").unwrap();
+
+        // Make removal impossible: no write permission on the clone dir.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        drop(guard);
+        assert!(path.exists(), "the unremovable clone dir must survive");
+
+        // Restore so the parent tempdir can clean up.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::remove_dir_all(&path).unwrap();
+        assert_eq!(*REGISTERED_PATH.lock().unwrap(), None);
+    }
+
+    /// The sweep ignores a tmp root it cannot read, and a non-clone entry
+    /// in the root is skipped untouched.
+    #[test]
+    fn the_sweep_skips_unreadable_roots_and_foreign_entries() {
+        // A nonexistent root: the early return keeps the create alive.
+        super::sweep_stale_clones(Path::new("/devdocs-nonexistent-root"));
+
+        let _order = TEMP_CLONE_ORDER.lock().unwrap();
+        let data = tempdir().unwrap();
+        let tmp = data.path().join("tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        // A foreign entry (not a `devdocs-git-*` name) never gets touched.
+        let foreign = tmp.join("other-run");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("data"), "x").unwrap();
+        let guard = TempClone::create(data.path()).unwrap();
+        assert!(foreign.exists(), "the foreign entry must survive");
+        assert!(guard.path().exists());
     }
 
     /// The `fixture_git` helper runs real git and trims stdout (used by

@@ -137,6 +137,35 @@ mod tests {
         assert!(paths.contains(&"README.md"), "paths: {paths:?}");
     }
 
+    /// A subdirectory the walk cannot read surfaces as `GitWalk` — the
+    /// walker error is the adapter's walk failure, not a silent skip
+    /// (docs/implementation/07 §Git adapter).
+    #[test]
+    fn an_unreadable_subdir_fails_the_walk() {
+        let repo_dir = tempdir().unwrap();
+        let repo = devdocs_testkit::git_repo::docs_repo(repo_dir.path()).unwrap();
+        let locked = repo.work_dir.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        let error = walk_docs(&repo.work_dir, &default_extensions()).unwrap_err();
+        assert!(
+            matches!(error, crate::error::IngestError::GitWalk { .. }),
+            "{error:?}"
+        );
+
+        // Restore so the tempdir cleanup can run.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+
     /// The walk collects the fixture docs under their clone-relative
     /// paths; the path accessor carries forward slashes on every host.
     #[test]

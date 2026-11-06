@@ -109,6 +109,25 @@ mod tests {
 
     use std::path::Path;
 
+    use super::stderr_tail;
+
+    /// A stderr tail cut mid-character advances to the next char boundary:
+    /// a three-byte payload whose 512-byte back-cut lands inside a
+    /// character yields a whole-character tail, never a panic.
+    #[test]
+    fn the_stderr_tail_cuts_on_a_char_boundary() {
+        // 1800 bytes; the cut lands at byte 1288, the second byte of
+        // character 429 — the loop advances to the boundary at 1291.
+        let long = "€".repeat(600);
+        let tail = stderr_tail(long.as_bytes());
+        assert!(std::str::from_utf8(tail.as_bytes()).is_ok());
+        assert!(tail.chars().all(|c| c == '€'));
+        assert_eq!(tail.chars().count(), 170);
+
+        // Below the cap the whole text comes back.
+        assert_eq!(stderr_tail(b"short".as_slice()), "short");
+    }
+
     /// The builder `run_git` executes hardens the child env: every
     /// ambient `GIT_*` control and location variable is removed, the
     /// prompt and system config pins are set — what an operator shell may

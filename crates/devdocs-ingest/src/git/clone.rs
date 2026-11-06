@@ -263,8 +263,22 @@ mod tests {
     use tempfile::tempdir;
 
     use super::super::test_util::{TEMP_CLONE_ORDER, default_extensions, fixture_git};
-    use super::{GitPlan, PinKind, is_commit_sha, plan};
+    use super::{GitPlan, PinKind, create_private_dir, is_commit_sha, plan};
     use crate::error::IngestError;
+
+    /// A path that already exists as a file refuses the private-dir
+    /// create behind the fallback clone: the error names the path
+    /// (`GitTempDir` mapping).
+    #[test]
+    fn create_private_dir_refuses_an_occupied_path() {
+        let data = tempdir().unwrap();
+        let path = data.path().join("occupied");
+        std::fs::write(&path, "x").unwrap();
+
+        let error = create_private_dir(&path).unwrap_err();
+        assert!(matches!(error, IngestError::GitTempDir { .. }), "{error:?}");
+        assert!(error.to_string().contains("occupied"));
+    }
 
     /// A tag clone checks out the `v1.0.0` content and records the tag's
     /// commit SHA (docs/implementation/07 §Git adapter).

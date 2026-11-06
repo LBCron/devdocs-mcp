@@ -398,13 +398,7 @@ impl PartialConfig {
         }
 
         if let Some(raw) = env_string(INGEST_GIT_EXTENSIONS)? {
-            ingest.git_extensions = Some(
-                raw.split(',')
-                    .map(str::trim)
-                    .filter(|ext| !ext.is_empty())
-                    .map(str::to_owned)
-                    .collect(),
-            );
+            ingest.git_extensions = Some(parse_git_extensions(&raw));
         }
 
         layer.fetch = fetch;
@@ -458,6 +452,16 @@ fn env_string(var: &str) -> Result<Option<String>, Error> {
         None => Ok(None),
         Some(raw) => coerce_utf8(var, raw),
     }
+}
+
+/// Split a raw `DEVDOCS_INGEST_GIT_EXTENSIONS` value into entries:
+/// comma-separated, trimmed, empty entries dropped.
+fn parse_git_extensions(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|ext| !ext.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Convert a set value to UTF-8; empty values count as unset.
@@ -773,6 +777,18 @@ mod tests {
     fn empty_file_parses_to_defaults() {
         let partial = PartialConfig::parse("").unwrap();
         assert_eq!(partial, PartialConfig::default());
+    }
+
+    /// The env value of `DEVDOCS_INGEST_GIT_EXTENSIONS` parses as a
+    /// comma-separated list: entries trim, empty entries drop
+    /// (docs/implementation/07 §Git adapter).
+    #[test]
+    fn the_env_value_parses_the_git_extension_list() {
+        assert_eq!(
+            super::parse_git_extensions(" md , ,rst "),
+            vec!["md".to_owned(), "rst".to_owned()]
+        );
+        assert_eq!(super::parse_git_extensions(","), Vec::<String>::new());
     }
 
     /// A full file parses every section of the docs/05 schema.

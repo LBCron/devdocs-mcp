@@ -487,3 +487,73 @@ fn map_ingest_error(error: devdocs_ingest::IngestError) -> Error {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::map_ingest_error;
+    use devdocs_ingest::IngestError;
+    use devdocs_model::error::{Error, UpstreamCode};
+
+    /// Every git adapter error kind maps onto `UPSTREAM_ERROR` with its
+    /// stable code prefix intact (docs/implementation/05 §Error model).
+    #[test]
+    fn git_errors_map_upstream_with_their_code_prefix() {
+        let cases: Vec<(IngestError, &str)> = vec![
+            (
+                IngestError::GitInvalidPin {
+                    pin: "-oProxyCommand=no".to_owned(),
+                },
+                "GIT_INVALID_PIN",
+            ),
+            (
+                IngestError::GitUrlMismatch {
+                    planned: "file:///a".to_owned(),
+                    actual: "file:///b".to_owned(),
+                },
+                "GIT_URL_MISMATCH",
+            ),
+            (
+                IngestError::GitCommand {
+                    command: "git clone".to_owned(),
+                    stderr: "boom".to_owned(),
+                },
+                "GIT_COMMAND_FAILED",
+            ),
+            (
+                IngestError::GitSpawn {
+                    message: "no exec".to_owned(),
+                },
+                "GIT_SPAWN_FAILED",
+            ),
+            (
+                IngestError::GitTempDir {
+                    message: "cannot create /tmp/x: denied".to_owned(),
+                },
+                "GIT_TEMP_DIR",
+            ),
+            (
+                IngestError::GitWalk {
+                    message: "unreadable".to_owned(),
+                },
+                "GIT_WALK_FAILED",
+            ),
+            (
+                IngestError::GitCommitShaInvalid("not-a-sha".to_owned()),
+                "GIT_COMMIT_SHA_INVALID",
+            ),
+        ];
+
+        for (error, code) in cases {
+            let Error::Upstream { code: got, detail } = map_ingest_error(error) else {
+                panic!("expected an upstream error for {code}");
+            };
+            assert_eq!(got, UpstreamCode::UpstreamError);
+            assert!(
+                detail.starts_with(&format!("{code}:")),
+                "detail `{detail}` lacks the {code} prefix"
+            );
+        }
+    }
+}
