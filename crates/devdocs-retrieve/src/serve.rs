@@ -192,28 +192,8 @@ pub fn symbol(
         return Err(MissReason::NotIndexed.into());
     }
     let headroom = plan.limit.saturating_mul(4).max(1);
-    let (rung_hits, served_version) = match version {
-        Some(version) => {
-            let source_ids = store.find_sources(library, version)?;
-            if source_ids.is_empty() {
-                return Err(MissReason::VersionAbsent.into());
-            }
-            let rungs = source_ids
-                .iter()
-                .map(|id| symbol_rung(store, symbol, Scope::Source(*id), headroom))
-                .collect::<Result<Vec<_>, _>>()?;
-            (rungs, Some(version.to_owned()))
-        }
-        None => (
-            vec![symbol_rung(
-                store,
-                symbol,
-                Scope::Library(library),
-                headroom,
-            )?],
-            None,
-        ),
-    };
+    let (rung_hits, served_version) =
+        pinned_symbol_rungs(store, library, version, symbol, headroom)?;
     // A single rung fuses as identity; several pinned sources rank their
     // best hits equally, ties by chunk id.
     let fused = fuse(plan.rrf_k, &rung_hits);
@@ -250,6 +230,46 @@ pub fn symbol(
         next_cursor: packed.next_cursor,
         served_at: now_rfc3339(),
     })
+}
+
+/// The rung hits of one symbol lookup target: a pinned version runs one
+/// `Scope::Source` rung per resolved source; a bare library keeps the
+/// library scope. Returns the rungs and the served version, `Some` only
+/// for a pinned one — the pick-status input.
+///
+/// # Errors
+/// [`RetrieveError::Miss`] with [`MissReason::VersionAbsent`] when a
+/// pinned version resolves to no source, [`RetrieveError::Store`] for
+/// store failures.
+fn pinned_symbol_rungs(
+    store: &Store,
+    library: &str,
+    version: Option<&str>,
+    symbol: &str,
+    headroom: u32,
+) -> Result<(Vec<Vec<Hit>>, Option<String>), RetrieveError> {
+    match version {
+        Some(version) => {
+            let source_ids = store.find_sources(library, version)?;
+            if source_ids.is_empty() {
+                return Err(MissReason::VersionAbsent.into());
+            }
+            let rungs = source_ids
+                .iter()
+                .map(|id| symbol_rung(store, symbol, Scope::Source(*id), headroom))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((rungs, Some(version.to_owned())))
+        }
+        None => Ok((
+            vec![symbol_rung(
+                store,
+                symbol,
+                Scope::Library(library),
+                headroom,
+            )?],
+            None,
+        )),
+    }
 }
 
 /// The fallback rungs (docs/08 §Version resolution, step 4): search every
