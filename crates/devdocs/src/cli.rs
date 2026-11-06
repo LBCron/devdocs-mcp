@@ -413,20 +413,25 @@ fn run_source_command(cli: &Cli, op: &SourceOp) -> Result<(), Error> {
             print_line(&report)
         }
         SourceOp::List => {
-            let report = crate::commands::run_source_list(&config)?;
+            let entries = crate::commands::run_source_list(&config)?;
             if cli.json {
-                print_line(&report)
+                print_line(&serde_json::json!({
+                    "results": entries,
+                    "served_at": devdocs_model::now_rfc3339(),
+                }))
             } else {
-                for entry in report["results"].as_array().unwrap_or(&Vec::new()) {
-                    let name = entry["name"].as_str().unwrap_or("?");
-                    let status = entry["status"].as_str().unwrap_or("?");
-                    let license = entry["license"].as_str().unwrap_or("unknown");
-                    let url = entry["url"].as_str().unwrap_or("");
-                    let mut line = format!("{name} {status} ({license}) · {url}");
-                    if let Some(expires) = entry["expires"].as_str() {
+                for entry in &entries {
+                    let mut line = format!(
+                        "{} {} ({}) · {}",
+                        entry.name,
+                        entry.status,
+                        entry.license.as_deref().unwrap_or("unknown"),
+                        entry.url.as_deref().unwrap_or(""),
+                    );
+                    if let Some(expires) = &entry.expires {
                         let _ = write!(line, " · expires {expires}");
                     }
-                    if let Some(attribution) = entry["attribution"].as_str() {
+                    if let Some(attribution) = &entry.attribution {
                         let _ = write!(line, " · {attribution}");
                     }
                     write_stdout_line(&line)?;

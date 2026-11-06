@@ -129,6 +129,43 @@ pub struct SourceSummary {
     pub commit_sha: Option<String>,
 }
 
+/// One `devdocs source list` entry: the declarative `[sources.<name>]`
+/// config entry joined with the authoritative store state
+/// (docs/implementation/07 §License gate).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceListEntry {
+    /// The registry entry name.
+    pub name: String,
+    /// The source URL from the config entry.
+    pub url: Option<String>,
+    /// The source kind from the config entry.
+    pub kind: Option<String>,
+    /// The SPDX license id from the config entry.
+    pub license: Option<String>,
+    /// The attribution line from the config entry.
+    pub attribution: Option<String>,
+    /// The config expiry date, `YYYY-MM-DD`.
+    pub expires: Option<String>,
+    /// The least privileged stored state of the library's rows, or the
+    /// deny-by-default `pending_review` when nothing is indexed yet.
+    pub status: String,
+    /// The indexed versions of the library, from the store.
+    pub versions: Vec<SourceListVersion>,
+}
+
+/// One version row of a [`SourceListEntry`], straight from the store.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceListVersion {
+    /// The exact version.
+    pub version: String,
+    /// The license approval stage of the row.
+    pub status: String,
+    /// When the content was fetched, RFC 3339 UTC.
+    pub fetched_at: String,
+    /// Whether the source is active in search.
+    pub active: bool,
+}
+
 /// The RFC 3339 UTC timestamp envelopes carry as `served_at`; the fallback
 /// keeps the envelope contract when the clock is unavailable.
 #[must_use]

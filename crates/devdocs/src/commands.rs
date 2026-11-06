@@ -12,7 +12,7 @@ use devdocs_ingest::{
     registry_name,
 };
 use devdocs_model::config::Config;
-use devdocs_model::envelope::{ResultEnvelope, SourceSummary};
+use devdocs_model::envelope::{ResultEnvelope, SourceListEntry, SourceListVersion, SourceSummary};
 use devdocs_model::error::{Error, UpstreamCode};
 use devdocs_model::source::LicenseStatus;
 use devdocs_store::{MigrateOptions, Store, StoreError};
@@ -302,7 +302,7 @@ pub fn run_add(
                 return Err(error);
             }
         };
-        return run_add_git(config, &index_url, &grant.name, pin);
+        return run_add_git(config, &store, &index_url, &grant.name, pin);
     }
 
     let store = open_store(config, false)?;
@@ -346,13 +346,15 @@ pub fn run_add(
 /// [`IngestJob::run_git`]'s `spawn_blocking` — not through the HTTP fetch
 /// guard, which does not govern the git transport
 /// (docs/implementation/07 §Git adapter) — and the version label is the
-/// pin itself.
+/// pin itself. The store handle arrives already open: the license gate
+/// opened it, and a second open would migrate the same file twice.
 ///
 /// # Errors
 /// [`Error`] for any ingest failure (`IngestJob::run_git` maps the whole
 /// plan/fetch/segment/publish chain).
 fn run_add_git(
     config: &Config,
+    store: &Arc<Store>,
     repo_url: &Url,
     library: &str,
     pin: &str,
@@ -366,7 +368,6 @@ fn run_add_git(
             detail: format!("cannot start the async runtime: {e}"),
         })?;
 
-    let store = open_store(config, false)?;
     // The clone directory lands under the store's data root, the directory
     // `open_store` already created with mode 0700.
     let data_root = config.index.path.parent().map_or_else(
@@ -375,7 +376,7 @@ fn run_add_git(
     );
     let job = IngestJob::new(config, &guard, None);
     let result = runtime.block_on(job.run_git(
-        Arc::clone(&store),
+        Arc::clone(store),
         repo_url,
         library,
         pin,
@@ -544,50 +545,43 @@ pub fn run_source_deny(
 ///
 /// # Errors
 /// [`Error::Upstream`] when the store cannot open or the read fails.
-pub fn run_source_list(config: &Config) -> Result<serde_json::Value, Error> {
+pub fn run_source_list(config: &Config) -> Result<Vec<SourceListEntry>, Error> {
     let store = open_store(config, false)?;
     store
         .sweep_expired(&devdocs_model::now_rfc3339())
         .map_err(|e| map_store_error(&e))?;
     let rows = store.list_sources().map_err(|e| map_store_error(&e))?;
-    let results: Vec<serde_json::Value> = config
+    Ok(config
         .sources
         .iter()
         .map(|(name, entry)| {
-            let versions: Vec<serde_json::Value> = rows
+            let versions: Vec<SourceListVersion> = rows
                 .iter()
                 .filter(|row| row.library.eq_ignore_ascii_case(name))
-                .map(|row| {
-                    serde_json::json!({
-                        "version": row.version,
-                        "status": row.license_status,
-                        "fetched_at": row.fetched_at,
-                        "active": row.active,
-                    })
+                .map(|row| SourceListVersion {
+                    version: row.version.clone(),
+                    status: row.license_status.clone(),
+                    fetched_at: row.fetched_at.clone(),
+                    active: row.active,
                 })
                 .collect();
             let status = versions
                 .iter()
-                .filter_map(|version| version["status"].as_str())
-                .filter_map(LicenseStatus::parse)
+                .filter_map(|version| LicenseStatus::parse(&version.status))
                 .min_by_key(|state| state.rank())
                 .map_or_else(|| String::from("pending_review"), |state| state.to_string());
-            serde_json::json!({
-                "name": name,
-                "url": entry.url,
-                "kind": entry.kind,
-                "license": entry.license,
-                "attribution": entry.attribution,
-                "expires": entry.expires,
-                "status": status,
-                "versions": versions,
-            })
+            SourceListEntry {
+                name: name.clone(),
+                url: entry.url.clone(),
+                kind: entry.kind.clone(),
+                license: entry.license.clone(),
+                attribution: entry.attribution.clone(),
+                expires: entry.expires.clone(),
+                status,
+                versions,
+            }
         })
-        .collect();
-    Ok(serde_json::json!({
-        "results": results,
-        "served_at": devdocs_model::now_rfc3339(),
-    }))
+        .collect())
 }
 
 /// Parses the `<stage>` argument of `devdocs source approve` through the
