@@ -181,15 +181,36 @@ pub enum Command {
 /// `devdocs source <op>`.
 #[derive(Debug, Subcommand)]
 pub enum SourceOp {
-    /// Approve a source in the license registry.
+    /// Approve a source in the license registry
+    /// (docs/implementation/07 §License gate).
     Approve {
-        /// The registry entry name.
+        /// The library name to approve.
         name: String,
+        /// The license approval stage to move to, for example
+        /// `approved_index`.
+        stage: String,
+        /// The audit note for the transition (required to re-open a
+        /// denied source as `pending_review`).
+        #[arg(long)]
+        note: Option<String>,
+        /// The operator stamping the audit line.
+        #[arg(long)]
+        operator: Option<String>,
+        /// The expiry date (YYYY-MM-DD) the approval lapses at.
+        #[arg(long)]
+        expires: Option<String>,
     },
-    /// Deny a source in the license registry.
+    /// Deny a source in the license registry
+    /// (docs/implementation/07 §License gate).
     Deny {
-        /// The registry entry name.
+        /// The library name to deny.
         name: String,
+        /// The audit note for the transition.
+        #[arg(long)]
+        note: Option<String>,
+        /// The operator stamping the audit line.
+        #[arg(long)]
+        operator: Option<String>,
     },
     /// List registry entries.
     List,
@@ -342,13 +363,77 @@ pub fn run(cli: &Cli) -> Result<(), Error> {
         Command::Open { doc_ref, cursor } => run_open_command(cli, doc_ref, *cursor),
         Command::Verify { doc_ref } => run_verify_command(cli, doc_ref),
         Command::Versions { library } => run_versions_command(cli, library),
+        Command::Source { op } => run_source_command(cli, op),
         Command::Sync { .. }
         | Command::Symbol { .. }
-        | Command::Source { .. }
         | Command::Skill { .. }
         | Command::Mcp { .. }
         | Command::Db { .. }
         | Command::Eval { .. } => print_placeholder(),
+    }
+}
+
+/// Runs `devdocs source <op>` (docs/implementation/08 §CLI contract):
+/// approve and deny print the JSON transition report on stdout (stdout
+/// carries only the result envelope), list joins the declarative config
+/// with the authoritative store state.
+fn run_source_command(cli: &Cli, op: &SourceOp) -> Result<(), Error> {
+    use std::fmt::Write as _;
+
+    let config = Config::load(&overrides(cli))?;
+    match op {
+        SourceOp::Approve {
+            name,
+            stage,
+            note,
+            operator,
+            expires,
+        } => {
+            let report = crate::commands::run_source_approve(
+                &config,
+                name,
+                stage,
+                note.as_deref(),
+                operator.as_deref(),
+                expires.as_deref(),
+            )?;
+            print_line(&report)
+        }
+        SourceOp::Deny {
+            name,
+            note,
+            operator,
+        } => {
+            let report = crate::commands::run_source_deny(
+                &config,
+                name,
+                note.as_deref(),
+                operator.as_deref(),
+            )?;
+            print_line(&report)
+        }
+        SourceOp::List => {
+            let report = crate::commands::run_source_list(&config)?;
+            if cli.json {
+                print_line(&report)
+            } else {
+                for entry in report["results"].as_array().unwrap_or(&Vec::new()) {
+                    let name = entry["name"].as_str().unwrap_or("?");
+                    let status = entry["status"].as_str().unwrap_or("?");
+                    let license = entry["license"].as_str().unwrap_or("unknown");
+                    let url = entry["url"].as_str().unwrap_or("");
+                    let mut line = format!("{name} {status} ({license}) · {url}");
+                    if let Some(expires) = entry["expires"].as_str() {
+                        let _ = write!(line, " · expires {expires}");
+                    }
+                    if let Some(attribution) = entry["attribution"].as_str() {
+                        let _ = write!(line, " · {attribution}");
+                    }
+                    write_stdout_line(&line)?;
+                }
+                Ok(())
+            }
+        }
     }
 }
 

@@ -161,6 +161,28 @@ impl Store {
         }
         Ok(states)
     }
+
+    /// Writes the expiry date onto every row of `library` — the
+    /// `--expires` flag of `devdocs source approve`
+    /// (docs/implementation/07 §License gate). `None` clears the recorded
+    /// expiry. The next read-path sweep decides whether a written past
+    /// date flips the rows to `expired`. Returns the row count.
+    ///
+    /// # Errors
+    /// [`StoreError::Sql`] on the update failure.
+    pub fn set_license_expires_at(
+        &self,
+        library: &str,
+        expires: Option<&str>,
+    ) -> Result<usize, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
+        conn.execute(
+            "UPDATE sources SET license_expires_at = ?2 \
+             WHERE library = ?1 COLLATE NOCASE",
+            params![library, expires],
+        )
+        .map_err(StoreError::Sql)
+    }
 }
 
 /// The distinct license states the library's rows currently carry.
@@ -553,6 +575,39 @@ mod tests {
             lines[0].contains(", robots disallow)"),
             "line: {}",
             lines[0]
+        );
+    }
+
+    /// `set_license_expires_at` writes the date onto every row of the
+    /// library (case-insensitive), `None` clears it, and an unknown
+    /// library writes nothing.
+    #[test]
+    fn set_license_expires_at_updates_every_row_of_the_library() {
+        let (store, _dir) = store();
+        insert_source(&store, "acme", "1.0", ApprovedIndex, None);
+        insert_source(&store, "acme", "2.0", ApprovedIndex, None);
+        assert_eq!(
+            store
+                .set_license_expires_at("ACME", Some("2999-01-01"))
+                .unwrap(),
+            2
+        );
+        let conn = store.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sources WHERE license_expires_at = '2999-01-01'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(count, 2);
+        assert_eq!(store.set_license_expires_at("acme", None).unwrap(), 2);
+        assert_eq!(
+            store
+                .set_license_expires_at("ghost", Some("2999-01-01"))
+                .unwrap(),
+            0
         );
     }
 

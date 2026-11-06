@@ -897,3 +897,284 @@ fn list_on_an_empty_store_prints_the_empty_envelope() {
     assert_eq!(list["truncated"], false);
     assert!(list["served_at"].is_string());
 }
+
+/// The `source` tests need an indexed corpus: the ingest bootstrap lands
+/// at the publish floor (`approved_index`) and the operator walks the
+/// progression from there (docs/implementation/07 §License gate).
+fn source_env() -> (Env, PathBuf) {
+    let (env, config) = common::indexed_env_at_index();
+    (env, config)
+}
+
+/// `source approve` walks the full progression: each legal move exits 0
+/// with the JSON transition report, and `source list` reports the final
+/// state (AC3).
+#[test]
+fn source_approve_walks_the_full_progression() {
+    let (env, config) = source_env();
+    let cfg = ["--config", config.to_str().expect("config path")];
+    for stage in ["approved_embed", "approved_cache", "approved_snippet"] {
+        let (code, stdout, stderr) = output(
+            env.cmd(),
+            &[
+                "source",
+                "approve",
+                "acme",
+                stage,
+                "--operator",
+                "test",
+                "--json",
+                cfg[0],
+                cfg[1],
+            ],
+        );
+        assert_eq!(code, 0, "approve {stage}: {stderr}");
+        let report: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+        assert_eq!(report["library"], "acme");
+        assert_eq!(report["to"], stage);
+        assert_eq!(report["operator"], "test");
+    }
+    let (code, stdout, stderr) = output(env.cmd(), &["source", "list", "--json", cfg[0], cfg[1]]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let list: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    assert_eq!(list["results"][0]["status"], "approved_snippet");
+}
+
+/// An out-of-order approve is a typed refusal: exit 1, the USAGE envelope
+/// carries the illegal-transition detail, and the stored state stays
+/// unchanged (AC3).
+#[test]
+fn an_out_of_order_approve_exits_one_without_a_state_change() {
+    let (env, config) = source_env();
+    let cfg = ["--config", config.to_str().expect("config path")];
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "source",
+            "approve",
+            "acme",
+            "approved_fetch",
+            "--json",
+            cfg[0],
+            cfg[1],
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout} stderr: {stderr}");
+    assert!(stdout.is_empty(), "stdout must stay clean: {stdout:?}");
+    let error: Value = serde_json::from_str(stderr.trim()).expect("stderr is JSON");
+    assert_eq!(error["error"], "USAGE");
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("illegal license transition"),
+        "stderr: {stderr}"
+    );
+
+    // The state never moved: the list still shows the index stage.
+    let (code, stdout, stderr) = output(env.cmd(), &["source", "list", "--json", cfg[0], cfg[1]]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let list: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    assert_eq!(list["results"][0]["status"], "approved_index");
+}
+
+/// An unknown stage name is a usage error, and so is approving a library
+/// the store never indexed (AC8).
+#[test]
+fn unknown_stage_and_unknown_library_exit_one() {
+    let (env, config) = source_env();
+    let cfg = ["--config", config.to_str().expect("config path")];
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "source", "approve", "acme", "bogus", "--json", cfg[0], cfg[1],
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout} stderr: {stderr}");
+    let error: Value = serde_json::from_str(stderr.trim()).expect("stderr is JSON");
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("unknown license stage"),
+        "stderr: {stderr}"
+    );
+
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "source",
+            "approve",
+            "ghost",
+            "approved_index",
+            "--json",
+            cfg[0],
+            cfg[1],
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout} stderr: {stderr}");
+    let error: Value = serde_json::from_str(stderr.trim()).expect("stderr is JSON");
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no indexed source"),
+        "stderr: {stderr}"
+    );
+}
+
+/// `source deny` moves the source onto `denied`; re-opening it as
+/// `pending_review` is the one refusal exit and requires `--note`: exit 1
+/// without, exit 0 with (AC8).
+#[test]
+fn denied_to_pending_review_needs_a_note() {
+    let (env, config) = source_env();
+    let cfg = ["--config", config.to_str().expect("config path")];
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "source",
+            "deny",
+            "acme",
+            "--note",
+            "robots disallow",
+            "--operator",
+            "test",
+            "--json",
+            cfg[0],
+            cfg[1],
+        ],
+    );
+    assert_eq!(code, 0, "deny: {stderr}");
+    let report: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    assert_eq!(report["to"], "denied");
+    assert_eq!(report["note"], "robots disallow");
+
+    // Without the note the re-open is a typed usage refusal.
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "source",
+            "approve",
+            "acme",
+            "pending_review",
+            "--json",
+            cfg[0],
+            cfg[1],
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout} stderr: {stderr}");
+    let error: Value = serde_json::from_str(stderr.trim()).expect("stderr is JSON");
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("requires a non-empty note"),
+        "stderr: {stderr}"
+    );
+
+    // With the note the re-open lands.
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "source",
+            "approve",
+            "acme",
+            "pending_review",
+            "--note",
+            "re-review after robots fix",
+            "--json",
+            cfg[0],
+            cfg[1],
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let report: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    assert_eq!(report["from"], "denied");
+    assert_eq!(report["to"], "pending_review");
+}
+
+/// `source list --json` joins the declarative config (url, license SPDX
+/// id, attribution, expires) with the authoritative store state (status,
+/// version, `fetched_at`) (AC3).
+#[test]
+fn source_list_json_shows_state_spdx_version_and_fetched_at() {
+    let (env, config) = source_env();
+    let cfg = ["--config", config.to_str().expect("config path")];
+    let (code, stdout, stderr) = output(env.cmd(), &["source", "list", "--json", cfg[0], cfg[1]]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let list: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    let entry = &list["results"][0];
+    assert_eq!(entry["name"], "acme");
+    assert_eq!(entry["license"], "MIT");
+    assert_eq!(entry["attribution"], "© Acme Corp documentation");
+    assert_eq!(entry["url"], "https://docs.acme.test/llms.txt");
+    assert_eq!(entry["status"], "approved_index");
+    let versions = entry["versions"].as_array().expect("versions");
+    assert_eq!(versions.len(), 2, "stdout: {stdout}");
+    assert!(
+        versions
+            .iter()
+            .all(|version| version["fetched_at"].is_string() && version["status"].is_string()),
+        "stdout: {stdout}"
+    );
+}
+
+/// `source approve --expires` stamps the expiry date on the moved rows,
+/// and a date that does not parse is a usage error
+/// (docs/implementation/07 §License gate).
+#[test]
+fn source_approve_expires_stamps_the_expiry() {
+    let (env, config) = source_env();
+    let cfg = ["--config", config.to_str().expect("config path")];
+
+    // A malformed date refuses at the flag edge.
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "source",
+            "approve",
+            "acme",
+            "approved_embed",
+            "--expires",
+            "not-a-date",
+            "--json",
+            cfg[0],
+            cfg[1],
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout} stderr: {stderr}");
+    let error: Value = serde_json::from_str(stderr.trim()).expect("stderr is JSON");
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("YYYY-MM-DD"),
+        "stderr: {stderr}"
+    );
+
+    // A legal move with a well-formed date stamps every row.
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "source",
+            "approve",
+            "acme",
+            "approved_embed",
+            "--expires",
+            "2999-01-01",
+            "--json",
+            cfg[0],
+            cfg[1],
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let report: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    assert_eq!(report["to"], "approved_embed");
+    assert_eq!(report["expires"], "2999-01-01");
+
+    // The store carries the stamp on every version row.
+    let (code, stdout, stderr) = output(env.cmd(), &["versions", "acme", "--json", cfg[0], cfg[1]]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("2999-01-01"), "stdout: {stdout}");
+}

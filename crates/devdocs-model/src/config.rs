@@ -192,17 +192,26 @@ impl SourceConfig {
     /// When `expires` is set but does not parse as a `YYYY-MM-DD` date.
     pub fn parsed_expires(&self, key_path: &str) -> Result<Option<time::Date>, Error> {
         self.expires.as_deref().map_or(Ok(None), |raw| {
-            time::Date::parse(
-                raw,
-                time::macros::format_description!("[year]-[month]-[day]"),
-            )
-            .map(Some)
-            .map_err(|e| Error::ConfigInvalid {
-                key_path: format!("{key_path}.expires"),
-                reason: format!("expected a YYYY-MM-DD date: {e}"),
-            })
+            parse_expires_date(raw, &format!("{key_path}.expires")).map(Some)
         })
     }
+}
+
+/// Parses one `YYYY-MM-DD` expiry date — the shape both the config
+/// `expires` key and the `source approve --expires` flag take.
+///
+/// # Errors
+/// [`Error::ConfigInvalid`] when `raw` does not parse as a `YYYY-MM-DD`
+/// date.
+pub fn parse_expires_date(raw: &str, key_path: &str) -> Result<time::Date, Error> {
+    time::Date::parse(
+        raw,
+        time::macros::format_description!("[year]-[month]-[day]"),
+    )
+    .map_err(|e| Error::ConfigInvalid {
+        key_path: key_path.to_owned(),
+        reason: format!("expected a YYYY-MM-DD date: {e}"),
+    })
 }
 
 /// A config-file layer: the partial view that every layer parses into.

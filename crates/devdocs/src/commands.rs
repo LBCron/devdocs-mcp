@@ -14,7 +14,8 @@ use devdocs_ingest::{
 use devdocs_model::config::Config;
 use devdocs_model::envelope::{ResultEnvelope, SourceSummary};
 use devdocs_model::error::{Error, UpstreamCode};
-use devdocs_store::{MigrateOptions, Store};
+use devdocs_model::source::LicenseStatus;
+use devdocs_store::{MigrateOptions, Store, StoreError};
 use url::Url;
 
 /// Opens the store at the configured path and runs the startup migration.
@@ -431,6 +432,210 @@ pub fn run_list(config: &Config) -> Result<ResultEnvelope<SourceSummary>, Error>
         truncated: false,
         next_cursor: None,
         served_at: devdocs_model::envelope::now_rfc3339(),
+    })
+}
+
+/// Runs `devdocs source approve <library> <stage>`
+/// (docs/implementation/07 §License gate): the transition moves through
+/// [`Store::transition_license`], which appends the audit line and
+/// enforces the forward-only progression; `--expires` stamps
+/// `license_expires_at` after the move. The typed store refusals
+/// (illegal move, missing note, unknown library) surface as `Usage`
+/// exit 1; the store is authoritative for the mutable state
+/// (docs/implementation/07 §License gate).
+///
+/// # Errors
+/// [`Error::Usage`] for an unknown stage, an illegal transition, a
+/// missing note, or an unknown library; [`Error::Upstream`] when the
+/// store fails or `--expires` does not parse as a `YYYY-MM-DD` date.
+pub fn run_source_approve(
+    config: &Config,
+    name: &str,
+    stage: &str,
+    note: Option<&str>,
+    operator: Option<&str>,
+    expires: Option<&str>,
+) -> Result<serde_json::Value, Error> {
+    let to = parse_stage(stage)?;
+    let expires = parse_expires(expires)?;
+    let store = open_store(config, false)?;
+    let from = least_privileged_state(&store, name)?;
+    let rows = store
+        .transition_license(name, to, operator.unwrap_or("anonymous"), note)
+        .map_err(map_license_refusal)?;
+    if let Some(date) = &expires {
+        store
+            .set_license_expires_at(name, Some(date))
+            .map_err(|e| map_store_error(&e))?;
+    }
+    Ok(transition_report(
+        name,
+        from,
+        to,
+        rows,
+        operator,
+        note,
+        expires.as_deref(),
+    ))
+}
+
+/// Runs `devdocs source deny <library> --note --operator`
+/// (docs/implementation/07 §License gate): one typed move onto `denied`
+/// through [`Store::transition_license`].
+///
+/// # Errors
+/// [`Error::Usage`] for an illegal transition or an unknown library;
+/// [`Error::Upstream`] when the store fails.
+pub fn run_source_deny(
+    config: &Config,
+    name: &str,
+    note: Option<&str>,
+    operator: Option<&str>,
+) -> Result<serde_json::Value, Error> {
+    let store = open_store(config, false)?;
+    let from = least_privileged_state(&store, name)?;
+    let rows = store
+        .transition_license(
+            name,
+            LicenseStatus::Denied,
+            operator.unwrap_or("anonymous"),
+            note,
+        )
+        .map_err(map_license_refusal)?;
+    Ok(transition_report(
+        name,
+        from,
+        LicenseStatus::Denied,
+        rows,
+        operator,
+        note,
+        None,
+    ))
+}
+
+/// Runs `devdocs source list`: the declarative config entries joined with
+/// the authoritative store state — url, license SPDX id, attribution, and
+/// the config expiry from `[sources.<name>]`; status, versions, and
+/// fetched-at from the store (docs/implementation/07 §License gate). The
+/// sweep runs first, so the reported state reflects passed expiries
+/// (docs/implementation/07 §License gate).
+///
+/// # Errors
+/// [`Error::Upstream`] when the store cannot open or the read fails.
+pub fn run_source_list(config: &Config) -> Result<serde_json::Value, Error> {
+    let store = open_store(config, false)?;
+    store
+        .sweep_expired(&devdocs_model::now_rfc3339())
+        .map_err(|e| map_store_error(&e))?;
+    let rows = store.list_sources().map_err(|e| map_store_error(&e))?;
+    let results: Vec<serde_json::Value> = config
+        .sources
+        .iter()
+        .map(|(name, entry)| {
+            let versions: Vec<serde_json::Value> = rows
+                .iter()
+                .filter(|row| row.library.eq_ignore_ascii_case(name))
+                .map(|row| {
+                    serde_json::json!({
+                        "version": row.version,
+                        "status": row.license_status,
+                        "fetched_at": row.fetched_at,
+                        "active": row.active,
+                    })
+                })
+                .collect();
+            let status = versions
+                .iter()
+                .filter_map(|version| version["status"].as_str())
+                .filter_map(LicenseStatus::parse)
+                .min_by_key(|state| state.rank())
+                .map_or_else(|| String::from("pending_review"), |state| state.to_string());
+            serde_json::json!({
+                "name": name,
+                "url": entry.url,
+                "kind": entry.kind,
+                "license": entry.license,
+                "attribution": entry.attribution,
+                "expires": entry.expires,
+                "status": status,
+                "versions": versions,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "results": results,
+        "served_at": devdocs_model::now_rfc3339(),
+    }))
+}
+
+/// Parses the `<stage>` argument of `devdocs source approve` through the
+/// model's license-state machine vocabulary.
+fn parse_stage(stage: &str) -> Result<LicenseStatus, Error> {
+    LicenseStatus::parse(stage).ok_or_else(|| {
+        Error::Usage(format!(
+            "unknown license stage {stage:?}; expected one of \
+             pending_review, approved_fetch, approved_index, approved_embed, \
+             approved_cache, approved_snippet, denied, expired, revoked"
+        ))
+    })
+}
+
+/// Parses the `--expires` flag as a `YYYY-MM-DD` date, the same shape the
+/// config `expires` key takes.
+fn parse_expires(expires: Option<&str>) -> Result<Option<String>, Error> {
+    expires
+        .map(|raw| {
+            devdocs_model::config::parse_expires_date(raw, "--expires")
+                .map(|_| raw.to_owned())
+                .map_err(|e| Error::Usage(e.to_string()))
+        })
+        .transpose()
+}
+
+/// The library's least privileged stored state, for the report's `from`.
+fn least_privileged_state(store: &Store, name: &str) -> Result<LicenseStatus, Error> {
+    store
+        .license_states(name)
+        .map_err(|e| map_store_error(&e))?
+        .into_iter()
+        .min_by_key(|state| state.rank())
+        .ok_or_else(|| {
+            Error::Usage(format!(
+                "no indexed source for library {name:?}; run: devdocs source list"
+            ))
+        })
+}
+
+/// Maps the typed license-transition refusals onto `Usage` exit 1; every
+/// other store failure keeps its upstream mapping.
+fn map_license_refusal(error: StoreError) -> Error {
+    match error {
+        StoreError::InvalidTransition { .. }
+        | StoreError::MissingNote
+        | StoreError::UnknownLibrary { .. } => Error::Usage(error.to_string()),
+        other => map_store_error(&other),
+    }
+}
+
+/// The JSON report one transition prints on stdout.
+#[allow(clippy::too_many_arguments)]
+fn transition_report(
+    name: &str,
+    from: LicenseStatus,
+    to: LicenseStatus,
+    rows: usize,
+    operator: Option<&str>,
+    note: Option<&str>,
+    expires: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "library": name,
+        "from": from.to_string(),
+        "to": to.to_string(),
+        "rows": rows,
+        "operator": operator.unwrap_or("anonymous"),
+        "note": note,
+        "expires": expires,
     })
 }
 

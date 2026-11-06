@@ -191,16 +191,24 @@ fn add_fixture_version(env: &Env, dir: &Path, config: &Path, version: &str, resp
     assert_eq!(code, 0, "add {version} failed: {stderr}");
 }
 
-/// An indexed fixture corpus: acme at versions 1.0 and 2.0, approved up
-/// to the snippet stage. Returns the environment and the config path
-/// every CLI run needs.
-pub fn indexed_env() -> (Env, PathBuf) {
+/// An indexed fixture corpus: acme at versions 1.0 and 2.0, at the ingest
+/// bootstrap floor (`approved_index`) — no operator promotion. The
+/// license-transition tests walk the progression from there.
+pub fn indexed_env_at_index() -> (Env, PathBuf) {
     let env = Env::new();
     let dir = env.root.join("fixture");
     std::fs::create_dir_all(&dir).expect("fixture dir");
     let config = write_config(&env.root);
     add_fixture_version(&env, &dir, &config, "1.0", &acme_responses(INTRO_V1));
     add_fixture_version(&env, &dir, &config, "2.0", &acme_responses(INTRO_V2));
+    (env, config)
+}
+
+/// An indexed fixture corpus: acme at versions 1.0 and 2.0, approved up
+/// to the snippet stage. Returns the environment and the config path
+/// every CLI run needs.
+pub fn indexed_env() -> (Env, PathBuf) {
+    let (env, config) = indexed_env_at_index();
     // The ingest bootstrap lands at the publish floor (`approved_index`),
     // which gates verbatim text (docs/09 enforcement point 4); the
     // verbatim-serving tests need the snippet stage. The operator walks
