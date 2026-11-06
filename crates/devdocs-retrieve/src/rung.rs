@@ -27,19 +27,24 @@ pub enum Scope<'a> {
     Source(i64),
 }
 
+/// The close/open byte pair of one bracket group, when `close` closes one.
+fn group_delimiters(close: u8) -> Option<(u8, u8)> {
+    match close {
+        b')' => Some((b')', b'(')),
+        b']' => Some((b']', b'[')),
+        b'>' => Some((b'>', b'<')),
+        _ => None,
+    }
+}
+
 /// Strips one trailing balanced bracket group from `text`: the final `)`,
 /// `]`, or `>` together with its matching opener, when the scan between
 /// them stays balanced. `None` when the text does not end in a balanced
 /// group.
 #[must_use]
 fn strip_trailing_group(text: &str) -> Option<&str> {
+    let (close, open) = group_delimiters(*text.as_bytes().last()?)?;
     let bytes = text.as_bytes();
-    let (close, open) = match bytes.last()? {
-        b')' => (b')', b'('),
-        b']' => (b']', b'['),
-        b'>' => (b'>', b'<'),
-        _ => return None,
-    };
     let mut depth = 0usize;
     for (index, &byte) in bytes.iter().enumerate().rev() {
         if byte == close {
@@ -86,30 +91,40 @@ pub fn symbol_rung(
     if normalized.is_empty() {
         return Ok(Vec::new());
     }
-    let store_scope = match scope {
-        Scope::All => SymbolScope::All,
-        Scope::Library(name) => SymbolScope::Library(name.to_owned()),
-        Scope::Source(id) => SymbolScope::Source(id),
-    };
-    // The ladder, strongest shape first. A dotted form also tries its last
-    // dot-segment as a secondary exact attempt
-    // (docs/implementation/13 §M5 step 3) before the prefix modes fall
-    // through.
-    let mut attempts: Vec<(SymbolMatch, String)> = vec![(SymbolMatch::Exact, normalized.clone())];
-    if let Some((_, last)) = normalized.rsplit_once('.')
-        && !last.is_empty()
-    {
-        attempts.push((SymbolMatch::Exact, last.to_owned()));
-    }
-    attempts.push((SymbolMatch::CaseSensitivePrefix, normalized.clone()));
-    attempts.push((SymbolMatch::CaseInsensitive, normalized));
-    for (mode, candidate) in attempts {
+    let store_scope = store_scope(scope);
+    for (mode, candidate) in ladder_attempts(&normalized) {
         let hits = store.search_symbols(&candidate, mode, store_scope.clone(), limit)?;
         if !hits.is_empty() {
             return Ok(hits);
         }
     }
     Ok(Vec::new())
+}
+
+/// The store scope a rung scope lowers to.
+fn store_scope(scope: Scope<'_>) -> SymbolScope {
+    match scope {
+        Scope::All => SymbolScope::All,
+        Scope::Library(name) => SymbolScope::Library(name.to_owned()),
+        Scope::Source(id) => SymbolScope::Source(id),
+    }
+}
+
+/// The lookup ladder, strongest shape first. A dotted form also tries its
+/// last dot-segment as a secondary exact attempt
+/// (docs/implementation/13 §M5 step 3) before the prefix modes fall
+/// through.
+fn ladder_attempts(normalized: &str) -> Vec<(SymbolMatch, String)> {
+    let mut attempts: Vec<(SymbolMatch, String)> =
+        vec![(SymbolMatch::Exact, normalized.to_owned())];
+    if let Some((_, last)) = normalized.rsplit_once('.')
+        && !last.is_empty()
+    {
+        attempts.push((SymbolMatch::Exact, last.to_owned()));
+    }
+    attempts.push((SymbolMatch::CaseSensitivePrefix, normalized.to_owned()));
+    attempts.push((SymbolMatch::CaseInsensitive, normalized.to_owned()));
+    attempts
 }
 
 /// The FTS5 BM25 rung: builds the rung MATCH expression from the raw query

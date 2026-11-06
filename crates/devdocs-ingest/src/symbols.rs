@@ -75,7 +75,20 @@ fn visit(node: Node<'_>, src: &[u8], out: &mut Vec<ExtractedSymbol>, depth: usiz
     if depth >= MAX_DEPTH {
         return;
     }
-    let kind = match node.kind() {
+    if let Some(kind) = mapped_kind(node) {
+        push(node, kind, src, out);
+    }
+    let mut cursor = node.walk();
+    let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
+    for child in children {
+        visit(child, src, out, depth + 1);
+    }
+}
+
+/// The mapped vocabulary kind of one declaration node, when the node kind
+/// carries one.
+fn mapped_kind(node: Node<'_>) -> Option<&'static str> {
+    match node.kind() {
         // Rust `function_item`/`function_signature_item` and the
         // Go/JavaScript declarations carry the `function` kind, except a
         // Rust declaration inside an `impl_item` body, which is a method
@@ -103,34 +116,35 @@ fn visit(node: Node<'_>, src: &[u8], out: &mut Vec<ExtractedSymbol>, depth: usiz
         // function- or class-valued declarator keeps that kind.
         "variable_declarator" if javascript_top_level(node) => Some(javascript_variable_kind(node)),
         kind => simple_kind(kind),
-    };
-    if let Some(kind) = kind {
-        push(node, kind, src, out);
-    }
-    let mut cursor = node.walk();
-    let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
-    for child in children {
-        visit(child, src, out, depth + 1);
     }
 }
 
-/// The declaration kinds that map one node kind to one fixed vocabulary
-/// entry: the Rust `struct_item`/`enum_item`/`trait_item` shape, the Rust
+/// The node kinds that map to one fixed vocabulary entry regardless of
+/// context: the Rust `struct_item`/`enum_item`/`trait_item` shape, the Rust
 /// `const_item`/`static_item` and Go `const_spec` constants, the Rust
 /// `mod_item` module, the method declarations, the Go `var_spec` variable,
 /// and the class definitions.
+const SIMPLE_KINDS: &[(&str, &str)] = &[
+    ("struct_item", "struct"),
+    ("enum_item", "enum"),
+    ("trait_item", "trait"),
+    ("const_item", "constant"),
+    ("static_item", "constant"),
+    ("const_spec", "constant"),
+    ("mod_item", "module"),
+    ("method_declaration", "method"),
+    ("method_definition", "method"),
+    ("var_spec", "variable"),
+    ("class_definition", "class"),
+    ("class_declaration", "class"),
+];
+
+/// The fixed kind of a node kind, when one exists.
 fn simple_kind(kind: &str) -> Option<&'static str> {
-    match kind {
-        "struct_item" => Some("struct"),
-        "enum_item" => Some("enum"),
-        "trait_item" => Some("trait"),
-        "const_item" | "static_item" | "const_spec" => Some("constant"),
-        "mod_item" => Some("module"),
-        "method_declaration" | "method_definition" => Some("method"),
-        "var_spec" => Some("variable"),
-        "class_definition" | "class_declaration" => Some("class"),
-        _ => None,
-    }
+    SIMPLE_KINDS
+        .iter()
+        .find(|(node_kind, _)| *node_kind == kind)
+        .map(|(_, mapped)| *mapped)
 }
 
 /// Records one declaration: its `name` field child and its start line.
