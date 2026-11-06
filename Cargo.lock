@@ -1004,6 +1004,7 @@ dependencies = [
  "devdocs-store",
  "devdocs-testkit",
  "insta",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

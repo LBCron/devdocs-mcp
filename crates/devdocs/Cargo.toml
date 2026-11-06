@@ -39,6 +39,7 @@ url.workspace = true
 assert_cmd.workspace = true
 devdocs-testkit.workspace = true
 insta.workspace = true
+rusqlite.workspace = true
 tempfile.workspace = true
 
 [lints]

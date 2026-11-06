@@ -1178,3 +1178,173 @@ fn source_approve_expires_stamps_the_expiry() {
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("2999-01-01"), "stdout: {stdout}");
 }
+
+/// A gate refusal carrying a terminal status withdraws the previously
+/// published generation before the refusal returns: `add` after `source
+/// deny` exits 3 with `FETCH_BLOCKED` and the store rows go inactive
+/// (docs/implementation/09 §License gate enforcement points, point 3).
+#[test]
+fn add_on_a_denied_source_withdraws_the_published_generation() {
+    let (env, config) = source_env();
+    let cfg = ["--config", config.to_str().expect("config path")];
+    let (code, _stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "source",
+            "deny",
+            "acme",
+            "--note",
+            "robots disallow",
+            "--operator",
+            "test",
+            "--json",
+            cfg[0],
+            cfg[1],
+        ],
+    );
+    assert_eq!(code, 0, "deny: {stderr}");
+
+    // The re-sync attempt refuses at the gate and withdraws on the way out;
+    // no fixture is needed, because nothing is ever fetched.
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "add",
+            "https://docs.acme.test/llms.txt",
+            "--json",
+            cfg[0],
+            cfg[1],
+        ],
+    );
+    assert_eq!(code, 3, "stdout: {stdout} stderr: {stderr}");
+    assert!(stderr.contains("FETCH_BLOCKED"), "stderr: {stderr}");
+
+    let db = env.root.join("data").join("docs.db");
+    let conn = rusqlite::Connection::open(&db).expect("db opens");
+    let actives: Vec<i64> = conn
+        .prepare("SELECT active FROM sources WHERE library = 'acme'")
+        .expect("prepare")
+        .query_map([], |row| row.get(0))
+        .expect("query")
+        .map(|row| row.expect("row"))
+        .collect();
+    assert!(!actives.is_empty(), "the published rows exist");
+    assert!(
+        actives.iter().all(|active| *active == 0),
+        "every published row must withdraw: {actives:?}"
+    );
+}
+
+/// `devdocs list` runs the expiry sweep like every read path: a source
+/// with a passed expiry reports `expired` (docs/implementation/07 §Expiry
+/// sweep).
+#[test]
+fn list_sweeps_a_passed_expiry() {
+    let (env, _config) = source_env();
+    let db = env.root.join("data").join("docs.db");
+    devdocs_testkit::set_source_expiry(&db, "acme", "2026-01-01").expect("expiry set");
+
+    let (code, stdout, stderr) = output(env.cmd(), &["list", "--json"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let list: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    let results = list["results"].as_array().expect("results");
+    assert_eq!(results.len(), 2, "stdout: {stdout}");
+    assert!(
+        results.iter().all(|row| row["license_status"] == "expired"),
+        "the sweep must flip both versions: {stdout}"
+    );
+}
+
+/// A passed expiry blocks the operator moves: the sweep records the
+/// `auto:expiry` flip before the transition read, the approve onto a
+/// non-terminal stage refuses as an illegal move out of `expired`, and
+/// `source deny` reads the same swept absorbing state and refuses too —
+/// no forward move and no re-dating past the sweep
+/// (docs/implementation/07 §Expiry sweep).
+#[test]
+fn transitions_sweep_a_passed_expiry_before_the_move() {
+    let (env, config) = source_env();
+    let cfg = ["--config", config.to_str().expect("config path")];
+    let db = env.root.join("data").join("docs.db");
+    devdocs_testkit::set_source_expiry(&db, "acme", "2026-01-01").expect("expiry set");
+
+    // The sweep flips acme to `expired` first; expired cannot move forward.
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "source",
+            "approve",
+            "acme",
+            "approved_embed",
+            "--json",
+            cfg[0],
+            cfg[1],
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout} stderr: {stderr}");
+    let error: Value = serde_json::from_str(stderr.trim()).expect("stderr is JSON");
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("illegal license transition"),
+        "stderr: {stderr}"
+    );
+
+    // The audit trail carries the auto:expiry line; the refused move wrote
+    // nothing.
+    let audit = |db: &std::path::Path| -> Vec<String> {
+        let conn = rusqlite::Connection::open(db).expect("db opens");
+        let mut statement = conn
+            .prepare("SELECT value FROM meta WHERE key LIKE 'audit:%' ORDER BY key")
+            .expect("prepare");
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query");
+        rows.map(|row| row.expect("row")).collect()
+    };
+    let lines = audit(&db);
+    // One auto:expiry line per flipped row (acme has two versions); the
+    // refused move wrote nothing.
+    assert_eq!(lines.len(), 2, "lines: {lines:?}");
+    assert!(
+        lines.iter().all(|line| line.contains("auto:expiry")
+            && line.contains(", acme, approved_index, expired, ")),
+        "the sweep lines must land before the operator move: {lines:?}"
+    );
+
+    // `source deny` also reads the swept state: `expired` is absorbing, so
+    // the move refuses too — no re-dating past the sweep.
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "source",
+            "deny",
+            "acme",
+            "--note",
+            "takedown",
+            "--operator",
+            "test",
+            "--json",
+            cfg[0],
+            cfg[1],
+        ],
+    );
+    assert_eq!(code, 1, "stdout: {stdout} stderr: {stderr}");
+    let error: Value = serde_json::from_str(stderr.trim()).expect("stderr is JSON");
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("illegal license transition expired"),
+        "stderr: {stderr}"
+    );
+
+    // The refused deny added no audit line.
+    let lines = audit(&db);
+    assert_eq!(lines.len(), 2, "lines: {lines:?}");
+    assert!(
+        lines.iter().all(|line| line.contains("auto:expiry")),
+        "only the sweep lines remain: {lines:?}"
+    );
+}

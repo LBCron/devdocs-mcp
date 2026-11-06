@@ -204,7 +204,8 @@ pub fn run_versions(
 /// (docs/implementation/09 §License gate enforcement points, point 3).
 /// A refusal without a terminal status — no entry, no store row,
 /// `pending_review` — writes nothing. The withdrawal is not best-effort:
-/// when the store cannot record it, the command returns `UPSTREAM_ERROR`
+/// a failed store read refuses the command outright, and when the store
+/// cannot record the withdrawal the command returns `UPSTREAM_ERROR`
 /// instead of `FETCH_BLOCKED`, so a revoked source is never left serving
 /// while the command claims `FETCH_BLOCKED`.
 fn withdraw_on_terminal_refusal(
@@ -213,7 +214,7 @@ fn withdraw_on_terminal_refusal(
     index_url: &Url,
 ) -> Result<(), Error> {
     let Some(status) =
-        refused_status(store, config, index_url).filter(|status| status.is_terminal())
+        refused_status(store, config, index_url)?.filter(|status| status.is_terminal())
     else {
         return Ok(());
     };
@@ -422,10 +423,17 @@ fn add_report(outcome: &devdocs_ingest::IngestOutcome) -> Result<serde_json::Val
 
 /// Runs `devdocs list`.
 ///
+/// The expiry sweep runs first, like on every read path
+/// (docs/implementation/07 §Expiry sweep), so the reported states reflect
+/// passed expiries.
+///
 /// # Errors
 /// [`Error::Upstream`] when the store cannot open or the query fails.
 pub fn run_list(config: &Config) -> Result<ResultEnvelope<SourceSummary>, Error> {
     let store = open_store(config, false)?;
+    store
+        .sweep_expired(&devdocs_model::now_rfc3339())
+        .map_err(|e| map_store_error(&e))?;
     let results = store.list_sources().map_err(|e| map_store_error(&e))?;
     Ok(ResultEnvelope {
         results,
@@ -459,6 +467,13 @@ pub fn run_source_approve(
     let to = parse_stage(stage)?;
     let expires = parse_expires(expires)?;
     let store = open_store(config, false)?;
+    // The sweep runs before the transition read: a source whose expiry has
+    // passed flips to the absorbing `expired` first and cannot be moved
+    // forward or re-dated without the flip on the audit trail
+    // (docs/implementation/07 §Expiry sweep).
+    store
+        .sweep_expired(&devdocs_model::now_rfc3339())
+        .map_err(|e| map_store_error(&e))?;
     let from = least_privileged_state(&store, name)?;
     let rows = store
         .transition_license(name, to, operator.unwrap_or("anonymous"), note)
@@ -493,6 +508,11 @@ pub fn run_source_deny(
     operator: Option<&str>,
 ) -> Result<serde_json::Value, Error> {
     let store = open_store(config, false)?;
+    // The sweep runs before the transition read, same as `source approve`
+    // (docs/implementation/07 §Expiry sweep).
+    store
+        .sweep_expired(&devdocs_model::now_rfc3339())
+        .map_err(|e| map_store_error(&e))?;
     let from = least_privileged_state(&store, name)?;
     let rows = store
         .transition_license(
@@ -740,5 +760,98 @@ fn map_ingest_error(error: devdocs_ingest::IngestError) -> Error {
             code: UpstreamCode::UpstreamError,
             detail: format!("GIT_COMMIT_SHA_INVALID: rev-parse returned `{sha}`"),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use super::withdraw_on_terminal_refusal;
+    use devdocs_model::config::{Config, SourceConfig};
+    use devdocs_model::error::{Error, UpstreamCode};
+    use url::Url;
+
+    /// A config with one registered acme entry, the shape the gate tests
+    /// use.
+    fn config_with_acme() -> Config {
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            String::from("acme"),
+            SourceConfig {
+                kind: Some(String::from("llms_txt")),
+                url: Some(String::from("https://docs.acme.test/llms.txt")),
+                license: Some(String::from("MIT")),
+                attribution: None,
+                expires: None,
+                refresh_days: None,
+            },
+        );
+        Config {
+            fetch: devdocs_model::config::FetchConfig {
+                concurrency: 4,
+                timeout_ms: 15_000,
+                max_bytes: 20 * 1024 * 1024,
+                max_redirects: 3,
+                user_agent: String::from("devdocs/0.2.0"),
+            },
+            index: devdocs_model::config::IndexConfig {
+                path: std::path::PathBuf::from("/tmp/unused.db"),
+                embeddings: false,
+            },
+            search: devdocs_model::config::SearchConfig {
+                max_tokens_default: 2000,
+                limit_default: 8,
+                rrf_k: 60,
+            },
+            ingest: devdocs_model::config::IngestConfig {
+                git_extensions: devdocs_model::config::DEFAULT_GIT_EXTENSIONS
+                    .iter()
+                    .map(|ext| (*ext).to_owned())
+                    .collect(),
+            },
+            sources,
+        }
+    }
+
+    /// A failed withdrawal surfaces `UPSTREAM_ERROR`, not `FETCH_BLOCKED`:
+    /// a terminal source is never left serving while the command claims
+    /// the fetch was blocked (docs/implementation/09 §License gate
+    /// enforcement points, point 3). The failure is forced with a
+    /// RAISE(ABORT) trigger on `sources` — a test-only schema edit on a
+    /// second connection, no production seam.
+    #[test]
+    fn a_failed_withdrawal_surfaces_upstream_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("docs.db");
+        let store = Arc::new(
+            devdocs_testkit::seed_source_status(&db, "acme", "1.0", "denied", None).unwrap(),
+        );
+        let raw = rusqlite::Connection::open(&db).unwrap();
+        raw.execute(
+            "UPDATE sources SET origin_url = 'https://docs.acme.test/llms.txt'",
+            [],
+        )
+        .unwrap();
+        raw.execute(
+            "CREATE TRIGGER block_withdraw BEFORE UPDATE ON sources \
+             BEGIN SELECT RAISE(ABORT, 'test blocked'); END;",
+            [],
+        )
+        .unwrap();
+
+        let config = config_with_acme();
+        let url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
+        let error = withdraw_on_terminal_refusal(&store, &config, &url).unwrap_err();
+        match error {
+            Error::Upstream {
+                code: UpstreamCode::UpstreamError,
+                detail,
+            } => assert!(detail.contains("withdrawal failed"), "detail: {detail}"),
+            other => panic!("expected UPSTREAM_ERROR, got {other:?}"),
+        }
     }
 }

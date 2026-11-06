@@ -112,12 +112,24 @@ pub fn registry_name(config: &Config, url: &Url) -> Result<Option<String>, Error
 /// it to withdraw a source whose license turned terminal before the refusal
 /// returns (docs/implementation/09 §License gate enforcement points,
 /// point 3). The gate sweeps before it refuses, so the state read here is
-/// post-sweep.
-#[must_use]
-pub fn refused_status(store: &Store, config: &Config, url: &Url) -> Option<LicenseStatus> {
-    let (name, _) = find_entry(config, url).ok().flatten()?;
-    let states = store.license_states(&name).ok()?;
-    least_privileged(&states)
+/// post-sweep. The withdrawal is mandatory for a terminal state, so a
+/// failed store read propagates instead of silently skipping it.
+///
+/// # Errors
+/// [`Error::Upstream`] with `UPSTREAM_ERROR` when the store read fails, or
+/// [`Error::ConfigInvalid`] when an entry carries an unparsable URL.
+pub fn refused_status(
+    store: &Store,
+    config: &Config,
+    url: &Url,
+) -> Result<Option<LicenseStatus>, Error> {
+    let Some((name, _)) = find_entry(config, url)? else {
+        return Ok(None);
+    };
+    let states = store
+        .license_states(&name)
+        .map_err(|error| store_error(&error))?;
+    Ok(least_privileged(&states))
 }
 
 /// The least privileged of the library's stored states: the minimum rank,
@@ -253,7 +265,7 @@ mod tests {
             gate_fetch(&store, &config, &url("https://docs.acme.test/llms.txt")).unwrap_err();
         assert_fetch_blocked(error, "pending_review");
         assert_eq!(
-            refused_status(&store, &config, &url("https://docs.acme.test/llms.txt")),
+            refused_status(&store, &config, &url("https://docs.acme.test/llms.txt")).unwrap(),
             None
         );
     }
@@ -270,7 +282,7 @@ mod tests {
         assert_eq!(grant.license.as_deref(), Some("MIT"));
         // Nothing to withdraw behind a refusal that never happened.
         assert_eq!(
-            refused_status(&store, &config, &url("https://docs.acme.test/llms.txt")),
+            refused_status(&store, &config, &url("https://docs.acme.test/llms.txt")).unwrap(),
             None
         );
     }
@@ -284,7 +296,7 @@ mod tests {
         let error = gate_fetch(&store, &config, &target).unwrap_err();
         assert_fetch_blocked(error, "denied");
         assert_eq!(
-            refused_status(&store, &config, &target),
+            refused_status(&store, &config, &target).unwrap(),
             Some(LicenseStatus::Denied)
         );
     }
@@ -299,7 +311,7 @@ mod tests {
         let error = gate_fetch(&store, &config, &target).unwrap_err();
         assert_fetch_blocked(error, "revoked");
         assert_eq!(
-            refused_status(&store, &config, &target),
+            refused_status(&store, &config, &target).unwrap(),
             Some(LicenseStatus::Revoked)
         );
     }
@@ -358,7 +370,7 @@ mod tests {
             vec![LicenseStatus::Expired]
         );
         assert_eq!(
-            refused_status(&store, &config, &target),
+            refused_status(&store, &config, &target).unwrap(),
             Some(LicenseStatus::Expired)
         );
     }
