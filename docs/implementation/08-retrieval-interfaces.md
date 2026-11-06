@@ -3,7 +3,7 @@ type: guide
 title: Retrieval and Interfaces (L3 + L4)
 description: The hybrid retrieval pipeline, version resolution, budget enforcement, fallback ladder, the result shape, the full CLI contract, and the MCP adapter.
 tags: [devdocs, retrieval, cli, mcp, rrf, max-tokens]
-timestamp: 2026-11-05T12:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -131,7 +131,7 @@ Commands:
 | `devdocs verify <ref> [--json]` | Re-derive and compare the content hash |
 | `devdocs versions <library> [--json]` | List the active versions a library serves |
 | `devdocs source approve|deny|list` | License registry operations |
-| `devdocs skill install [--path P]` | Write the SKILL.md companion file |
+| `devdocs skill install [--path P] [--force]` | Write the SKILL.md companion file |
 | `devdocs mcp [--transport stdio]` | Start the MCP server on stdio |
 | `devdocs db migrate|vacuum|stats|quarantine list` | Database operations |
 | `devdocs config init|show|validate|path` | Configuration operations |
@@ -166,6 +166,7 @@ Use `devdocs` for library documentation. Workflow:
 Never cite a URL not present in a result. Trust `version_status`; do not mix versions.
 ```
 
+Install writes `SKILL.md` in the current working directory by default. `--path P` writes to the file path `P` and creates the parent directories; an existing directory at `P` is refused. Without `--force`, install refuses to overwrite an existing file with the USAGE error and exit 1, the same policy `config init` uses; `--force` overwrites.
 ## MCP adapter
 
 Implemented with rmcp 3.8.0 (verified 2026-10-28. Official Rust SDK, used by Block goose and Apollo). Features: `server`, `transport-io` (stdio), `macros`, `schemars`. Three tools, not more (research: architecture.md §L4):
