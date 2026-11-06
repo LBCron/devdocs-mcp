@@ -14,6 +14,21 @@ use devdocs_model::error::{Error, UpstreamCode};
 use devdocs_store::{MigrateOptions, Store};
 use url::Url;
 
+/// The SKILL.md content `devdocs skill install` writes, verbatim from
+/// docs/implementation/08 §The skill companion.
+pub const SKILL_MD: &str = concat!(
+    "---\n",
+    "name: devdocs\n",
+    "description: Search pinned, version-exact official docs for project dependencies.\n",
+    "---\n",
+    "Use `devdocs` for library documentation. Workflow:\n",
+    "1. `devdocs search \"<one concept>\" --json` — search; add --library/--version if known.\n",
+    "2. `devdocs open <ref> --json` — read one section. Refs come only from search results.\n",
+    "3. One concept per query. Stop after 3 searches; use the best result.\n",
+    "4. Exit 2 = no result; run `devdocs sync <library>` if the library is missing.\n",
+    "Never cite a URL not present in a result. Trust `version_status`; do not mix versions.\n",
+);
+
 /// Opens the store at the configured path and runs the startup migration.
 /// The parent directory is created first: a fresh data root must not fail
 /// the first `add` or `list`.

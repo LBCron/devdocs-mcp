@@ -144,9 +144,9 @@ pub enum Command {
     },
     /// Write the SKILL.md companion file.
     Skill {
-        /// The skill operation.
+        /// The skill operation; omit it to install.
         #[command(subcommand)]
-        op: SkillOp,
+        op: Option<SkillOp>,
     },
     /// Start the MCP server on stdio.
     Mcp {
@@ -203,6 +203,9 @@ pub enum SkillOp {
         /// Where to write the file.
         #[arg(long, value_name = "PATH")]
         path: Option<PathBuf>,
+        /// Overwrite an existing file.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -336,10 +339,10 @@ pub fn run(cli: &Cli) -> Result<(), Error> {
         Command::Open { doc_ref, cursor } => run_open_command(cli, doc_ref, *cursor),
         Command::Verify { doc_ref } => run_verify_command(cli, doc_ref),
         Command::Versions { library } => run_versions_command(cli, library),
+        Command::Skill { op } => run_skill_command(op.as_ref()),
         Command::Sync { .. }
         | Command::Symbol { .. }
         | Command::Source { .. }
-        | Command::Skill { .. }
         | Command::Mcp { .. }
         | Command::Db { .. }
         | Command::Eval { .. } => print_placeholder(),
@@ -469,6 +472,60 @@ fn summarize_add(result: &serde_json::Value) -> String {
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
     format!("indexed {library} {version}: {pages} pages, {chunks} chunks")
+}
+
+/// Runs the `skill` subcommands; a bare `devdocs skill` installs.
+fn run_skill_command(op: Option<&SkillOp>) -> Result<(), Error> {
+    match op {
+        Some(SkillOp::Install { path, force }) => skill_install(path.as_deref(), *force),
+        None => skill_install(None, false),
+    }
+}
+
+/// Write the SKILL.md companion file; refuse to overwrite without force.
+/// The create is exclusive when force is off, the same policy `config init`
+/// carries, and every filesystem failure maps to USAGE with the io error
+/// detail (docs/implementation/08 §The skill companion).
+fn skill_install(path: Option<&std::path::Path>, force: bool) -> Result<(), Error> {
+    let path = path.unwrap_or_else(|| std::path::Path::new("SKILL.md"));
+    if path.is_dir() {
+        return Err(Error::Usage(format!(
+            "skill path {} is a directory; --path takes a file path",
+            path.display()
+        )));
+    }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| Error::Usage(format!("cannot create {}: {e}", parent.display())))?;
+    }
+    let open = if force {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+    } else {
+        // Exclusive create: no check-then-write race window.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+    };
+    let mut file = open.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            Error::Usage(format!(
+                "SKILL.md already exists at {}; pass --force to overwrite",
+                path.display()
+            ))
+        } else {
+            Error::Usage(format!("cannot write {}: {e}", path.display()))
+        }
+    })?;
+    file.write_all(crate::commands::SKILL_MD.as_bytes())
+        .map_err(|e| Error::Usage(format!("cannot write {}: {e}", path.display())))?;
+    write_stdout_line(&serde_json::json!({"wrote": path.display().to_string()}).to_string())
 }
 
 /// Print the empty result envelope: the deliberate M1 placeholder that the

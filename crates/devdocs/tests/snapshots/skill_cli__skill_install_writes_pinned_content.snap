@@ -1,0 +1,14 @@
+---
+source: crates/devdocs/tests/skill_cli.rs
+expression: content
+---
+---
+name: devdocs
+description: Search pinned, version-exact official docs for project dependencies.
+---
+Use `devdocs` for library documentation. Workflow:
+1. `devdocs search "<one concept>" --json` — search; add --library/--version if known.
+2. `devdocs open <ref> --json` — read one section. Refs come only from search results.
+3. One concept per query. Stop after 3 searches; use the best result.
+4. Exit 2 = no result; run `devdocs sync <library>` if the library is missing.
+Never cite a URL not present in a result. Trust `version_status`; do not mix versions.
