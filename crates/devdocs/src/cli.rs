@@ -626,15 +626,19 @@ fn run_config(cli: &Cli, op: &ConfigOp) -> Result<(), Error> {
 /// USAGE with exit 1 is the least-wrong documented code, and the detail
 /// names --force).
 fn config_init(path: &std::path::Path, force: bool) -> Result<(), Error> {
+    // Every failure maps with the full config file path, even when the io
+    // failure concerned the parent directory: the file-exists refusal
+    // applies to the config file itself, and CONFIG_INVALID carries the
+    // config path, not the parent's.
     write_exclusive(path, force, &user_config_template(), |p, e| {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
+        if p == path && e.kind() == std::io::ErrorKind::AlreadyExists {
             Error::Usage(format!(
                 "user config already exists at {}; pass --force to overwrite",
-                p.display()
+                path.display()
             ))
         } else {
             Error::ConfigInvalid {
-                key_path: p.display().to_string(),
+                key_path: path.display().to_string(),
                 reason: e.to_string(),
             }
         }
