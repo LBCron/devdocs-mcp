@@ -3,7 +3,7 @@ type: guide
 title: Ingest Pipeline (L1 + L2)
 description: The source adapters, the fetch guard, the license gate, the normalization and segmentation pipeline, dedup, the injection filter, and the refresh policy for devdocs.
 tags: [devdocs, ingest, llms-txt, git, openapi, html, segmentation]
-timestamp: 2026-11-07T00:00:00Z
+timestamp: 2026-11-07T12:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -215,7 +215,7 @@ Quarantined chunks are visible with `devdocs db quarantine list` and can be rele
 An ingest run writes nothing visible until it succeeds:
 
 1. Compute all chunks in memory (or spill to `tmp/` for very large sources). A run that segments to zero chunks fails closed before this step: it never replaces the active generation with an empty one.
-2. In one SQLite transaction: deactivate the old chunk set for the source, insert the new chunks, symbols, and FTS rows (triggers fire), update the source row (`fetched_at`, `commit_sha`, `active = 1`).
+2. In one SQLite transaction: deactivate the old chunk set for the source, insert the new chunks, symbols, and FTS rows (triggers fire), update the source row (`fetched_at`, `commit_sha`, `active = 1`). The transaction re-checks the stored license state first: a terminal stored state (`denied`, `expired`, `revoked`) deactivates the source rows and the publish refuses, so a revocation that lands while a re-sync is in flight wins over the stale record (docs/implementation/09 §License gate enforcement points).
 3. On any error: rollback. The old generation stays active and queryable.
 4. Vacuum is manual: `devdocs db vacuum` after large replacements.
 
