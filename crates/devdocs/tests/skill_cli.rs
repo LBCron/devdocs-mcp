@@ -90,6 +90,25 @@ fn skill_install_path_directory_refused() {
     assert!(stderr.contains("is a directory"), "stderr: {stderr}");
 }
 
+/// A `--path` whose parent exists as a FILE names the parent directory and
+/// never offers `--force` (force cannot fix a parent-create failure).
+#[test]
+fn skill_install_parent_file_refused_without_force_hint() {
+    let env = Env::new();
+    std::fs::write(env.root.join("blocker"), "a file").expect("blocker written");
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &["skill", "install", "--path", "blocker/SKILL.md"],
+    );
+    assert_eq!(code, 1);
+    assert!(stdout.is_empty(), "stdout must stay clean: {stdout:?}");
+    assert!(
+        stderr.contains("cannot create parent directory"),
+        "stderr: {stderr}"
+    );
+    assert!(!stderr.contains("--force"), "stderr: {stderr}");
+}
+
 /// The companion workflow the SKILL.md documents drives the live
 /// surfaces: a hit search feeds an open, and a miss exits 2
 /// (docs/implementation/08 §The skill companion, step 4).

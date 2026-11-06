@@ -496,35 +496,49 @@ fn skill_install(path: Option<&std::path::Path>, force: bool) -> Result<(), Erro
             path.display()
         )));
     }
-    write_exclusive(path, force, crate::commands::SKILL_MD, |p, e| {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-            Error::Usage(format!(
-                "SKILL.md already exists at {}; pass --force to overwrite",
+    write_exclusive(
+        path,
+        force,
+        crate::commands::SKILL_MD,
+        |target, e| match target {
+            IoTarget::Parent(p) => Error::Usage(format!(
+                "cannot create parent directory {}: {e}",
                 p.display()
-            ))
-        } else {
-            Error::Usage(format!("cannot write {}: {e}", p.display()))
-        }
-    })
+            )),
+            IoTarget::File if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Error::Usage(format!(
+                    "SKILL.md already exists at {}; pass --force to overwrite",
+                    path.display()
+                ))
+            }
+            IoTarget::File => Error::Usage(format!("cannot write {}: {e}", path.display())),
+        },
+    )
+}
+
+/// Which path of a [`write_exclusive`] target an io failure concerned: the
+/// parent directory that had to be created, or the target file itself.
+enum IoTarget<'a> {
+    Parent(&'a std::path::Path),
+    File,
 }
 
 /// Create the parent directories of `path`, then write `content` to it:
 /// an exclusive create when `force` is off (no check-then-write race
 /// window), a truncate when on. The caller maps each io failure through
-/// `on_io`, which receives the path the failure concerned (the parent for
-/// a parent-create failure, `path` otherwise) and reads the
-/// [`std::io::ErrorKind::AlreadyExists`] kind off the error. On success
-/// prints `{"wrote": path}` on stdout.
+/// `on_io`, which receives the [`IoTarget`] the failure concerned and
+/// reads the [`std::io::ErrorKind::AlreadyExists`] kind off the error. On
+/// success prints `{"wrote": path}` on stdout.
 fn write_exclusive(
     path: &std::path::Path,
     force: bool,
     content: &str,
-    on_io: impl Fn(&std::path::Path, std::io::Error) -> Error,
+    on_io: impl Fn(IoTarget<'_>, std::io::Error) -> Error,
 ) -> Result<(), Error> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent).map_err(|e| on_io(parent, e))?;
+        std::fs::create_dir_all(parent).map_err(|e| on_io(IoTarget::Parent(parent), e))?;
     }
     let open = if force {
         std::fs::OpenOptions::new()
@@ -539,9 +553,9 @@ fn write_exclusive(
             .create_new(true)
             .open(path)
     };
-    let mut file = open.map_err(|e| on_io(path, e))?;
+    let mut file = open.map_err(|e| on_io(IoTarget::File, e))?;
     file.write_all(content.as_bytes())
-        .map_err(|e| on_io(path, e))?;
+        .map_err(|e| on_io(IoTarget::File, e))?;
     write_stdout_line(&serde_json::json!({"wrote": path.display().to_string()}).to_string())
 }
 
@@ -630,19 +644,23 @@ fn config_init(path: &std::path::Path, force: bool) -> Result<(), Error> {
     // failure concerned the parent directory: the file-exists refusal
     // applies to the config file itself, and CONFIG_INVALID carries the
     // config path, not the parent's.
-    write_exclusive(path, force, &user_config_template(), |p, e| {
-        if p == path && e.kind() == std::io::ErrorKind::AlreadyExists {
-            Error::Usage(format!(
-                "user config already exists at {}; pass --force to overwrite",
-                path.display()
-            ))
-        } else {
-            Error::ConfigInvalid {
+    write_exclusive(
+        path,
+        force,
+        &user_config_template(),
+        |target, e| match target {
+            IoTarget::File if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Error::Usage(format!(
+                    "user config already exists at {}; pass --force to overwrite",
+                    path.display()
+                ))
+            }
+            _ => Error::ConfigInvalid {
                 key_path: path.display().to_string(),
                 reason: e.to_string(),
-            }
-        }
-    })
+            },
+        },
+    )
 }
 
 /// Validate one file, or the resolved layer chain when no path is given.
