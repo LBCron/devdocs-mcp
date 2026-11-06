@@ -274,6 +274,43 @@ fn like_escape(prefix: &str) -> String {
         .replace('_', "\\_")
 }
 
+/// The WHERE predicate, the ORDER BY head, and the escaped match pattern
+/// of one symbol-match mode. `?1` binds the raw identifier (equality and
+/// match quality); the pattern sits at `?3` in the prefix modes and Exact
+/// carries none.
+fn match_shape(mode: SymbolMatch, symbol: &str) -> (String, String, Option<String>) {
+    match mode {
+        SymbolMatch::Exact => (String::from("sym.symbol = ?1"), String::new(), None),
+        SymbolMatch::CaseSensitivePrefix => (
+            String::from("sym.symbol GLOB (?3 || '*')"),
+            String::from("(sym.symbol = ?1) DESC, "),
+            Some(glob_escape(symbol)),
+        ),
+        SymbolMatch::CaseInsensitive => (
+            String::from(
+                "sym.symbol = ?1 COLLATE NOCASE OR sym.symbol LIKE (?3 || '%') ESCAPE '\\'",
+            ),
+            String::from("(sym.symbol = ?1 COLLATE NOCASE) DESC, "),
+            Some(like_escape(symbol)),
+        ),
+    }
+}
+
+/// The scope WHERE clause and its bind value at `?idx`.
+fn scope_filter(scope: SymbolScope, idx: usize) -> (String, Option<rusqlite::types::Value>) {
+    match scope {
+        SymbolScope::All => (String::new(), None),
+        SymbolScope::Library(library) => (
+            format!(" AND s.library = ?{idx} COLLATE NOCASE"),
+            Some(rusqlite::types::Value::from(library)),
+        ),
+        SymbolScope::Source(source_id) => (
+            format!(" AND s.source_id = ?{idx}"),
+            Some(rusqlite::types::Value::from(source_id)),
+        ),
+    }
+}
+
 impl Store {
     /// The symbol-lookup ladder over active sources: matches `symbol` per
     /// `mode`, narrowed to `scope`, best match quality first with ties in
@@ -290,48 +327,18 @@ impl Store {
         // `?1` is always the raw identifier (equality and match quality),
         // `?2` the limit; the escaped match pattern sits at `?3` in the
         // prefix modes, and the scope value takes the next index.
-        let (predicate, order, uses_pattern) = match mode {
-            SymbolMatch::Exact => (String::from("sym.symbol = ?1"), String::new(), false),
-            SymbolMatch::CaseSensitivePrefix => (
-                String::from("sym.symbol GLOB (?3 || '*')"),
-                String::from("(sym.symbol = ?1) DESC, "),
-                true,
-            ),
-            SymbolMatch::CaseInsensitive => (
-                String::from(
-                    "sym.symbol = ?1 COLLATE NOCASE \
-                     OR sym.symbol LIKE (?3 || '%') ESCAPE '\\'",
-                ),
-                String::from("(sym.symbol = ?1 COLLATE NOCASE) DESC, "),
-                true,
-            ),
-        };
+        let (predicate, order, pattern) = match_shape(mode, symbol);
+        let scope_idx = if pattern.is_some() { 4 } else { 3 };
+        let (scope_clause, scope_value) = scope_filter(scope, scope_idx);
         let mut bind = vec![
             rusqlite::types::Value::from(symbol.to_owned()),
             rusqlite::types::Value::from(i64::from(limit)),
         ];
-        if uses_pattern {
-            let pattern = match mode {
-                SymbolMatch::CaseSensitivePrefix => glob_escape(symbol),
-                SymbolMatch::CaseInsensitive => like_escape(symbol),
-                SymbolMatch::Exact => unreachable!("uses_pattern is false for Exact"),
-            };
+        if let Some(pattern) = pattern {
             bind.push(rusqlite::types::Value::from(pattern));
         }
-        let scope_idx = if uses_pattern { 4 } else { 3 };
         // Deterministic in the mode and scope only, so `prepare_cached`
         // keeps one entry per mode and scope variant.
-        let (scope_clause, scope_value) = match scope {
-            SymbolScope::All => (String::new(), None),
-            SymbolScope::Library(library) => (
-                format!(" AND s.library = ?{scope_idx} COLLATE NOCASE"),
-                Some(rusqlite::types::Value::from(library)),
-            ),
-            SymbolScope::Source(source_id) => (
-                format!(" AND s.source_id = ?{scope_idx}"),
-                Some(rusqlite::types::Value::from(source_id)),
-            ),
-        };
         let sql = format!(
             "SELECT {BASE_COLUMNS}, sym.kind \
              FROM {SYMBOL_FROM} \
