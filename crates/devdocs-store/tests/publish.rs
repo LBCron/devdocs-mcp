@@ -297,6 +297,131 @@ fn a_terminal_license_state_withdraws_the_source() {
     );
 }
 
+/// Deny while a re-sync is in flight: a publish carrying the stale
+/// pre-deny approved record must not overwrite the terminal stored state
+/// or reactivate the rows, and the refusal writes no audit line
+/// (docs/implementation/09 §License gate enforcement points).
+#[test]
+fn publish_refuses_when_the_stored_state_turned_terminal() {
+    let rig = rig();
+    rig.store
+        .publish_generation(
+            &source(LicenseStatus::ApprovedIndex),
+            &[chunk(0, None, "the generation the operator later denies.")],
+        )
+        .unwrap();
+
+    // The operator deny lands while the stale re-sync is in flight.
+    rig.store
+        .transition_license(
+            "next.js",
+            LicenseStatus::Denied,
+            "op",
+            Some("robots disallow"),
+        )
+        .unwrap();
+    let audit_before: i64 = rig
+        .conn
+        .query_row(
+            "SELECT count(*) FROM meta WHERE key LIKE 'audit:%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    // The stale re-sync still carries the approved record.
+    let error = rig
+        .store
+        .publish_generation(
+            &source(LicenseStatus::ApprovedIndex),
+            &[chunk(0, None, "a stale republication that never lands.")],
+        )
+        .unwrap_err();
+    match error {
+        devdocs_store::StoreError::LicenseNotApproved { status: refused } => {
+            assert_eq!(refused, LicenseStatus::Denied);
+        }
+        other => panic!("expected LicenseNotApproved, got {other:?}"),
+    }
+
+    let (status, active): (String, i64) = rig
+        .conn
+        .query_row(
+            "SELECT license_status, active FROM sources WHERE library = 'next.js'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "denied", "the terminal state must stay");
+    assert_eq!(active, 0, "the rows must stay inactive");
+
+    let chunks: i64 = rig
+        .conn
+        .query_row("SELECT count(*) FROM chunks", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(chunks, 1, "the stale chunk set must not land");
+
+    let audit_after: i64 = rig
+        .conn
+        .query_row(
+            "SELECT count(*) FROM meta WHERE key LIKE 'audit:%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        audit_after, audit_before,
+        "the clobbered move must write no audit line"
+    );
+}
+
+/// The inverse order: with the stored state non-terminal, the publish
+/// keeps its existing behavior — the record's state wins — and a deny
+/// that lands afterward still transitions on top of it.
+#[test]
+fn publish_wins_while_the_stored_state_is_non_terminal() {
+    let rig = rig();
+    rig.store
+        .publish_generation(
+            &source(LicenseStatus::ApprovedIndex),
+            &[chunk(0, None, "the first generation.")],
+        )
+        .unwrap();
+
+    // A stale record at the snippet stage republishes over the
+    // non-terminal index-stage stored state, as before.
+    rig.store
+        .publish_generation(
+            &source(LicenseStatus::ApprovedSnippet),
+            &[chunk(0, None, "the republished generation.")],
+        )
+        .unwrap();
+    let (status, active): (String, i64) = rig
+        .conn
+        .query_row(
+            "SELECT license_status, active FROM sources WHERE library = 'next.js'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "approved_snippet");
+    assert_eq!(active, 1);
+
+    // A deny landing after the publish still transitions the library.
+    rig.store
+        .transition_license("next.js", LicenseStatus::Denied, "op", Some("robots"))
+        .unwrap();
+    let status: String = rig
+        .conn
+        .query_row(
+            "SELECT license_status FROM sources WHERE library = 'next.js'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "denied");
+}
+
 /// A source whose stored status turns terminal while it stays active —
 /// exactly the state a revoked registry entry leaves behind when the gate
 /// refuses before any publish runs — drops out of retrieval at query time

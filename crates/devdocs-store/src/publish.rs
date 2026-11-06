@@ -3,6 +3,7 @@
 //! Contract: docs/implementation/07 §Atomic publish. On any error the
 //! transaction rolls back and the previous generation stays queryable.
 
+use devdocs_model::LicenseStatus;
 use rusqlite::TransactionBehavior;
 use rusqlite::params;
 use time::format_description::well_known::Rfc3339;
@@ -54,6 +55,13 @@ impl Store {
     /// `active` flip land before the gate error returns, so the source leaves
     /// search results at this enforcement point and not only at retrieve-time
     /// filtering (docs/implementation/09 §License gate enforcement points).
+    ///
+    /// Inside the publish transaction the STORED license state of the library
+    /// is re-read, so a state that turned terminal while the caller's record
+    /// was in flight (an operator deny racing a re-sync) cannot be
+    /// overwritten or reactivated: the rows deactivate inside the committed
+    /// transaction and the same typed refusal returns. A stored state below
+    /// the record's non-terminal state keeps the record's state, as before.
     pub fn publish_generation(
         &self,
         src: &devdocs_model::SourceRecord,
@@ -75,6 +83,25 @@ impl Store {
 
         let mut conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // TOCTOU recheck: the caller-supplied record is stale when the
+        // library's authoritative stored state turned terminal after the
+        // fetch gate read it. The withdrawal lands inside this committed
+        // transaction, so the refusal cannot roll it back.
+        if let Some(stored) = stored_library_states(&tx, &src.library)?
+            .into_iter()
+            .min_by_key(|state| state.rank())
+            .filter(|state| state.is_terminal())
+        {
+            tx.execute(
+                "UPDATE sources SET active = 0 WHERE library = ?1 COLLATE NOCASE",
+                params![src.library],
+            )
+            .map_err(StoreError::Sql)?;
+            tx.commit().map_err(StoreError::Sql)?;
+            return Err(StoreError::LicenseNotApproved { status: stored });
+        }
+
         let result = publish_inside(&tx, src, chunks);
         match result {
             Ok(()) => tx.commit().map_err(StoreError::Sql),
@@ -126,6 +153,33 @@ impl Store {
         .map_err(StoreError::Sql)?;
         Ok(())
     }
+}
+
+/// The distinct license states the library's rows carry inside `tx`,
+/// case-insensitive on the library (docs/implementation/07 §License gate).
+fn stored_library_states(
+    tx: &rusqlite::Transaction<'_>,
+    library: &str,
+) -> Result<Vec<LicenseStatus>, StoreError> {
+    let mut statement = tx
+        .prepare("SELECT DISTINCT license_status FROM sources WHERE library = ?1 COLLATE NOCASE")?;
+    let rows = statement
+        .query_map(params![library], |row| row.get::<_, String>(0))
+        .map_err(StoreError::Sql)?;
+    let mut states = Vec::new();
+    for row in rows {
+        let raw = row.map_err(StoreError::Sql)?;
+        let Some(state) = LicenseStatus::parse(&raw) else {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                format!("unknown license status {raw:?}").into(),
+            )
+            .into());
+        };
+        states.push(state);
+    }
+    Ok(states)
 }
 
 /// Runs the whole publish sequence inside `tx`.
