@@ -445,9 +445,9 @@ pub fn run_list(config: &Config) -> Result<ResultEnvelope<SourceSummary>, Error>
 
 /// Runs `devdocs source approve <library> <stage>`
 /// (docs/implementation/07 §License gate): the transition moves through
-/// [`Store::transition_license`], which appends the audit line and
-/// enforces the forward-only progression; `--expires` stamps
-/// `license_expires_at` after the move. The typed store refusals
+/// [`Store::transition_license`], which appends the audit line, enforces
+/// the forward-only progression, and stamps `--expires` inside the same
+/// transaction as the move. The typed store refusals
 /// (illegal move, missing note, unknown library) surface as `Usage`
 /// exit 1; the store is authoritative for the mutable state
 /// (docs/implementation/07 §License gate).
@@ -476,13 +476,14 @@ pub fn run_source_approve(
         .map_err(|e| map_store_error(&e))?;
     let from = least_privileged_state(&store, name)?;
     let rows = store
-        .transition_license(name, to, operator.unwrap_or("anonymous"), note)
+        .transition_license(
+            name,
+            to,
+            operator.unwrap_or("anonymous"),
+            note,
+            expires.as_deref(),
+        )
         .map_err(map_license_refusal)?;
-    if let Some(date) = &expires {
-        store
-            .set_license_expires_at(name, Some(date))
-            .map_err(|e| map_store_error(&e))?;
-    }
     Ok(transition_report(
         name,
         from,
@@ -520,6 +521,7 @@ pub fn run_source_deny(
             LicenseStatus::Denied,
             operator.unwrap_or("anonymous"),
             note,
+            None,
         )
         .map_err(map_license_refusal)?;
     Ok(transition_report(

@@ -124,7 +124,7 @@ pub fn approve_source_to(
         .skip_while(|stage| stage.rank() <= current.rank())
         .take_while(|stage| stage.rank() <= to.rank())
     {
-        store.transition_license(library, stage, operator, None)?;
+        store.transition_license(library, stage, operator, None, None)?;
     }
     Ok(())
 }
@@ -140,7 +140,7 @@ pub fn transition_source(
     to: devdocs_model::LicenseStatus,
     operator: &str,
 ) -> Result<usize, StoreError> {
-    open_migrated(path)?.transition_license(library, to, operator, None)
+    open_migrated(path)?.transition_license(library, to, operator, None, None)
 }
 
 /// Sets the expiry date on every source row of `library` in the store at

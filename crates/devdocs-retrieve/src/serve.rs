@@ -284,13 +284,9 @@ fn license_blocked(store: &Store, library: &str) -> Result<bool, RetrieveError> 
     let states = store.license_states(library)?;
     Ok(states
         .iter()
+        .copied()
         .min_by_key(|state| state.rank())
-        .is_some_and(|state| {
-            matches!(
-                state,
-                LicenseStatus::Expired | LicenseStatus::Revoked | LicenseStatus::Denied
-            )
-        }))
+        .is_some_and(LicenseStatus::is_terminal))
 }
 
 /// Cursor resume: continue after the last served chunk id in the same

@@ -3,7 +3,6 @@
 //! Contract: docs/implementation/07 §Atomic publish. On any error the
 //! transaction rolls back and the previous generation stays queryable.
 
-use devdocs_model::LicenseStatus;
 use rusqlite::TransactionBehavior;
 use rusqlite::params;
 use time::format_description::well_known::Rfc3339;
@@ -88,7 +87,7 @@ impl Store {
         // the library's rows carries a terminal stored state after the
         // fetch gate read it. The withdrawal lands inside this committed
         // transaction, so the refusal cannot roll it back.
-        let stored = stored_library_states(&tx, &src.library)?;
+        let stored = crate::license::read_license_states(&tx, &src.library)?;
         if let Some(terminal) = stored.iter().copied().find(|state| state.is_terminal()) {
             tx.execute(
                 "UPDATE sources SET active = 0 WHERE library = ?1 COLLATE NOCASE",
@@ -150,36 +149,6 @@ impl Store {
         .map_err(StoreError::Sql)?;
         Ok(())
     }
-}
-
-/// The distinct license states the library's rows carry inside `tx`,
-/// case-insensitive on the library, ordered by the storage spelling
-/// (docs/implementation/07 §License gate).
-fn stored_library_states(
-    tx: &rusqlite::Transaction<'_>,
-    library: &str,
-) -> Result<Vec<LicenseStatus>, StoreError> {
-    let mut statement = tx.prepare(
-        "SELECT DISTINCT license_status FROM sources \
-         WHERE library = ?1 COLLATE NOCASE ORDER BY license_status",
-    )?;
-    let rows = statement
-        .query_map(params![library], |row| row.get::<_, String>(0))
-        .map_err(StoreError::Sql)?;
-    let mut states = Vec::new();
-    for row in rows {
-        let raw = row.map_err(StoreError::Sql)?;
-        let Some(state) = LicenseStatus::parse(&raw) else {
-            return Err(rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                format!("unknown license status {raw:?}").into(),
-            )
-            .into());
-        };
-        states.push(state);
-    }
-    Ok(states)
 }
 
 /// Runs the whole publish sequence inside `tx`.

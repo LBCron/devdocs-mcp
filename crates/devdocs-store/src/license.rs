@@ -8,8 +8,7 @@
 
 use rusqlite::params;
 use time::OffsetDateTime;
-use time::UtcOffset;
-use time::format_description::well_known::Rfc3339;
+use time::macros::format_description;
 
 use devdocs_model::LicenseStatus;
 
@@ -24,8 +23,11 @@ impl Store {
     /// appends one audit line to `meta`. One transaction: load the current
     /// states, check each against the transition table
     /// ([`LicenseStatus::can_transition_to`]), require a non-empty note
-    /// exactly for `denied → pending_review`, update the rows, and write
-    /// the audit line in the docs/implementation/07 format.
+    /// exactly for `denied → pending_review`, update the rows, stamp
+    /// `expires` on them when one is given, and write the audit line in
+    /// the docs/implementation/07 format. A `None` `expires` leaves a
+    /// recorded expiry untouched, so the stamp commits atomically with
+    /// the move (docs/implementation/07 §License gate).
     ///
     /// An illegal move fails with [`StoreError::InvalidTransition`] and
     /// leaves the stored state unchanged with no audit line. Returns the
@@ -44,11 +46,12 @@ impl Store {
         to: LicenseStatus,
         operator: &str,
         note: Option<&str>,
+        expires: Option<&str>,
     ) -> Result<usize, StoreError> {
         let mut conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
-        let states = current_states(&tx, library)?;
+        let states = read_license_states(&tx, library)?;
         if states.is_empty() {
             return Err(StoreError::UnknownLibrary {
                 library: library.to_owned(),
@@ -63,8 +66,10 @@ impl Store {
 
         let moved = tx
             .execute(
-                "UPDATE sources SET license_status = ?1 WHERE library = ?2 COLLATE NOCASE",
-                params![to.as_str(), library],
+                "UPDATE sources SET license_status = ?1, \
+                 license_expires_at = COALESCE(?2, license_expires_at) \
+                 WHERE library = ?3 COLLATE NOCASE",
+                params![to.as_str(), expires, library],
             )
             .map_err(StoreError::Sql)?;
 
@@ -151,58 +156,21 @@ impl Store {
     /// a row carries an unknown status string.
     pub fn license_states(&self, library: &str) -> Result<Vec<LicenseStatus>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
-        let mut statement = conn.prepare(
-            "SELECT DISTINCT license_status FROM sources \
-             WHERE library = ?1 COLLATE NOCASE ORDER BY license_status",
-        )?;
-        let rows = statement
-            .query_map(params![library], |row| row.get::<_, String>(0))
-            .map_err(StoreError::Sql)?;
-        let mut states = Vec::new();
-        for row in rows {
-            let raw = row.map_err(StoreError::Sql)?;
-            let Some(state) = LicenseStatus::parse(&raw) else {
-                return Err(rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    format!("unknown license status {raw:?}").into(),
-                )
-                .into());
-            };
-            states.push(state);
-        }
-        Ok(states)
-    }
-
-    /// Writes the expiry date onto every row of `library` — the
-    /// `--expires` flag of `devdocs source approve`
-    /// (docs/implementation/07 §License gate). `None` clears the recorded
-    /// expiry. The next read-path sweep decides whether a written past
-    /// date flips the rows to `expired`. Returns the row count.
-    ///
-    /// # Errors
-    /// [`StoreError::Sql`] on the update failure.
-    pub fn set_license_expires_at(
-        &self,
-        library: &str,
-        expires: Option<&str>,
-    ) -> Result<usize, StoreError> {
-        let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
-        conn.execute(
-            "UPDATE sources SET license_expires_at = ?2 \
-             WHERE library = ?1 COLLATE NOCASE",
-            params![library, expires],
-        )
-        .map_err(StoreError::Sql)
+        read_license_states(&conn, library)
     }
 }
 
-/// The distinct license states the library's rows currently carry.
-fn current_states(
-    tx: &rusqlite::Transaction<'_>,
+/// The distinct license states the library's rows carry, case-insensitive
+/// on the library, ordered by the storage spelling. An un-indexed library
+/// returns an empty vector. Shared by the read path and the
+/// transaction-typed writers — a `&Transaction` derefs to `&Connection`,
+/// so both call shapes use one error-handling body
+/// (docs/implementation/07 §License gate).
+pub(crate) fn read_license_states(
+    conn: &rusqlite::Connection,
     library: &str,
 ) -> Result<Vec<LicenseStatus>, StoreError> {
-    let mut statement = tx.prepare(
+    let mut statement = conn.prepare(
         "SELECT DISTINCT license_status FROM sources \
          WHERE library = ?1 COLLATE NOCASE ORDER BY license_status",
     )?;
@@ -251,7 +219,10 @@ fn joined_states(states: &[LicenseStatus]) -> String {
         .join("|")
 }
 
-/// Appends one audit line to `meta` at the current instant.
+/// Appends one audit line to `meta` at the current instant. The
+/// timestamp formats with a fixed 9-digit subsecond field, so the audit
+/// key shape never depends on the nanosecond value
+/// (docs/implementation/06 §Migrations).
 fn append_audit(
     tx: &rusqlite::Transaction<'_>,
     library: &str,
@@ -261,8 +232,9 @@ fn append_audit(
     note: Option<&str>,
 ) -> Result<(), StoreError> {
     let ts = OffsetDateTime::now_utc()
-        .replace_offset(UtcOffset::UTC)
-        .format(&Rfc3339)
+        .format(&format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:9]Z"
+        ))
         .map_err(StoreError::Timestamp)?;
     append_audit_at(tx, &ts, library, from, to, operator, note)
 }
@@ -444,7 +416,7 @@ mod tests {
                 None
             };
             let moved = store
-                .transition_license("acme", to, "op", note)
+                .transition_license("acme", to, "op", note, None)
                 .unwrap_or_else(|e| panic!("{from:?} → {to:?}: {e}"));
             assert_eq!(moved, 1, "{from:?} → {to:?}");
             assert_eq!(state_of(&store, "acme"), to, "{from:?} → {to:?}");
@@ -511,7 +483,7 @@ mod tests {
                 let (store, _dir) = store();
                 insert_source(&store, "acme", "1.0", from, None);
                 let error = store
-                    .transition_license("acme", to, "op", Some("note"))
+                    .transition_license("acme", to, "op", Some("note"), None)
                     .unwrap_err();
                 match error {
                     crate::error::StoreError::InvalidTransition {
@@ -540,7 +512,7 @@ mod tests {
         insert_source(&store, "acme", "1.0", Denied, None);
 
         let error = store
-            .transition_license("acme", PendingReview, "op", None)
+            .transition_license("acme", PendingReview, "op", None, None)
             .unwrap_err();
         assert!(
             matches!(error, crate::error::StoreError::MissingNote),
@@ -550,12 +522,12 @@ mod tests {
         assert_eq!(audit_lines(&store), Vec::<String>::new());
 
         let error = store
-            .transition_license("acme", PendingReview, "op", Some("   "))
+            .transition_license("acme", PendingReview, "op", Some("   "), None)
             .unwrap_err();
         assert!(matches!(error, crate::error::StoreError::MissingNote));
 
         store
-            .transition_license("acme", PendingReview, "op", Some("ToS clarified"))
+            .transition_license("acme", PendingReview, "op", Some("ToS clarified"), None)
             .unwrap();
         assert_eq!(state_of(&store, "acme"), PendingReview);
         let lines = audit_lines(&store);
@@ -568,7 +540,7 @@ mod tests {
     fn unknown_library_refuses() {
         let (store, _dir) = store();
         let error = store
-            .transition_license("ghost", PendingReview, "op", Some("note"))
+            .transition_license("ghost", PendingReview, "op", Some("note"), None)
             .unwrap_err();
         assert!(
             matches!(error, crate::error::StoreError::UnknownLibrary { .. }),
@@ -583,7 +555,7 @@ mod tests {
         let (store, _dir) = store();
         insert_source(&store, "acme", "1.0", PendingReview, None);
         store
-            .transition_license("acme", Denied, "op", Some("robots disallow"))
+            .transition_license("acme", Denied, "op", Some("robots disallow"), None)
             .unwrap();
         let lines = audit_lines(&store);
         assert_eq!(lines.len(), 1);
@@ -594,36 +566,56 @@ mod tests {
         );
     }
 
-    /// `set_license_expires_at` writes the date onto every row of the
-    /// library (case-insensitive), `None` clears it, and an unknown
-    /// library writes nothing.
+    /// The transition stamps the expiry inside its own transaction: a
+    /// `Some` date writes `license_expires_at` on every moved row, and a
+    /// `None` leaves a recorded stamp untouched
+    /// (docs/implementation/07 §License gate).
     #[test]
-    fn set_license_expires_at_updates_every_row_of_the_library() {
+    fn transition_license_stamps_the_expiry_atomically() {
         let (store, _dir) = store();
-        insert_source(&store, "acme", "1.0", ApprovedIndex, None);
+        insert_source(&store, "acme", "1.0", ApprovedIndex, Some("2026-01-01"));
         insert_source(&store, "acme", "2.0", ApprovedIndex, None);
-        assert_eq!(
-            store
-                .set_license_expires_at("ACME", Some("2999-01-01"))
-                .unwrap(),
-            2
-        );
+
+        let moved = store
+            .transition_license("acme", ApprovedEmbed, "op", None, Some("2999-01-01"))
+            .unwrap();
+        assert_eq!(moved, 2);
         let conn = store.conn.lock().unwrap();
-        let count: i64 = conn
+        let stamped: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sources WHERE license_expires_at = '2999-01-01'",
+                "SELECT COUNT(*) FROM sources \
+                 WHERE license_status = 'approved_embed' AND license_expires_at = '2999-01-01'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
         drop(conn);
-        assert_eq!(count, 2);
-        assert_eq!(store.set_license_expires_at("acme", None).unwrap(), 2);
-        assert_eq!(
-            store
-                .set_license_expires_at("ghost", Some("2999-01-01"))
-                .unwrap(),
-            0
+        assert_eq!(stamped, 2, "every moved row carries the stamp");
+
+        // A transition without a date leaves the recorded stamp alone.
+        store
+            .transition_license("acme", ApprovedCache, "op", None, None)
+            .unwrap();
+        let conn = store.conn.lock().unwrap();
+        let stamped: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sources \
+                 WHERE license_status = 'approved_cache' AND license_expires_at = '2999-01-01'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(conn);
+        assert_eq!(stamped, 2, "the stamp survives the un-dated move");
+
+        // The move kept its audit line shape: one line, no note field.
+        let lines = audit_lines(&store);
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.contains(", op)") && !line.contains(", 2999-01-01")),
+            "lines: {lines:?}"
         );
     }
 
@@ -644,7 +636,7 @@ mod tests {
             Some("2026-01-01"),
         );
         store
-            .transition_license("already-expired", Expired, "op", None)
+            .transition_license("already-expired", Expired, "op", None, None)
             .unwrap();
         insert_source(
             &store,
@@ -654,7 +646,7 @@ mod tests {
             Some("2026-01-01"),
         );
         store
-            .transition_license("already-denied", Denied, "op", None)
+            .transition_license("already-denied", Denied, "op", None, None)
             .unwrap();
         insert_source(
             &store,
@@ -664,7 +656,7 @@ mod tests {
             Some("2026-01-01"),
         );
         store
-            .transition_license("already-revoked", Revoked, "op", None)
+            .transition_license("already-revoked", Revoked, "op", None, None)
             .unwrap();
 
         let flipped = store.sweep_expired("2026-11-06T12:00:00Z").unwrap();
@@ -810,6 +802,36 @@ mod tests {
         assert_eq!(state_of(&store, "tomorrow"), ApprovedIndex);
     }
 
+    /// The audit key always carries the fixed 9-digit subsecond field, so
+    /// the key shape never depends on the nanosecond value — a zero
+    /// nanosecond instant must not drop the fraction
+    /// (docs/implementation/06 §Migrations).
+    #[test]
+    fn audit_keys_carry_a_fixed_subsecond_field() {
+        let (store, _dir) = store();
+        insert_source(&store, "acme", "1.0", ApprovedIndex, None);
+        store
+            .transition_license("acme", ApprovedEmbed, "op", None, None)
+            .unwrap();
+        let conn = store.conn.lock().unwrap();
+        let key: String = conn
+            .query_row("SELECT key FROM meta WHERE key LIKE 'audit:%'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        drop(conn);
+        let ts = key.strip_prefix("audit:").expect("audit key").to_owned();
+        // `YYYY-MM-DDTHH:MM:SS.999999999Z` is exactly 30 characters, with
+        // the fraction at positions 20..=28.
+        assert_eq!(ts.len(), 30, "key: {key}");
+        assert_eq!(ts.as_bytes()[19], b'.', "key: {key}");
+        assert!(
+            ts.as_bytes()[20..29].iter().all(u8::is_ascii_digit),
+            "key: {key}"
+        );
+        assert!(ts.ends_with('Z'), "key: {key}");
+    }
+
     /// The license path matches the library case-insensitively: a
     /// transition naming `ACME` moves the store row `acme`, and the audit
     /// line carries the canonical stored spelling
@@ -820,7 +842,7 @@ mod tests {
         insert_source(&store, "acme", "1.0", ApprovedIndex, None);
 
         let moved = store
-            .transition_license("ACME", ApprovedEmbed, "op", None)
+            .transition_license("ACME", ApprovedEmbed, "op", None, None)
             .unwrap();
         assert_eq!(moved, 1);
         assert_eq!(state_of(&store, "acme"), ApprovedEmbed);

@@ -318,6 +318,7 @@ fn publish_refuses_when_the_stored_state_turned_terminal() {
             LicenseStatus::Denied,
             "op",
             Some("robots disallow"),
+            None,
         )
         .unwrap();
     let audit_before: i64 = rig
@@ -409,7 +410,7 @@ fn publish_wins_while_the_stored_state_is_non_terminal() {
 
     // A deny landing after the publish still transitions the library.
     rig.store
-        .transition_license("next.js", LicenseStatus::Denied, "op", Some("robots"))
+        .transition_license("next.js", LicenseStatus::Denied, "op", Some("robots"), None)
         .unwrap();
     let status: String = rig
         .conn
