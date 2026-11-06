@@ -496,11 +496,10 @@ mod tests {
     use devdocs_ingest::IngestError;
     use devdocs_model::error::{Error, UpstreamCode};
 
-    /// Every git adapter error kind maps onto `UPSTREAM_ERROR` with its
-    /// stable code prefix intact (docs/implementation/05 §Error model).
-    #[test]
-    fn git_errors_map_upstream_with_their_code_prefix() {
-        let cases: Vec<(IngestError, &str)> = vec![
+    /// The git adapter error kinds and the stable code prefixes their
+    /// CLI mapping must keep (docs/implementation/05 §Error model).
+    fn git_error_cases() -> Vec<(IngestError, &'static str)> {
+        vec![
             (
                 IngestError::GitInvalidPin {
                     pin: "-oProxyCommand=no".to_owned(),
@@ -543,9 +542,14 @@ mod tests {
                 IngestError::GitCommitShaInvalid("not-a-sha".to_owned()),
                 "GIT_COMMIT_SHA_INVALID",
             ),
-        ];
+        ]
+    }
 
-        for (error, code) in cases {
+    /// Every git adapter error kind maps onto `UPSTREAM_ERROR` with its
+    /// stable code prefix intact (docs/implementation/05 §Error model).
+    #[test]
+    fn git_errors_map_upstream_with_their_code_prefix() {
+        for (error, code) in git_error_cases() {
             let Error::Upstream { code: got, detail } = map_ingest_error(error) else {
                 panic!("expected an upstream error for {code}");
             };

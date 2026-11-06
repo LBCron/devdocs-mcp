@@ -131,6 +131,16 @@ pub struct SearchConfig {
     pub rrf_k: u32,
 }
 
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            max_tokens_default: 2000,
+            limit_default: 8,
+            rrf_k: 60,
+        }
+    }
+}
+
 /// Ingest behavior.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IngestConfig {

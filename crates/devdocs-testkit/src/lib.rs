@@ -35,11 +35,7 @@ pub fn base_config() -> devdocs_model::config::Config {
             path: std::path::PathBuf::from("/tmp/unused.db"),
             embeddings: false,
         },
-        search: SearchConfig {
-            max_tokens_default: 2000,
-            limit_default: 8,
-            rrf_k: 60,
-        },
+        search: SearchConfig::default(),
         ingest: IngestConfig {
             git_extensions: DEFAULT_GIT_EXTENSIONS
                 .iter()
