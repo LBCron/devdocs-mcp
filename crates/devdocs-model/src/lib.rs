@@ -11,8 +11,8 @@ pub use chunk::Chunk;
 pub use config::{Config, Overrides, Paths, SourceConfig};
 pub use docref::ParsedRef;
 pub use envelope::{
-    Example, ResultEnvelope, ResultItem, SourceListEntry, SourceListVersion, SourceSummary,
-    VersionStatus, empty_envelope, now_rfc3339,
+    Example, ResultEnvelope, ResultItem, SourceListEntry, SourceListEnvelope, SourceListVersion,
+    SourceSummary, VersionStatus, empty_envelope, now_rfc3339,
 };
 pub use error::{Error, ErrorEnvelope, MissReason, UpstreamCode};
 pub use source::{LicenseStatus, SourceId, SourceKind, SourceRecord};

@@ -12,7 +12,9 @@ use devdocs_ingest::{
     registry_name,
 };
 use devdocs_model::config::Config;
-use devdocs_model::envelope::{ResultEnvelope, SourceListEntry, SourceListVersion, SourceSummary};
+use devdocs_model::envelope::{
+    ResultEnvelope, SourceListEntry, SourceListEnvelope, SourceListVersion, SourceSummary,
+};
 use devdocs_model::error::{Error, UpstreamCode};
 use devdocs_model::source::LicenseStatus;
 use devdocs_store::{MigrateOptions, Store, StoreError};
@@ -545,43 +547,46 @@ pub fn run_source_deny(
 ///
 /// # Errors
 /// [`Error::Upstream`] when the store cannot open or the read fails.
-pub fn run_source_list(config: &Config) -> Result<Vec<SourceListEntry>, Error> {
+pub fn run_source_list(config: &Config) -> Result<SourceListEnvelope, Error> {
     let store = open_store(config, false)?;
     store
         .sweep_expired(&devdocs_model::now_rfc3339())
         .map_err(|e| map_store_error(&e))?;
     let rows = store.list_sources().map_err(|e| map_store_error(&e))?;
-    Ok(config
-        .sources
-        .iter()
-        .map(|(name, entry)| {
-            let versions: Vec<SourceListVersion> = rows
-                .iter()
-                .filter(|row| row.library.eq_ignore_ascii_case(name))
-                .map(|row| SourceListVersion {
-                    version: row.version.clone(),
-                    status: row.license_status.clone(),
-                    fetched_at: row.fetched_at.clone(),
-                    active: row.active,
-                })
-                .collect();
-            let status = versions
-                .iter()
-                .filter_map(|version| LicenseStatus::parse(&version.status))
-                .min_by_key(|state| state.rank())
-                .map_or_else(|| String::from("pending_review"), |state| state.to_string());
-            SourceListEntry {
-                name: name.clone(),
-                url: entry.url.clone(),
-                kind: entry.kind.clone(),
-                license: entry.license.clone(),
-                attribution: entry.attribution.clone(),
-                expires: entry.expires.clone(),
-                status,
-                versions,
-            }
-        })
-        .collect())
+    Ok(SourceListEnvelope {
+        results: config
+            .sources
+            .iter()
+            .map(|(name, entry)| {
+                let versions: Vec<SourceListVersion> = rows
+                    .iter()
+                    .filter(|row| row.library.eq_ignore_ascii_case(name))
+                    .map(|row| SourceListVersion {
+                        version: row.version.clone(),
+                        status: row.license_status.clone(),
+                        fetched_at: row.fetched_at.clone(),
+                        active: row.active,
+                    })
+                    .collect();
+                let status = versions
+                    .iter()
+                    .filter_map(|version| LicenseStatus::parse(&version.status))
+                    .min_by_key(|state| state.rank())
+                    .map_or_else(|| String::from("pending_review"), |state| state.to_string());
+                SourceListEntry {
+                    name: name.clone(),
+                    url: entry.url.clone(),
+                    kind: entry.kind.clone(),
+                    license: entry.license.clone(),
+                    attribution: entry.attribution.clone(),
+                    expires: entry.expires.clone(),
+                    status,
+                    versions,
+                }
+            })
+            .collect(),
+        served_at: devdocs_model::now_rfc3339(),
+    })
 }
 
 /// Parses the `<stage>` argument of `devdocs source approve` through the

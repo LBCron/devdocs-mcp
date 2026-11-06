@@ -153,6 +153,16 @@ pub struct SourceListEntry {
     pub versions: Vec<SourceListVersion>,
 }
 
+/// The `devdocs source list --json` envelope: the config entries joined
+/// with store state plus the serve time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceListEnvelope {
+    /// One entry per configured source.
+    pub results: Vec<SourceListEntry>,
+    /// The RFC 3339 time the envelope was served at.
+    pub served_at: String,
+}
+
 /// One version row of a [`SourceListEntry`], straight from the store.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceListVersion {

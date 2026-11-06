@@ -413,14 +413,11 @@ fn run_source_command(cli: &Cli, op: &SourceOp) -> Result<(), Error> {
             print_line(&report)
         }
         SourceOp::List => {
-            let entries = crate::commands::run_source_list(&config)?;
+            let envelope = crate::commands::run_source_list(&config)?;
             if cli.json {
-                print_line(&serde_json::json!({
-                    "results": entries,
-                    "served_at": devdocs_model::now_rfc3339(),
-                }))
+                print_line(&envelope)
             } else {
-                for entry in &entries {
+                for entry in &envelope.results {
                     let mut line = format!(
                         "{} {} ({}) · {}",
                         entry.name,
