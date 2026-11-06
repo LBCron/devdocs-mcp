@@ -7,7 +7,10 @@
 
 use std::sync::Arc;
 
-use devdocs_ingest::{FixtureSet, GitPin, IngestJob, gate_fetch};
+use devdocs_ingest::{
+    FixtureSet, GitPin, IngestJob, gate_fetch, pending_review_refusal, refused_status,
+    registry_name,
+};
 use devdocs_model::config::Config;
 use devdocs_model::envelope::{ResultEnvelope, SourceSummary};
 use devdocs_model::error::{Error, UpstreamCode};
@@ -164,26 +167,24 @@ pub fn run_versions(
 
 /// A gate refusal carrying a terminal status (`denied`, `expired`,
 /// `revoked`) withdraws the previously published generation before the
-/// refusal returns, so a revoked registry entry takes its source out of
-/// retrieval even though the publish-time withdrawal never runs
+/// refusal returns, so a revoked source takes itself out of retrieval even
+/// though the publish-time withdrawal never runs
 /// (docs/implementation/09 §License gate enforcement points, point 3).
-/// A refusal without a terminal status — no entry, `pending_review` —
-/// writes nothing. The withdrawal is not best-effort: when the store
-/// cannot record it, the command returns `UPSTREAM_ERROR` instead of
-/// `FETCH_BLOCKED`, so a revoked source is never left serving while the
-/// command claims `FETCH_BLOCKED`.
-fn withdraw_on_terminal_refusal(config: &Config, index_url: &Url) -> Result<(), Error> {
+/// A refusal without a terminal status — no entry, no store row,
+/// `pending_review` — writes nothing. The withdrawal is not best-effort:
+/// when the store cannot record it, the command returns `UPSTREAM_ERROR`
+/// instead of `FETCH_BLOCKED`, so a revoked source is never left serving
+/// while the command claims `FETCH_BLOCKED`.
+fn withdraw_on_terminal_refusal(
+    store: &Arc<Store>,
+    config: &Config,
+    index_url: &Url,
+) -> Result<(), Error> {
     let Some(status) =
-        devdocs_ingest::refused_status(config, index_url).filter(|status| status.is_terminal())
+        refused_status(store, config, index_url).filter(|status| status.is_terminal())
     else {
         return Ok(());
     };
-    let store = open_store(config, false).map_err(|error| Error::Upstream {
-        code: UpstreamCode::UpstreamError,
-        detail: format!(
-            "gate refused with {status} but the withdrawal could not be recorded: {error}"
-        ),
-    })?;
     let withdrawn = store
         .withdraw_source_by_origin_url(index_url.as_str(), status)
         .map_err(|error| Error::Upstream {
@@ -202,12 +203,14 @@ fn withdraw_on_terminal_refusal(config: &Config, index_url: &Url) -> Result<(), 
 
 /// Runs `devdocs add <source>`.
 ///
-/// Order matters: the license gate fires before the store opens, so a
-/// refused source costs no bytes and writes no database — except a refusal
-/// carrying a terminal status, which withdraws the previously published
-/// generation first (docs/implementation/09 §License gate enforcement
-/// points): the publish-time withdrawal cannot run, because this refusal
-/// happens before any publish.
+/// Order matters: the license gate denies by default. A URL with no
+/// registry entry refuses before the store opens, so a refused source costs
+/// no bytes and writes no database. A registered entry consults the store —
+/// the authoritative license state, swept for passed expiries first — and a
+/// refusal carrying a terminal status withdraws the previously published
+/// generation before it returns (docs/implementation/09 §License gate
+/// enforcement points, point 3): the publish-time withdrawal cannot run,
+/// because this refusal happens before any publish.
 ///
 /// The effective kind dispatches the adapter (docs/implementation/07
 /// §Priority ladder): an explicit `--kind` wins, then the config
@@ -225,13 +228,13 @@ pub fn run_add(
 ) -> Result<serde_json::Value, Error> {
     let index_url = Url::parse(source).map_err(|e| Error::Usage(format!("bad source URL: {e}")))?;
 
-    // 1. The license gate: deny by default, before any fetch or store open.
-    let grant = match gate_fetch(config, &index_url) {
-        Ok(grant) => grant,
-        Err(error) => {
-            withdraw_on_terminal_refusal(config, &index_url)?;
-            return Err(error);
-        }
+    // 1. The license gate: deny by default. The unregistered refusal runs
+    //    before the store opens, and the usage validation (the effective
+    //    kind) runs before the store opens too, so a rejected add still
+    //    writes no database. The registered path then sweeps the store and
+    //    reads its authoritative state.
+    let Some(name) = registry_name(config, &index_url)? else {
+        return Err(pending_review_refusal(&index_url));
     };
 
     // 2. The effective kind. `--kind` wins, then the config entry.
@@ -239,7 +242,7 @@ pub fn run_add(
         .or_else(|| {
             config
                 .sources
-                .get(&grant.name)
+                .get(&name)
                 .and_then(|entry| entry.kind.as_deref())
         })
         .unwrap_or("llms_txt");
@@ -258,8 +261,25 @@ pub fn run_add(
                 "git sources require --version (a tag or a commit SHA)".to_owned(),
             ));
         };
+        let store = open_store(config, false)?;
+        let grant = match gate_fetch(&store, config, &index_url) {
+            Ok(grant) => grant,
+            Err(error) => {
+                withdraw_on_terminal_refusal(&store, config, &index_url)?;
+                return Err(error);
+            }
+        };
         return run_add_git(config, &index_url, &grant.name, pin);
     }
+
+    let store = open_store(config, false)?;
+    let grant = match gate_fetch(&store, config, &index_url) {
+        Ok(grant) => grant,
+        Err(error) => {
+            withdraw_on_terminal_refusal(&store, config, &index_url)?;
+            return Err(error);
+        }
+    };
 
     // 3. The fixture set, when replaying.
     let fixture = fixture_dir
@@ -278,7 +298,6 @@ pub fn run_add(
             detail: format!("cannot start the async runtime: {e}"),
         })?;
 
-    let store = open_store(config, false)?;
     let version = version.unwrap_or("latest");
     let job = IngestJob::new(config, &guard, fixture.as_ref());
     let result = runtime.block_on(job.run(Arc::clone(&store), &index_url, &grant.name, version));

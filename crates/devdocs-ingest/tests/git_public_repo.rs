@@ -45,11 +45,12 @@ fn config(url: &Url) -> Config {
 async fn public_repo_clone_yields_allowlisted_docs_at_the_pinned_tag() {
     let url = Url::parse(REPO_URL).unwrap();
     let config = config(&url);
-    let grant = gate_fetch(&config, &url).unwrap();
-    assert_eq!(grant.name, "acme");
 
     let db = tempdir().unwrap();
     let store = Arc::new(devdocs_testkit::open_migrated(&db.path().join("docs.db")).unwrap());
+    let grant = gate_fetch(&store, &config, &url).unwrap();
+    assert_eq!(grant.name, "acme");
+
     let data = tempdir().unwrap();
     let guard = FetchGuard::from_fetch_config(&config.fetch);
 

@@ -129,12 +129,13 @@ async fn git_run_publishes_chunks_with_commit_provenance() {
     let data = tempdir().unwrap();
     let url = repo_url(&repo.work_dir);
     let config = config(&url);
+    let store = store();
 
-    // The deny-by-default gate applies to git sources too.
-    let grant = gate_fetch(&config, &url).unwrap();
+    // The deny-by-default gate applies to git sources too; it reads
+    // the store's authoritative license state.
+    let grant = gate_fetch(&store, &config, &url).unwrap();
     assert_eq!(grant.name, "acme");
 
-    let store = store();
     let guard = guard(&config);
     let outcome = IngestJob::new(&config, &guard, None)
         .run_git(

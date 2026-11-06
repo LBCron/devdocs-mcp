@@ -129,6 +129,40 @@ impl Store {
     }
 }
 
+impl Store {
+    /// The distinct license states the library's rows currently carry,
+    /// case-insensitive on the library, ordered by the storage spelling.
+    /// An un-indexed library returns an empty vector.
+    ///
+    /// # Errors
+    /// [`StoreError::Sql`] on query failures, or a conversion failure when
+    /// a row carries an unknown status string.
+    pub fn license_states(&self, library: &str) -> Result<Vec<LicenseStatus>, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
+        let mut statement = conn.prepare(
+            "SELECT DISTINCT license_status FROM sources \
+             WHERE library = ?1 COLLATE NOCASE ORDER BY license_status",
+        )?;
+        let rows = statement
+            .query_map(params![library], |row| row.get::<_, String>(0))
+            .map_err(StoreError::Sql)?;
+        let mut states = Vec::new();
+        for row in rows {
+            let raw = row.map_err(StoreError::Sql)?;
+            let Some(state) = LicenseStatus::parse(&raw) else {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    format!("unknown license status {raw:?}").into(),
+                )
+                .into());
+            };
+            states.push(state);
+        }
+        Ok(states)
+    }
+}
+
 /// The distinct license states the library's rows currently carry.
 fn current_states(
     tx: &rusqlite::Transaction<'_>,
@@ -268,15 +302,22 @@ mod tests {
     }
 
     /// Inserts one source row straight into the store: the transition
-    /// tests drive states the publish gate would refuse.
-    fn insert_source(store: &Store, library: &str, status: LicenseStatus, expires: Option<&str>) {
+    /// tests drive states the publish gate would refuse. Rows of the same
+    /// library need distinct versions to satisfy the UNIQUE key.
+    fn insert_source(
+        store: &Store,
+        library: &str,
+        version: &str,
+        status: LicenseStatus,
+        expires: Option<&str>,
+    ) {
         let conn = store.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO sources(library, version, kind, origin_url, license_status, \
              license_expires_at, fetched_at, active) \
-             VALUES (?1, '1.0', 'llms_txt', 'https://docs.test/llms.txt', ?2, ?3, \
+             VALUES (?1, ?2, 'llms_txt', 'https://docs.test/llms.txt', ?3, ?4, \
              '2026-01-01T00:00:00Z', 0)",
-            rusqlite::params![library, status.as_str(), expires],
+            rusqlite::params![library, version, status.as_str(), expires],
         )
         .unwrap();
     }
@@ -358,7 +399,7 @@ mod tests {
 
         for (from, to) in legal {
             let (store, _dir) = store();
-            insert_source(&store, "acme", from, None);
+            insert_source(&store, "acme", "1.0", from, None);
             let note = if (from, to) == (Denied, PendingReview) {
                 Some("robots allowlist re-checked")
             } else {
@@ -430,7 +471,7 @@ mod tests {
                     continue;
                 }
                 let (store, _dir) = store();
-                insert_source(&store, "acme", from, None);
+                insert_source(&store, "acme", "1.0", from, None);
                 let error = store
                     .transition_license("acme", to, "op", Some("note"))
                     .unwrap_err();
@@ -458,7 +499,7 @@ mod tests {
     #[test]
     fn reopening_a_denied_source_requires_a_note() {
         let (store, _dir) = store();
-        insert_source(&store, "acme", Denied, None);
+        insert_source(&store, "acme", "1.0", Denied, None);
 
         let error = store
             .transition_license("acme", PendingReview, "op", None)
@@ -502,7 +543,7 @@ mod tests {
     #[test]
     fn any_transition_may_carry_a_note() {
         let (store, _dir) = store();
-        insert_source(&store, "acme", PendingReview, None);
+        insert_source(&store, "acme", "1.0", PendingReview, None);
         store
             .transition_license("acme", Denied, "op", Some("robots disallow"))
             .unwrap();
@@ -521,18 +562,36 @@ mod tests {
     #[test]
     fn sweep_flips_only_passed_non_terminal_expiries() {
         let (store, _dir) = store();
-        insert_source(&store, "past", ApprovedIndex, Some("2026-01-01"));
-        insert_source(&store, "future", ApprovedIndex, Some("2999-01-01"));
-        insert_source(&store, "no-expiry", ApprovedIndex, None);
-        insert_source(&store, "already-expired", ApprovedIndex, Some("2026-01-01"));
+        insert_source(&store, "past", "1.0", ApprovedIndex, Some("2026-01-01"));
+        insert_source(&store, "future", "1.0", ApprovedIndex, Some("2999-01-01"));
+        insert_source(&store, "no-expiry", "1.0", ApprovedIndex, None);
+        insert_source(
+            &store,
+            "already-expired",
+            "1.0",
+            ApprovedIndex,
+            Some("2026-01-01"),
+        );
         store
             .transition_license("already-expired", Expired, "op", None)
             .unwrap();
-        insert_source(&store, "already-denied", ApprovedIndex, Some("2026-01-01"));
+        insert_source(
+            &store,
+            "already-denied",
+            "1.0",
+            ApprovedIndex,
+            Some("2026-01-01"),
+        );
         store
             .transition_license("already-denied", Denied, "op", None)
             .unwrap();
-        insert_source(&store, "already-revoked", ApprovedIndex, Some("2026-01-01"));
+        insert_source(
+            &store,
+            "already-revoked",
+            "1.0",
+            ApprovedIndex,
+            Some("2026-01-01"),
+        );
         store
             .transition_license("already-revoked", Revoked, "op", None)
             .unwrap();
@@ -569,14 +628,31 @@ mod tests {
         assert_eq!(auto.len(), 1, "no duplicate auto:expiry line");
     }
 
+    /// `license_states` reports the distinct states of a library's rows
+    /// case-insensitively and returns empty for an un-indexed library.
+    #[test]
+    fn license_states_reports_distinct_states() {
+        let (store, _dir) = store();
+        assert_eq!(
+            store.license_states("acme").unwrap(),
+            Vec::<LicenseStatus>::new()
+        );
+        insert_source(&store, "acme", "1.0", ApprovedIndex, None);
+        insert_source(&store, "acme", "2.0", ApprovedSnippet, None);
+        assert_eq!(
+            store.license_states("ACME").unwrap(),
+            vec![ApprovedIndex, ApprovedSnippet]
+        );
+    }
+
     /// Same-instant audit lines collide on the key: the `-<n>` suffix
     /// keeps both rows (driven through `append_audit_at` with a fixed
     /// instant; the wall clock moves between real transitions).
     #[test]
     fn same_instant_audit_lines_get_a_suffix() {
         let (store, _dir) = store();
-        insert_source(&store, "one", ApprovedIndex, None);
-        insert_source(&store, "two", ApprovedIndex, None);
+        insert_source(&store, "one", "1.0", ApprovedIndex, None);
+        insert_source(&store, "two", "1.0", ApprovedIndex, None);
         {
             let mut conn = store.conn.lock().unwrap();
             let tx = conn.transaction().unwrap();

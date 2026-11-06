@@ -102,7 +102,7 @@ async fn ingest_refuses_a_library_name_that_does_not_match_the_grant() {
     let store = Arc::new(devdocs_testkit::open_migrated(&db_path).unwrap());
 
     let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
-    gate_fetch(&config, &index_url).unwrap();
+    gate_fetch(&store, &config, &index_url).unwrap();
 
     let job = IngestJob::new(&config, &guard, Some(&fixture));
     let error = job
@@ -137,7 +137,7 @@ async fn ingest_runs_index_to_published_chunks_offline() {
     let store = Arc::new(devdocs_testkit::open_migrated(&db_path).unwrap());
 
     let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
-    let grant = gate_fetch(&config, &index_url).unwrap();
+    let grant = gate_fetch(&store, &config, &index_url).unwrap();
     assert_eq!(grant.name, "acme");
     assert_eq!(grant.status, LicenseStatus::ApprovedIndex);
 
@@ -187,7 +187,7 @@ async fn ingest_denies_a_source_without_a_registry_entry() {
     let store = Arc::new(devdocs_testkit::open_migrated(&db.path().join("docs.db")).unwrap());
 
     let index_url = Url::parse("https://docs.acme.test/llms.txt").unwrap();
-    let error = gate_fetch(&config, &index_url).unwrap_err();
+    let error = gate_fetch(&store, &config, &index_url).unwrap_err();
     match error {
         Error::Upstream {
             code: UpstreamCode::FetchBlocked,

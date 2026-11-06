@@ -57,6 +57,38 @@ pub fn open_migrated(path: &Path) -> Result<Store, StoreError> {
     Ok(store)
 }
 
+/// Opens a migrated store at `path` and seeds one source row
+/// (`llms_txt`, origin `https://docs.test/<library>/llms.txt`)
+/// with an explicit version, license state, and optional expiry date. The
+/// license-gate and transition tests drive states and shapes the publish
+/// gate would refuse, so the row lands behind a raw insert. Returns the
+/// store.
+pub fn seed_source_status(
+    path: &Path,
+    library: &str,
+    version: &str,
+    status: &str,
+    expires: Option<&str>,
+) -> Result<Store, StoreError> {
+    let store = open_migrated(path)?;
+    let conn = Connection::open(path).map_err(StoreError::Sql)?;
+    conn.execute(
+        "INSERT INTO sources(library, version, kind, origin_url, license_status, \
+         license_expires_at, fetched_at, active) \
+         VALUES (?1, ?2, 'llms_txt', ?3, ?4, ?5, '2026-01-01T00:00:00Z', 0)",
+        rusqlite::params![
+            library,
+            version,
+            format!("https://docs.test/{library}/llms.txt"),
+            status,
+            expires,
+        ],
+    )
+    .map_err(StoreError::Sql)?;
+    drop(conn);
+    Ok(store)
+}
+
 /// Inserts one source row (`llms_txt`, `approved_index`) and returns its id.
 pub fn seed_source(conn: &Connection, library: &str, active: bool) -> Result<i64, rusqlite::Error> {
     conn.execute(
