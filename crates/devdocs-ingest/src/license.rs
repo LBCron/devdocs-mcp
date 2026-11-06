@@ -45,7 +45,7 @@ pub struct LicenseGrant {
 /// library's stored states gate the run. When the library's rows disagree,
 /// the least privileged state applies, so a sync can never upgrade a
 /// refused library. A registered source with no store row grants
-/// [`FIRST_SYNC_STAGE`] for its first publish.
+/// the index stage (`FIRST_SYNC_STAGE`) for its first publish.
 ///
 /// # Errors
 /// [`Error::Upstream`] with `FETCH_BLOCKED` when no registry entry matches
