@@ -772,10 +772,13 @@ mod tests {
     /// yesterday flips (docs/implementation/07 §Expiry sweep).
     #[test]
     fn expiry_boundary_flips_at_0000_utc_of_the_recorded_date() {
-        let today = OffsetDateTime::now_utc().date();
+        // One clock read: a UTC-midnight crossing between two reads
+        // would shift the dates against `now` and flake the boundary.
+        let now_utc = OffsetDateTime::now_utc();
+        let today = now_utc.date();
         let yesterday = today.previous_day().unwrap();
         let tomorrow = today.next_day().unwrap();
-        let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+        let now = now_utc.format(&Rfc3339).unwrap();
 
         let (store, _dir) = store();
         insert_source(
