@@ -392,26 +392,21 @@ impl Segmenter {
             let range = block.start..block.end;
             let text = &section.text[range.clone()];
             let tokens = self.sizer.size(text);
-            let oversized = tokens > self.target_tokens;
-            if oversized && (block.fenced || tokens > 2 * self.target_tokens) {
+            if tokens > self.target_tokens && (block.fenced || tokens > 2 * self.target_tokens) {
                 // A fenced code block never splits, and any block over
                 // twice the target becomes its own chunk, never truncated
                 // (docs/07 rules 3 and 5).
-                if let Some((span, _, symbols)) = current.take() {
-                    candidates.push(Candidate { span, symbols });
-                }
+                flush_packed(&mut current, &mut candidates);
                 candidates.push(Candidate {
                     span: range,
                     symbols: block.symbols.clone(),
                 });
-            } else if oversized {
+            } else if tokens > self.target_tokens {
                 // Between the target and twice the target: split at
                 // semantic boundaries with the overlap. Only non-fenced
                 // blocks split; a container block's nested-fence symbols
                 // ride on the first piece.
-                if let Some((span, _, symbols)) = current.take() {
-                    candidates.push(Candidate { span, symbols });
-                }
+                flush_packed(&mut current, &mut candidates);
                 candidates.extend(
                     self.split_oversized(text, block.start)
                         .into_iter()
@@ -426,35 +421,7 @@ impl Segmenter {
                         }),
                 );
             } else if tokens > 0 {
-                // The packed span slices the page from the first block's
-                // start to the last block's end, so the bytes between
-                // blocks join the chunk body and share the budget
-                // (docs/07 rule 3).
-                let separator_tokens = match &current {
-                    Some((span, _, _)) => self.sizer.size(&section.text[span.end..block.start]),
-                    None => 0,
-                };
-                let overflows = match &current {
-                    Some((_, packed, _)) => {
-                        *packed + separator_tokens + tokens > self.target_tokens
-                    }
-                    None => false,
-                };
-                if overflows {
-                    if let Some((span, _, symbols)) = current.take() {
-                        candidates.push(Candidate { span, symbols });
-                    }
-                    current = Some((range, tokens, block.symbols.clone()));
-                } else if let Some((span, packed, mut symbols)) = current.take() {
-                    symbols.extend(block.symbols.iter().cloned());
-                    current = Some((
-                        span.start..block.end,
-                        packed + separator_tokens + tokens,
-                        symbols,
-                    ));
-                } else {
-                    current = Some((range, tokens, block.symbols.clone()));
-                }
+                self.pack_small(section, &mut current, &mut candidates, block, range, tokens);
             } else {
                 // defensive: a zero-token block carries no content; skip it
                 // and count the skip (the ingest events report skipped
@@ -465,14 +432,49 @@ impl Segmenter {
                 stats.skipped_blocks += 1;
             }
         }
-        if let Some((span, _, symbols)) = current.take() {
-            candidates.push(Candidate { span, symbols });
-        }
+        flush_packed(&mut current, &mut candidates);
 
         // Cross-check: no chunk boundary may fall inside a fenced code
         // block; merge and warn when it does (docs/07 step 4). The probe
         // offset is page-absolute, matching `section.text`.
         merge_until_fence_safe(candidates, section.text)
+    }
+
+    /// Packs one under-target block into the open packed span, flushing
+    /// that span first when the block would overflow the target. The packed
+    /// span slices the page from the first block's start to the last
+    /// block's end, so the bytes between blocks join the chunk body and
+    /// share the budget (docs/07 rule 3).
+    fn pack_small(
+        &self,
+        section: &Section<'_>,
+        current: &mut Option<(Range<usize>, usize, Vec<ExtractedSymbol>)>,
+        candidates: &mut Vec<Candidate>,
+        block: &Block,
+        range: Range<usize>,
+        tokens: usize,
+    ) {
+        let separator_tokens = match &*current {
+            Some((span, _, _)) => self.sizer.size(&section.text[span.end..block.start]),
+            None => 0,
+        };
+        let overflows = match &*current {
+            Some((_, packed, _)) => *packed + separator_tokens + tokens > self.target_tokens,
+            None => false,
+        };
+        if overflows {
+            flush_packed(current, candidates);
+            *current = Some((range, tokens, block.symbols.clone()));
+        } else if let Some((span, packed, mut symbols)) = current.take() {
+            symbols.extend(block.symbols.iter().cloned());
+            *current = Some((
+                span.start..block.end,
+                packed + separator_tokens + tokens,
+                symbols,
+            ));
+        } else {
+            *current = Some((range, tokens, block.symbols.clone()));
+        }
     }
 
     /// Splits an oversized block with the `MarkdownSplitter` and returns the
@@ -536,6 +538,16 @@ struct Section<'a> {
 struct Candidate {
     span: Range<usize>,
     symbols: Vec<ExtractedSymbol>,
+}
+
+/// Closes the open packed span into the candidates, if one is open.
+fn flush_packed(
+    current: &mut Option<(Range<usize>, usize, Vec<ExtractedSymbol>)>,
+    candidates: &mut Vec<Candidate>,
+) {
+    if let Some((span, _, symbols)) = current.take() {
+        candidates.push(Candidate { span, symbols });
+    }
 }
 
 /// The absolute byte range of one top-level block node. Comrak's end

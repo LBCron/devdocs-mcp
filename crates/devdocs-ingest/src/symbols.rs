@@ -75,7 +75,7 @@ fn visit(node: Node<'_>, src: &[u8], out: &mut Vec<ExtractedSymbol>, depth: usiz
     if depth >= MAX_DEPTH {
         return;
     }
-    match node.kind() {
+    let kind = match node.kind() {
         // Rust `function_item`/`function_signature_item` and the
         // Go/JavaScript declarations carry the `function` kind, except a
         // Rust declaration inside an `impl_item` body, which is a method
@@ -84,47 +84,52 @@ fn visit(node: Node<'_>, src: &[u8], out: &mut Vec<ExtractedSymbol>, depth: usiz
         "function_item"
         | "function_signature_item"
         | "function_declaration"
-        | "generator_function_declaration" => {
-            let kind = if rust_impl_member(node) {
-                "method"
-            } else {
-                "function"
-            };
-            push(node, kind, src, out);
-        }
-        "struct_item" => push(node, "struct", src, out),
-        "enum_item" => push(node, "enum", src, out),
-        "trait_item" => push(node, "trait", src, out),
+        | "generator_function_declaration" => Some(if rust_impl_member(node) {
+            "method"
+        } else {
+            "function"
+        }),
         // Rust `type_item` and the Go `type_spec` (under `type_declaration`);
         // a Go `type_spec` whose type child is an `interface_type` node is
         // an interface declaration (docs/implementation/06 §Symbol columns).
-        "type_item" | "type_spec" => push(node, go_type_kind(node), src, out),
-        // Rust `const_item`/`static_item` and the Go `const_spec`.
-        "const_item" | "static_item" | "const_spec" => push(node, "constant", src, out),
-        "mod_item" => push(node, "module", src, out),
-        "method_declaration" | "method_definition" => push(node, "method", src, out),
-        "var_spec" => push(node, "variable", src, out),
-        // Python
-        "class_definition" | "class_declaration" => push(node, "class", src, out),
-        "function_definition" => {
-            let kind = if python_class_member(node) {
-                "method"
-            } else {
-                "function"
-            };
-            push(node, kind, src, out);
-        }
+        "type_item" | "type_spec" => Some(go_type_kind(node)),
+        // Python: a class-body `function_definition` is a method.
+        "function_definition" => Some(if python_class_member(node) {
+            "method"
+        } else {
+            "function"
+        }),
         // JavaScript: module-scope `variable_declarator`s only; a
         // function- or class-valued declarator keeps that kind.
-        "variable_declarator" if javascript_top_level(node) => {
-            push(node, javascript_variable_kind(node), src, out);
-        }
-        _ => {}
+        "variable_declarator" if javascript_top_level(node) => Some(javascript_variable_kind(node)),
+        kind => simple_kind(kind),
+    };
+    if let Some(kind) = kind {
+        push(node, kind, src, out);
     }
     let mut cursor = node.walk();
     let children: Vec<Node<'_>> = node.children(&mut cursor).collect();
     for child in children {
         visit(child, src, out, depth + 1);
+    }
+}
+
+/// The declaration kinds that map one node kind to one fixed vocabulary
+/// entry: the Rust `struct_item`/`enum_item`/`trait_item` shape, the Rust
+/// `const_item`/`static_item` and Go `const_spec` constants, the Rust
+/// `mod_item` module, the method declarations, the Go `var_spec` variable,
+/// and the class definitions.
+fn simple_kind(kind: &str) -> Option<&'static str> {
+    match kind {
+        "struct_item" => Some("struct"),
+        "enum_item" => Some("enum"),
+        "trait_item" => Some("trait"),
+        "const_item" | "static_item" | "const_spec" => Some("constant"),
+        "mod_item" => Some("module"),
+        "method_declaration" | "method_definition" => Some("method"),
+        "var_spec" => Some("variable"),
+        "class_definition" | "class_declaration" => Some("class"),
+        _ => None,
     }
 }
 
