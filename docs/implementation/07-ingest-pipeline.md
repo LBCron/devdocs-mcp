@@ -156,7 +156,7 @@ No state grants a full-document render. `open` serves spans within the token bud
 
 ### Expiry sweep
 
-`sources.license_expires_at` records the lapse date (migration 0002, docs/implementation/06). Every read path and the sync gate runs the sweep first: a row whose recorded expiry has passed and which does not already sit in a terminal refusal flips to `expired`, and the sweep appends one audit line with the operator `auto:expiry`. A row without an expiry never flips. Rows already `denied`, `expired`, or `revoked` stay put.
+`sources.license_expires_at` records the lapse date (migration 0002, docs/implementation/06). Every read path and the sync gate runs the sweep first: a row whose recorded expiry has passed and which does not already sit in a terminal refusal flips to `expired`, and the sweep appends one audit line with the operator `auto:expiry`. A row without an expiry never flips. Rows already `denied`, `expired`, or `revoked` stay put. The boundary is 00:00 UTC of the recorded expiry date: the stored date-only value compares string-wise against the full RFC 3339 instant, so a row flips on the recorded date itself.
 
 ### Registry commands
 

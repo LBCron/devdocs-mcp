@@ -29,7 +29,9 @@ impl Store {
     ///
     /// An illegal move fails with [`StoreError::InvalidTransition`] and
     /// leaves the stored state unchanged with no audit line. Returns the
-    /// number of rows moved.
+    /// number of rows moved. The library matches case-insensitively, and
+    /// the audit line carries the canonical stored spelling of the
+    /// library.
     ///
     /// # Errors
     /// [`StoreError::UnknownLibrary`] when no source row carries the
@@ -61,13 +63,23 @@ impl Store {
 
         let moved = tx
             .execute(
-                "UPDATE sources SET license_status = ?1 WHERE library = ?2",
+                "UPDATE sources SET license_status = ?1 WHERE library = ?2 COLLATE NOCASE",
                 params![to.as_str(), library],
             )
             .map_err(StoreError::Sql)?;
 
+        // The audit line carries the canonical stored spelling of the
+        // library, not the caller's casing.
+        let canonical: String = tx
+            .query_row(
+                "SELECT library FROM sources WHERE library = ?1 COLLATE NOCASE LIMIT 1",
+                params![library],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::Sql)?;
+
         let from = joined_states(&states);
-        append_audit(&tx, library, &from, to.as_str(), operator, note)?;
+        append_audit(&tx, &canonical, &from, to.as_str(), operator, note)?;
         tx.commit().map_err(StoreError::Sql)?;
         Ok(moved)
     }
@@ -191,7 +203,8 @@ fn current_states(
     library: &str,
 ) -> Result<Vec<LicenseStatus>, StoreError> {
     let mut statement = tx.prepare(
-        "SELECT DISTINCT license_status FROM sources WHERE library = ?1 ORDER BY license_status",
+        "SELECT DISTINCT license_status FROM sources \
+         WHERE library = ?1 COLLATE NOCASE ORDER BY license_status",
     )?;
     let rows = statement
         .query_map(params![library], |row| row.get::<_, String>(0))
@@ -305,6 +318,9 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use std::collections::BTreeSet;
+
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
 
     use super::{AUTO_EXPIRY_OPERATOR, Store};
     use crate::migrate::MigrateOptions;
@@ -746,6 +762,77 @@ mod tests {
         assert!(
             keys[0].starts_with("audit:") && keys[1].starts_with(&format!("{}-", keys[0])),
             "the second key must suffix the first: {keys:?}"
+        );
+    }
+
+    /// The expiry boundary is 00:00 UTC of the recorded date: the
+    /// date-only stored value compares string-wise against the full
+    /// RFC 3339 instant, so a row flips on the recorded date itself —
+    /// expiry = today flips, expiry = tomorrow does not, expiry =
+    /// yesterday flips (docs/implementation/07 §Expiry sweep).
+    #[test]
+    fn expiry_boundary_flips_at_0000_utc_of_the_recorded_date() {
+        let today = OffsetDateTime::now_utc().date();
+        let yesterday = today.previous_day().unwrap();
+        let tomorrow = today.next_day().unwrap();
+        let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+
+        let (store, _dir) = store();
+        insert_source(
+            &store,
+            "today",
+            "1.0",
+            ApprovedIndex,
+            Some(&today.to_string()),
+        );
+        insert_source(
+            &store,
+            "yesterday",
+            "1.0",
+            ApprovedIndex,
+            Some(&yesterday.to_string()),
+        );
+        insert_source(
+            &store,
+            "tomorrow",
+            "1.0",
+            ApprovedIndex,
+            Some(&tomorrow.to_string()),
+        );
+
+        let flipped = store.sweep_expired(&now).unwrap();
+        assert_eq!(flipped, 2, "today and yesterday flip; tomorrow does not");
+        assert_eq!(state_of(&store, "today"), Expired);
+        assert_eq!(state_of(&store, "yesterday"), Expired);
+        assert_eq!(state_of(&store, "tomorrow"), ApprovedIndex);
+    }
+
+    /// The license path matches the library case-insensitively: a
+    /// transition naming `ACME` moves the store row `acme`, and the audit
+    /// line carries the canonical stored spelling
+    /// (docs/implementation/07 §License gate).
+    #[test]
+    fn transition_license_matches_the_library_case_insensitively() {
+        let (store, _dir) = store();
+        insert_source(&store, "acme", "1.0", ApprovedIndex, None);
+
+        let moved = store
+            .transition_license("ACME", ApprovedEmbed, "op", None)
+            .unwrap();
+        assert_eq!(moved, 1);
+        assert_eq!(state_of(&store, "acme"), ApprovedEmbed);
+
+        let lines = audit_lines(&store);
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains(", acme, approved_index, approved_embed, "),
+            "canonical spelling in the line: {}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains(", ACME, "),
+            "the caller casing must not appear: {}",
+            lines[0]
         );
     }
 }
