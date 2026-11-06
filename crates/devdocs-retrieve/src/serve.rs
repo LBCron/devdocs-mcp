@@ -8,6 +8,7 @@
 
 use std::path::Path;
 
+use devdocs_model::LicenseStatus;
 use devdocs_model::envelope::{ResultEnvelope, ResultItem, SourceSummary};
 use devdocs_model::error::MissReason;
 use devdocs_model::{VersionStatus, now_rfc3339};
@@ -64,6 +65,10 @@ pub fn search(
     project: &Path,
     plan: &Plan,
 ) -> Result<ResultEnvelope, RetrieveError> {
+    // The expiry sweep runs at the top of every public read path
+    // (docs/implementation/07 §License gate): a source whose recorded
+    // expiry has passed drops out at the next query, not the next sync.
+    store.sweep_expired(&now_rfc3339())?;
     let ctx = ProjectContext::detect(project);
     let resolved = resolve(query, &ctx);
 
@@ -77,7 +82,7 @@ pub fn search(
     // Fuse the rungs and pack under the count cap and the token budget.
     let fused = fuse(plan.rrf_k, &rung_hits);
     if fused.is_empty() {
-        return Err(empty_fusion_miss(store)?);
+        return Err(empty_fusion_miss(store, query.library.as_deref())?);
     }
     let fused = resume_after_cursor(fused, plan.cursor)?;
 
@@ -240,19 +245,52 @@ fn migration_rung(
 
 /// The miss reason for a valid query that serves nothing (exit 2): the
 /// reason distinguishes an empty index from a query that simply matched
-/// nothing (docs/08 §Error codes). The store failure surfaces — the miss
-/// classification must not swallow it (`.agents/instructions/`
-/// error-handling: no swallowed errors).
+/// nothing (docs/08 §Error codes). A direct-name query on a
+/// license-refused source (`expired`, `revoked`, `denied`) names the
+/// refusal instead (docs/implementation/09 §License gate enforcement
+/// points, point 5); plain `search` stays silent for terminal sources —
+/// the store's terminal-license clause already keeps them out of the
+/// rungs. The store failure surfaces — the miss classification must not
+/// swallow it (`.agents/instructions/` error-handling: no swallowed
+/// errors).
 ///
 /// # Errors
 /// [`RetrieveError::Store`] when the source listing fails.
-fn empty_fusion_miss(store: &Store) -> Result<RetrieveError, RetrieveError> {
+fn empty_fusion_miss(
+    store: &Store,
+    named_library: Option<&str>,
+) -> Result<RetrieveError, RetrieveError> {
+    if let Some(library) = named_library
+        && license_blocked(store, library)?
+    {
+        return Ok(MissReason::LicenseBlocked.into());
+    }
     let has_active = store.list_sources()?.iter().any(|s| s.active);
     Ok(if has_active {
         MissReason::LowConfidence.into()
     } else {
         MissReason::NotIndexed.into()
     })
+}
+
+/// Whether the library's stored license state refuses retrieval: the least
+/// privileged of its rows' states sits in the terminal refusal set
+/// (`expired`, `revoked`, `denied`). The sweep has already run at the
+/// entry point, so a passed expiry reads back as `expired`.
+///
+/// # Errors
+/// [`RetrieveError::Store`] when the state read fails.
+fn license_blocked(store: &Store, library: &str) -> Result<bool, RetrieveError> {
+    let states = store.license_states(library)?;
+    Ok(states
+        .iter()
+        .min_by_key(|state| state.rank())
+        .is_some_and(|state| {
+            matches!(
+                state,
+                LicenseStatus::Expired | LicenseStatus::Revoked | LicenseStatus::Denied
+            )
+        }))
 }
 
 /// Cursor resume: continue after the last served chunk id in the same
@@ -321,6 +359,10 @@ fn nearest_older(available: &[Version], served: &Version) -> Option<Version> {
 /// [`RetrieveError::Usage`] for a malformed ref or cursor, [`RetrieveError::Miss`]
 /// on the cold-miss paths, [`RetrieveError::Store`] for store failures.
 pub fn open(store: &Store, doc_ref: &str, plan: &Plan) -> Result<ResultEnvelope, RetrieveError> {
+    // The expiry sweep runs at the top of every public read path
+    // (docs/implementation/07 §License gate): a source whose recorded
+    // expiry has passed drops out at the next query, not the next sync.
+    store.sweep_expired(&now_rfc3339())?;
     let parsed = devdocs_model::docref::ParsedRef::parse(doc_ref)
         .ok_or_else(|| UsageError::BadRef(doc_ref.to_owned()))?;
     let chunk = resolve_chunk(store, &parsed)?;
@@ -328,46 +370,55 @@ pub fn open(store: &Store, doc_ref: &str, plan: &Plan) -> Result<ResultEnvelope,
     // Page the chunk text through the budget. The per-char token cost
     // scales from the stored token_count, so the estimate is stable for
     // identical DB state. The first line always serves — an empty page
-    // would serve nothing and lie about the budget.
-    let total_tokens = u64::from(chunk.token_count).max(1);
-    let total_chars = chunk.text.chars().count();
-    let start = usize::try_from(plan.cursor.unwrap_or(0))
-        .unwrap_or(0)
-        .min(total_chars);
-    // The cursor is a char offset (docs/08 §CLI contract: pagination), so
-    // it maps to a byte offset before slicing — `nth` walks to the char
-    // at `start`, and past the end it maps to the full length.
-    let start_byte = chunk
-        .text
-        .char_indices()
-        .nth(start)
-        .map_or(chunk.text.len(), |(byte, _)| byte);
-    let rest = &chunk.text[start_byte..];
-    let rest_chars = rest.chars().count();
-    let mut page = String::new();
-    let mut used: u64 = 0;
-    for line in rest.split_inclusive('\n') {
-        let cost = (u64::try_from(line.chars().count()).unwrap_or(u64::MAX))
-            .saturating_mul(total_tokens)
-            .saturating_div(u64::try_from(total_chars).unwrap_or(u64::MAX).max(1))
-            .max(1);
-        if !page.is_empty() && used + cost > plan.max_tokens {
-            break;
-        }
-        page.push_str(line);
-        used += cost;
-    }
-    let served_all = page.chars().count() >= rest_chars;
-    let truncated = !served_all;
-    let next_cursor = if truncated {
-        Some(
-            u64::try_from(start + page.chars().count())
-                .unwrap_or(u64::MAX)
-                .to_string(),
-        )
-    } else {
-        None
-    };
+    // would serve nothing and lie about the budget. Below the snippet
+    // stage the render gate keeps the page empty and the pagination never
+    // starts (docs/09 enforcement point 4); the metadata still serves.
+    let (page, used, truncated, next_cursor) =
+        if crate::item::allows_verbatim(&chunk.license_status) {
+            let total_tokens = u64::from(chunk.token_count).max(1);
+            let total_chars = chunk.text.chars().count();
+            let start = usize::try_from(plan.cursor.unwrap_or(0))
+                .unwrap_or(0)
+                .min(total_chars);
+            // The cursor is a char offset (docs/08 §CLI contract:
+            // pagination), so it maps to a byte offset before slicing —
+            // `nth` walks to the char at `start`, and past the end it maps
+            // to the full length.
+            let start_byte = chunk
+                .text
+                .char_indices()
+                .nth(start)
+                .map_or(chunk.text.len(), |(byte, _)| byte);
+            let rest = &chunk.text[start_byte..];
+            let rest_chars = rest.chars().count();
+            let mut page = String::new();
+            let mut used: u64 = 0;
+            for line in rest.split_inclusive('\n') {
+                let cost = (u64::try_from(line.chars().count()).unwrap_or(u64::MAX))
+                    .saturating_mul(total_tokens)
+                    .saturating_div(u64::try_from(total_chars).unwrap_or(u64::MAX).max(1))
+                    .max(1);
+                if !page.is_empty() && used + cost > plan.max_tokens {
+                    break;
+                }
+                page.push_str(line);
+                used += cost;
+            }
+            let served_all = page.chars().count() >= rest_chars;
+            let truncated = !served_all;
+            let next_cursor = if truncated {
+                Some(
+                    u64::try_from(start + page.chars().count())
+                        .unwrap_or(u64::MAX)
+                        .to_string(),
+                )
+            } else {
+                None
+            };
+            (page, used, truncated, next_cursor)
+        } else {
+            (String::new(), 0, false, None)
+        };
 
     let item = served_item(&chunk, doc_ref, Some(&parsed.version), page, used, 1.0);
 
@@ -380,8 +431,14 @@ pub fn open(store: &Store, doc_ref: &str, plan: &Plan) -> Result<ResultEnvelope,
 }
 
 /// Resolves the active source for a parsed ref's `(library, version)`
-/// pair, distinguishing the two cold-miss reasons.
+/// pair, distinguishing the two cold-miss reasons. A direct ref on a
+/// license-refused library (`expired`, `revoked`, `denied`) answers the
+/// license miss before the indexed/absent checks
+/// (docs/implementation/09 §License gate enforcement points, point 5).
 fn resolve_source(store: &Store, library: &str, version: &str) -> Result<i64, RetrieveError> {
+    if license_blocked(store, library)? {
+        return Err(MissReason::LicenseBlocked.into());
+    }
     if store.library_versions(library)?.is_empty() {
         return Err(MissReason::NotIndexed.into());
     }
@@ -417,6 +474,13 @@ fn served_item(
     token_count: u64,
     confidence: f64,
 ) -> ResultItem {
+    // The render gate (docs/09 enforcement point 4): below
+    // `approved_snippet` no verbatim text serves; the metadata still does.
+    let snippet = if crate::item::allows_verbatim(&chunk.license_status) {
+        snippet
+    } else {
+        String::new()
+    };
     ResultItem {
         doc_ref: doc_ref.to_owned(),
         title: chunk
@@ -434,8 +498,8 @@ fn served_item(
         version_status: VersionStatus::Verified,
         content_hash: crate::item::hex(&chunk.content_hash),
         license_status: chunk.license_status.clone(),
-        // Attribution rides on the source record once the M7 license-gate
-        // store step carries it into the read path.
+        // Attribution joins at the command layer from the declarative
+        // config (docs/implementation/07 §License gate).
         attribution: None,
         confidence,
         token_count,
@@ -452,6 +516,9 @@ fn served_item(
 /// on the cold-miss paths, [`RetrieveError::HashMismatch`] when the index
 /// drifted, [`RetrieveError::Store`] for store failures.
 pub fn verify(store: &Store, doc_ref: &str) -> Result<ResultEnvelope, RetrieveError> {
+    // The expiry sweep runs at the top of every public read path
+    // (docs/implementation/07 §License gate).
+    store.sweep_expired(&now_rfc3339())?;
     let parsed = devdocs_model::docref::ParsedRef::parse(doc_ref)
         .ok_or_else(|| UsageError::BadRef(doc_ref.to_owned()))?;
     let chunk = resolve_chunk(store, &parsed)?;
@@ -516,6 +583,9 @@ pub fn versions(
     store: &Store,
     library: &str,
 ) -> Result<ResultEnvelope<SourceSummary>, RetrieveError> {
+    // The expiry sweep runs at the top of every public read path
+    // (docs/implementation/07 §License gate).
+    store.sweep_expired(&now_rfc3339())?;
     if store.library_versions(library)?.is_empty() {
         return Err(MissReason::NotIndexed.into());
     }

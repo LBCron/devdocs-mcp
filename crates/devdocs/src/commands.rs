@@ -118,7 +118,10 @@ pub fn run_search(
     };
     let query = devdocs_retrieve::Query::new(query, library, version);
     let project = project_dir()?;
-    devdocs_retrieve::serve::search(&store, &query, &project, &plan).map_err(map_retrieve_error)
+    let mut envelope = devdocs_retrieve::serve::search(&store, &query, &project, &plan)
+        .map_err(map_retrieve_error)?;
+    attribute_results(config, &mut envelope);
+    Ok(envelope)
 }
 
 /// Runs `devdocs open <ref>`.
@@ -137,7 +140,10 @@ pub fn run_open(
         cursor,
         ..devdocs_retrieve::Plan::defaults()
     };
-    devdocs_retrieve::serve::open(&store, doc_ref, &plan).map_err(map_retrieve_error)
+    let mut envelope =
+        devdocs_retrieve::serve::open(&store, doc_ref, &plan).map_err(map_retrieve_error)?;
+    attribute_results(config, &mut envelope);
+    Ok(envelope)
 }
 
 /// Runs `devdocs verify <ref>`: re-derives the content hash and reports
@@ -149,7 +155,32 @@ pub fn run_open(
 /// cold-miss paths, [`Error::Upstream`] for store failures.
 pub fn run_verify(config: &Config, doc_ref: &str) -> Result<ResultEnvelope, Error> {
     let store = open_store(config, false)?;
-    devdocs_retrieve::serve::verify(&store, doc_ref).map_err(map_retrieve_error)
+    let mut envelope =
+        devdocs_retrieve::serve::verify(&store, doc_ref).map_err(map_retrieve_error)?;
+    attribute_results(config, &mut envelope);
+    Ok(envelope)
+}
+
+/// Joins the declarative config attribution onto the served items by
+/// library (docs/implementation/07 §License gate): the registry entry name
+/// is the published library identity, so the `[sources.<name>].attribution`
+/// line fills `ResultItem.attribution`. An item that already carries an
+/// attribution keeps it; an item whose ref parses to no registry entry
+/// stays unattributed.
+fn attribute_results(config: &Config, envelope: &mut ResultEnvelope) {
+    for item in &mut envelope.results {
+        if item.attribution.is_some() {
+            continue;
+        }
+        let Some(parsed) = devdocs_model::docref::ParsedRef::parse(&item.doc_ref) else {
+            continue;
+        };
+        item.attribution = config
+            .sources
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(&parsed.library))
+            .and_then(|(_, entry)| entry.attribution.clone());
+    }
 }
 
 /// Runs `devdocs versions <library>`.

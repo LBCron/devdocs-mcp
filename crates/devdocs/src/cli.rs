@@ -438,8 +438,9 @@ fn summarize_search(envelope: &devdocs_model::ResultEnvelope) -> String {
     out
 }
 
-/// The human-readable `open` output: the served text, then the
-/// continuation notice when the budget cut the chunk.
+/// The human-readable `open` output: the served text, the attribution
+/// line when one joins from the config, then the continuation notice when
+/// the budget cut the chunk.
 fn summarize_open(envelope: &devdocs_model::ResultEnvelope) -> String {
     use std::fmt::Write as _;
 
@@ -448,6 +449,11 @@ fn summarize_open(envelope: &devdocs_model::ResultEnvelope) -> String {
         .first()
         .map(|item| item.snippet.clone())
         .unwrap_or_default();
+    if let Some(item) = envelope.results.first()
+        && let Some(attribution) = &item.attribution
+    {
+        let _ = writeln!(out, "\n{attribution}");
+    }
     if envelope.truncated
         && let Some(cursor) = &envelope.next_cursor
     {

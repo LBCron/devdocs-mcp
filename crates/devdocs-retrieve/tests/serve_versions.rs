@@ -404,11 +404,16 @@ fn open_of_an_unindexed_library_misses() {
 }
 
 /// Seeds `acme` with two headerless chunks (content before the first
-/// heading).
+/// heading), approved to the snippet stage so `open` serves verbatim
+/// text.
 fn seeded_headless_chunks() -> (tempfile::TempDir, Store) {
     let dir = tempdir().unwrap();
     let store = devdocs_testkit::open_migrated_and(&dir.path().join("docs.db"), |conn| {
         let source = devdocs_testkit::seed_source(conn, "acme", true)?;
+        conn.execute(
+            "UPDATE sources SET license_status = 'approved_snippet' WHERE source_id = ?1",
+            [source],
+        )?;
         devdocs_testkit::seed_chunk(conn, source, 0, "[]", None, "Intro text before a heading.")?;
         devdocs_testkit::seed_chunk(conn, source, 1, "[]", None, "More head content.")?;
         Ok(())
@@ -431,11 +436,16 @@ fn open_serves_headerless_chunks_through_the_placeholder_ref() {
 
 /// Seeds `acme` with one multibyte chunk whose every line ends in a wide
 /// character, so a char-offset cursor sliced as a byte offset would land
-/// inside a character and panic.
+/// inside a character and panic. The source sits at the snippet stage so
+/// the pages serve verbatim text.
 fn seeded_multibyte_chunk() -> (tempfile::TempDir, Store) {
     let dir = tempdir().unwrap();
     let store = devdocs_testkit::open_migrated_and(&dir.path().join("docs.db"), |conn| {
         let source = devdocs_testkit::seed_source(conn, "acme", true)?;
+        conn.execute(
+            "UPDATE sources SET license_status = 'approved_snippet' WHERE source_id = ?1",
+            [source],
+        )?;
         devdocs_testkit::seed_chunk(conn, source, 0, "[\"Guide\"]", None, "A ›\nB →\nC ∴\n")?;
         Ok(())
     })

@@ -89,6 +89,74 @@ pub fn seed_source_status(
     Ok(store)
 }
 
+/// Approves every source row of `library` in the store at `path` up to
+/// `to`, walking the forward-only progression one
+/// [`Store::transition_license`] step at a time and recording `operator`
+/// in the audit. The retrieval tests reach the snippet stage this way:
+/// the ingest bootstrap lands at the publish floor (`approved_index`),
+/// which gates verbatim text, and the transition CLI is the M7 CLI
+/// step's surface.
+pub fn approve_source_to(
+    path: &Path,
+    library: &str,
+    to: devdocs_model::LicenseStatus,
+    operator: &str,
+) -> Result<(), StoreError> {
+    use devdocs_model::LicenseStatus;
+    let progression = [
+        LicenseStatus::ApprovedFetch,
+        LicenseStatus::ApprovedIndex,
+        LicenseStatus::ApprovedEmbed,
+        LicenseStatus::ApprovedCache,
+        LicenseStatus::ApprovedSnippet,
+    ];
+    let store = open_migrated(path)?;
+    let current = store
+        .license_states(library)?
+        .into_iter()
+        .min_by_key(|state| state.rank())
+        .ok_or(StoreError::UnknownLibrary {
+            library: library.to_owned(),
+        })?;
+    for stage in progression
+        .iter()
+        .copied()
+        .skip_while(|stage| stage.rank() <= current.rank())
+        .take_while(|stage| stage.rank() <= to.rank())
+    {
+        store.transition_license(library, stage, operator, None)?;
+    }
+    Ok(())
+}
+
+/// Moves every source row of `library` in the store at `path` one
+/// transition to `to` through [`Store::transition_license`], recording
+/// `operator` in the audit. The retrieval tests drive the refusal states
+/// (`revoked`, `expired`) this way — the same move the transition CLI
+/// makes.
+pub fn transition_source(
+    path: &Path,
+    library: &str,
+    to: devdocs_model::LicenseStatus,
+    operator: &str,
+) -> Result<usize, StoreError> {
+    open_migrated(path)?.transition_license(library, to, operator, None)
+}
+
+/// Sets the expiry date on every source row of `library` in the store at
+/// `path`. The retrieval tests plant a past or a future date this way;
+/// the next read-path sweep decides whether the rows flip to `expired`.
+pub fn set_source_expiry(path: &Path, library: &str, date: &str) -> Result<(), StoreError> {
+    let conn = Connection::open(path).map_err(StoreError::Sql)?;
+    conn.execute(
+        "UPDATE sources SET license_expires_at = ?2 WHERE library = ?1 COLLATE NOCASE",
+        rusqlite::params![library, date],
+    )
+    .map_err(StoreError::Sql)?;
+    drop(conn);
+    Ok(())
+}
+
 /// Inserts one source row (`llms_txt`, `approved_index`) and returns its id.
 pub fn seed_source(conn: &Connection, library: &str, active: bool) -> Result<i64, rusqlite::Error> {
     conn.execute(

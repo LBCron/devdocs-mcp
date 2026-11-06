@@ -163,7 +163,8 @@ fn write_config(root: &Path) -> PathBuf {
             "[sources.acme]\n",
             "kind = \"llms_txt\"\n",
             "url = \"https://docs.acme.test/llms.txt\"\n",
-            "license = \"MIT\"\n"
+            "license = \"MIT\"\n",
+            "attribution = \"© Acme Corp documentation\"\n"
         ),
     )
     .expect("config written");
@@ -190,8 +191,9 @@ fn add_fixture_version(env: &Env, dir: &Path, config: &Path, version: &str, resp
     assert_eq!(code, 0, "add {version} failed: {stderr}");
 }
 
-/// An indexed fixture corpus: acme at versions 1.0 and 2.0. Returns the
-/// environment and the config path every CLI run needs.
+/// An indexed fixture corpus: acme at versions 1.0 and 2.0, approved up
+/// to the snippet stage. Returns the environment and the config path
+/// every CLI run needs.
 pub fn indexed_env() -> (Env, PathBuf) {
     let env = Env::new();
     let dir = env.root.join("fixture");
@@ -199,6 +201,17 @@ pub fn indexed_env() -> (Env, PathBuf) {
     let config = write_config(&env.root);
     add_fixture_version(&env, &dir, &config, "1.0", &acme_responses(INTRO_V1));
     add_fixture_version(&env, &dir, &config, "2.0", &acme_responses(INTRO_V2));
+    // The ingest bootstrap lands at the publish floor (`approved_index`),
+    // which gates verbatim text (docs/09 enforcement point 4); the
+    // verbatim-serving tests need the snippet stage. The operator walks
+    // the progression one transition at a time, as the CLI would.
+    devdocs_testkit::approve_source_to(
+        &env.root.join("data").join("docs.db"),
+        "acme",
+        devdocs_model::LicenseStatus::ApprovedSnippet,
+        "test:bootstrap",
+    )
+    .expect("acme reaches the snippet stage");
     (env, config)
 }
 

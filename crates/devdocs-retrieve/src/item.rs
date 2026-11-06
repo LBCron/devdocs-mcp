@@ -7,6 +7,7 @@
 use devdocs_model::VersionStatus;
 use devdocs_model::docref::ParsedRef;
 use devdocs_model::envelope::ResultItem;
+use devdocs_model::source::LicenseStatus;
 use devdocs_store::Hit;
 
 /// The path segment for a chunk without a section path (content before
@@ -14,11 +15,23 @@ use devdocs_store::Hit;
 /// serves under this name.
 const HEAD_SEGMENT: &str = "index";
 
+/// Whether the license state grants verbatim text: only `approved_snippet`
+/// serves the snippet and text fields; every lower state stays queryable
+/// with its metadata, but gates the verbatim text off
+/// (docs/implementation/09 §License gate enforcement points, point 4). An
+/// empty or unknown license string gates off defensively.
+#[must_use]
+pub fn allows_verbatim(license_status: &str) -> bool {
+    LicenseStatus::parse(license_status) == Some(LicenseStatus::ApprovedSnippet)
+}
+
 /// Maps a store hit onto the envelope result item.
 ///
 /// `confidence` is the fusion score; `status` comes from the version
 /// policy. The ref derives from the library, version, slugified section
 /// path, and the slugified symbol as fragment (absent without a symbol).
+/// The snippet serves only under [`allows_verbatim`]: a lower approved
+/// state keeps the metadata but carries no verbatim text.
 #[must_use]
 pub fn to_result_item(
     hit: &Hit,
@@ -26,11 +39,16 @@ pub fn to_result_item(
     status: VersionStatus,
     confidence: f64,
 ) -> ResultItem {
+    let snippet = if allows_verbatim(&hit.license_status) {
+        hit.snippet.clone().unwrap_or_else(|| hit.text.clone())
+    } else {
+        String::new()
+    };
     ResultItem {
         doc_ref: derive_ref(hit),
         title: hit.section_path.last().unwrap_or(&hit.library).clone(),
         section: hit.section_path.join(" > "),
-        snippet: hit.snippet.clone().unwrap_or_else(|| hit.text.clone()),
+        snippet,
         examples: Vec::new(),
         source_url: hit.source_url.clone(),
         source_commit: hit.source_commit.clone().unwrap_or_default(),
@@ -39,8 +57,8 @@ pub fn to_result_item(
         version_status: status,
         content_hash: hex(&hit.content_hash),
         license_status: hit.license_status.clone(),
-        // Attribution rides on the source record once the M7 license-gate
-        // store step carries it into the read path.
+        // Attribution joins at the command layer from the declarative
+        // config (docs/implementation/07 §License gate).
         attribution: None,
         confidence,
         token_count: u64::from(hit.token_count),
@@ -210,15 +228,16 @@ mod tests {
     }
 
     /// The item carries every envelope field, with the hash hex-encoded
-    /// and the snippet passed through.
+    /// and the snippet passed through at the snippet stage.
     #[test]
     fn items_carry_the_envelope_fields() {
-        let hit = hit(
+        let mut hit = hit(
             "next.js",
             "16.2.9",
             &["Routing", "use_router"],
             Some("use_router"),
         );
+        hit.license_status = "approved_snippet".to_owned();
         let item = to_result_item(&hit, Some("16.2.9"), VersionStatus::Verified, 0.94);
         assert_eq!(
             item.doc_ref,
@@ -231,8 +250,54 @@ mod tests {
         assert_eq!(item.served_version, "16.2.9");
         assert_eq!(item.version_status, VersionStatus::Verified);
         assert_eq!(item.content_hash, "ab".repeat(32));
-        assert_eq!(item.license_status, "approved_index");
+        assert_eq!(item.license_status, "approved_snippet");
         assert_eq!((item.confidence, item.token_count), (0.94, 42));
+    }
+
+    /// The render gate (docs/09 enforcement point 4): verbatim text serves
+    /// only under `approved_snippet`; every lower state keeps the metadata
+    /// but the snippet comes out empty, and an unknown or empty license
+    /// string gates off defensively.
+    #[test]
+    fn verbatim_text_gates_at_the_snippet_stage() {
+        let mut hit = hit("next.js", "16.2.9", &["Routing"], Some("use_router"));
+        hit.license_status = "approved_snippet".to_owned();
+        let item = to_result_item(&hit, None, VersionStatus::Verified, 1.0);
+        assert_eq!(item.snippet, "the <mark>routing</mark> layer");
+        assert_eq!(item.title, "Routing");
+        assert_eq!(item.source_url, "https://example.test/next");
+
+        hit.license_status = "approved_index".to_owned();
+        let item = to_result_item(&hit, None, VersionStatus::Verified, 1.0);
+        assert_eq!(item.snippet, "");
+        assert_eq!(item.title, "Routing");
+        assert_eq!(item.section, "Routing");
+        assert_eq!(item.source_url, "https://example.test/next");
+        assert_eq!(item.token_count, 42);
+
+        hit.license_status = "approved_fetch".to_owned();
+        assert_eq!(
+            to_result_item(&hit, None, VersionStatus::Verified, 1.0).snippet,
+            ""
+        );
+
+        hit.license_status = "denied".to_owned();
+        assert_eq!(
+            to_result_item(&hit, None, VersionStatus::Verified, 1.0).snippet,
+            ""
+        );
+
+        hit.license_status = String::new();
+        assert_eq!(
+            to_result_item(&hit, None, VersionStatus::Verified, 1.0).snippet,
+            ""
+        );
+
+        hit.license_status = "garbage".to_owned();
+        assert_eq!(
+            to_result_item(&hit, None, VersionStatus::Verified, 1.0).snippet,
+            ""
+        );
     }
 
     /// Ref derivation slugifies the path and the symbol.
