@@ -223,6 +223,16 @@ mod tests {
         store
     }
 
+    /// A query that normalizes to nothing serves nothing: the rung returns
+    /// before any store query.
+    #[test]
+    fn symbol_rung_serves_nothing_for_an_empty_normalized_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = symbol_store(&dir, "next.js", "16.2.9", &[("useRouter", "hook")]);
+        let hits = symbol_rung(&store, "()", Scope::All, 32).unwrap();
+        assert_eq!(hits, [] as [devdocs_store::Hit; 0]);
+    }
+
     /// The rung finds an exact symbol through the store.
     #[test]
     fn symbol_rung_matches_exact_symbols() {

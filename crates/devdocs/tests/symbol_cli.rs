@@ -299,3 +299,45 @@ fn malformed_target_is_a_usage_error() {
     let envelope: ErrorEnvelope = serde_json::from_str(stderr.trim()).expect("stderr is JSON");
     assert_eq!(envelope.error, "USAGE");
 }
+
+/// Without `--json`, the symbol lookup prints the human summary line: the
+/// doc ref, the title, and the token count.
+#[test]
+fn symbol_without_json_prints_the_human_summary() {
+    let (env, config) = symbol_env();
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "symbol",
+            "acme@1.0",
+            "makeWidget()",
+            "--config",
+            config.to_str().expect("config path"),
+        ],
+    );
+    assert_eq!(code, 0, "symbol failed: {stderr}");
+    assert!(
+        stdout.contains("docs://acme/v1.0/") && stdout.contains("tokens"),
+        "expected a summary line, got: {stdout}"
+    );
+}
+
+/// An empty target is a usage error: exit 1, `USAGE`.
+#[test]
+fn an_empty_target_is_a_usage_error() {
+    let (env, config) = symbol_env();
+    let (code, _stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "symbol",
+            "",
+            "makeWidget",
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+        ],
+    );
+    assert_eq!(code, 1, "{stderr}");
+    let envelope: ErrorEnvelope = serde_json::from_str(stderr.trim()).expect("stderr is JSON");
+    assert_eq!(envelope.error, "USAGE");
+}

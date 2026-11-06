@@ -10,8 +10,9 @@ use devdocs_model::VersionStatus;
 use devdocs_retrieve::Plan;
 use devdocs_retrieve::Query;
 use devdocs_retrieve::RetrieveError;
-use devdocs_retrieve::serve::{open, search, versions};
+use devdocs_retrieve::serve::{open, search, symbol, versions};
 use devdocs_store::Store;
+use rusqlite::Connection;
 use tempfile::tempdir;
 
 /// Seeds one active and one inactive source of `acme`, plus one active
@@ -471,4 +472,23 @@ fn open_resumes_a_multibyte_chunk_without_panic() {
     }
     assert!(served.len() > 1, "the budget must cut the chunk");
     assert_eq!(served.concat(), full_text);
+}
+
+/// A symbol-rung store failure surfaces as a store failure through both
+/// the search pipeline and the exact lookup — a corrupted index must not
+/// masquerade as a miss.
+#[test]
+fn a_store_failure_propagates_from_the_symbol_rung() {
+    let (dir, store) = seeded();
+    let conn = Connection::open(dir.path().join("docs.db")).unwrap();
+    conn.execute("DROP TABLE symbols", []).unwrap();
+    drop(conn);
+
+    let plan = Plan::defaults();
+    let query = Query::new("middleware", None, None);
+    let error = search(&store, &query, std::path::Path::new("."), &plan).unwrap_err();
+    assert!(matches!(error, RetrieveError::Store(_)), "{error}");
+
+    let error = symbol(&store, "acme", None, "makeWidget", &plan).unwrap_err();
+    assert!(matches!(error, RetrieveError::Store(_)), "{error}");
 }

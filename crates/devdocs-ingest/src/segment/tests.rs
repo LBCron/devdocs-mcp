@@ -118,6 +118,31 @@ fn midsize_block_splits_with_overlap() {
     );
 }
 
+/// A midsize split flushes the blocks packed ahead of it: the prose chunk
+/// closes before the split pieces begin, and the first split piece rides
+/// the block's symbols.
+#[test]
+fn midsize_split_flushes_the_packed_current() {
+    // 45 words ≈ 62 heuristic tokens: inside the (target, 2× target) band
+    // of the 40-token segmenter, with a small paragraph packed ahead.
+    let words = (0..45).map(|i| format!("tok{i}")).collect::<Vec<_>>();
+    let page = format!("## Mid\n\nsmall prose\n\n{}\n", words.join(" "));
+    let chunks = small().segment("acme", "1.0", &page);
+    assert!(
+        chunks.len() >= 3,
+        "expected the prose chunk plus split pieces: {chunks:?}"
+    );
+    assert!(
+        chunks[0].body.contains("small prose"),
+        "the first chunk is the flushed prose, got: {:?}",
+        chunks[0].body
+    );
+    assert!(
+        !chunks[1].body.contains("small prose"),
+        "the split pieces do not re-serve the flushed prose"
+    );
+}
+
 /// A fenced code block never splits, even when it exceeds the target.
 #[test]
 fn fence_never_splits() {
@@ -430,11 +455,18 @@ fn fence_probe_handles_marker_lines_and_unclosed_fences() {
 /// (docs/implementation/07 §Normalization pipeline, the ingest events).
 #[test]
 fn unknown_fence_languages_are_counted() {
-    let (chunks, stats) = Segmenter::new().unwrap().segment_with_stats(
-        "lib",
-        "1.0",
-        "# T\n\n```cobol\nMOVE A TO B.\n```\n\nbody\n",
-    );
+    // The debug event formats only under a subscriber that enables it.
+    let subscriber = tracing_subscriber::FmtSubscriber::builder()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(std::io::sink)
+        .finish();
+    let (chunks, stats) = tracing::subscriber::with_default(subscriber, || {
+        Segmenter::new().unwrap().segment_with_stats(
+            "lib",
+            "1.0",
+            "# T\n\n```cobol\nMOVE A TO B.\n```\n\nbody\n",
+        )
+    });
     assert_ne!(chunks, [] as [super::PreparedChunk; 0]);
     assert_eq!(stats.unknown_fence_languages, 1);
     assert_eq!(stats.skipped_blocks, 0);

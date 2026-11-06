@@ -191,4 +191,22 @@ mod tests {
         assert_eq!(refs[0].symbol.as_deref(), Some("rewriteMiddleware"));
         assert_eq!(refs[0].rank, 1, "the exact symbol hit retrieves first");
     }
+
+    /// A store failure surfaces as the eval store error — a corrupted
+    /// index must not grade as an empty retrieval.
+    #[test]
+    fn a_store_failure_surfaces_as_an_eval_error() {
+        let dir = TempDir::new().unwrap();
+        let store = seeded(&dir);
+        let path = dir.path().join("seed.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute("DROP TABLE symbols", []).unwrap();
+        drop(conn);
+
+        let error = retrieve(&store, &question(TaskType::ExactApi, "next.js")).unwrap_err();
+        assert!(
+            matches!(error, crate::error::EvalError::Store(_)),
+            "{error}"
+        );
+    }
 }

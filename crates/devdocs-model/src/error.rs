@@ -358,6 +358,13 @@ mod tests {
         );
     }
 
+    /// The miss reason prints its stable `snake_case` token — the log-line
+    /// shape the envelope JSON builds independently via serde.
+    #[test]
+    fn miss_reasons_print_their_stable_tokens() {
+        assert_eq!(MissReason::SymbolAbsent.to_string(), "symbol_absent");
+    }
+
     /// The `CONFIG_INVALID` envelope carries the failing key path; the
     /// other envelopes omit it.
     #[test]
