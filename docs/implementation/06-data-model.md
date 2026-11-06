@@ -3,7 +3,7 @@ type: guide
 title: Data Model
 description: The complete SQLite schema for devdocs, the FTS5 configuration, the migration system, and the hashing policy. Targets SQLite 3.54 bundled in rusqlite 0.41.
 tags: [devdocs, sqlite, fts5, schema, migrations]
-timestamp: 2026-11-02T00:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -120,6 +120,20 @@ CREATE TABLE session_trajectory (
   PRIMARY KEY (session_id, chunk_id)
 );
 ```
+
+## License-gate state (migration 0002)
+
+Migration `0002_license_gate.sql` adds one column to `sources`:
+
+```sql
+ALTER TABLE sources ADD COLUMN license_expires_at TEXT;
+```
+
+The column is nullable and non-destructive: existing sources carry no expiry and keep their state. The date is `YYYY-MM-DD`. The expiry sweep at every read path and the sync gate flips rows whose recorded expiry has passed to `expired` (docs/implementation/07 §Expiry sweep).
+
+The store is authoritative for the mutable license state: `sources.license_status`, `sources.license_expires_at`, and the audit lines in `meta`. An audit row keys `audit:<rfc3339 nanosecond timestamp>`; a same-instant collision takes a `-<n>` suffix on the key. The value is `(audit:<ts>, library, from, to, operator[, note])`; `from` joins the distinct row states with `|` when the library's rows disagree (docs/implementation/07 §License gate).
+
+The `LicenseStatus::can_transition_to` test in `crates/devdocs-model/src/source.rs` mirrors the docs/07 transition table move for move — 24 legal moves, everything else refused.
 
 ## FTS5 design decisions
 

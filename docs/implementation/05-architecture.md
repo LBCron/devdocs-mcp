@@ -3,7 +3,7 @@ type: guide
 title: Architecture
 description: The layered design of devdocs as crates and types: layer map, crate graph, data flow, error model, concurrency model, configuration, storage layout, and the latency budget.
 tags: [devdocs, architecture, crates, errors, config]
-timestamp: 2026-10-31T00:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -205,11 +205,12 @@ rrf_k = 60
 kind = "llms_txt"
 url = "https://nextjs.org/docs/llms.txt"
 license = "MIT"
-status = "approved_snippet"
+attribution = "docs (c) Vercel"
+expires = "2027-11-06"
 refresh_days = 2
 ```
 
-The `[sources]` table is the license registry. The state machine semantics live in [07](07-ingest-pipeline.md) and [09](09-security-implementation.md).
+The `[sources]` table is the declarative half of the license registry: it names the origin, the license SPDX id, and the optional `attribution` and `expires` lines. It carries no `status`. A config entry with a `status` key fails validation with the key path `sources.<name>.status`. The mutable license state lives in the SQLite store — `sources.license_status`, `sources.license_expires_at`, and the audit lines in `meta` (docs/implementation/06 §License-gate state). `devdocs source approve` and `deny` move the state; the state machine semantics live in [07](07-ingest-pipeline.md) and [09](09-security-implementation.md).
 
 ## Storage layout
 

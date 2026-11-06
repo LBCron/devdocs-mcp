@@ -3,7 +3,7 @@ type: guide
 title: Ingest Pipeline (L1 + L2)
 description: The source adapters, the fetch guard, the license gate, the normalization and segmentation pipeline, dedup, the injection filter, and the refresh policy for devdocs.
 tags: [devdocs, ingest, llms-txt, git, openapi, html, segmentation]
-timestamp: 2026-11-06T19:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -120,7 +120,9 @@ Implementation: reqwest 0.13 with `dns_resolver(Arc<dyn Resolve>)`. The custom r
 
 ## License gate
 
-The gate runs before any fetch, embed, or serve decision for a source (research: security-licensing.md §3). The registry lives in the config `[sources]` table. Deny by default: a source with no entry is `pending_review` and cannot fetch. The library name a run publishes under is the registry entry: `IngestJob::run` refuses a library argument that does not match the grant's `[sources.<name>]` key.
+The gate runs before any fetch, embed, or serve decision for a source (research: security-licensing.md §3). Deny by default: a source with no registry entry is `pending_review` and cannot fetch. The library name a run publishes under is the registry entry: `IngestJob::run` refuses a library argument that does not match the grant's `[sources.<name>]` key.
+
+The SQLite store is authoritative for the mutable license state: `sources.license_status`, `sources.license_expires_at`, and the audit lines in `meta` (docs/implementation/06 §License-gate state). The config entry `[sources.<name>]` is declarative only: `url`, the license SPDX id, and the optional `attribution` and `expires` lines. A config entry that carries `status` fails validation with the key path `sources.<name>.status` (docs/implementation/05 §Configuration).
 
 State machine:
 
@@ -137,14 +139,38 @@ terminal: denied | expired | revoked
 | approved_index → approved_embed | Rights for derivative embeddings (usually same as index) |
 | any → denied | Operator decision, robots disallow, or ToS conflict |
 | any → expired / revoked | Takedown contact fires, or the recorded expiry passes |
+| denied → pending_review | Operator-only decision. The sole exit from a refusal. Requires a non-empty note |
 
-Runtime consequences:
+`expired` and `revoked` are absorbing: no transition leaves them. The store runs the state check, the state update, and the audit line in one transaction, so an illegal move leaves no trace.
 
-- `approved_snippet` or below never emits a full-document render. Only spans within the token budget.
-- Revoked or expired sources serve `not_available` and drop from search results at the next index update.
-- Attribution: sources whose license requires it carry the attribution line in CLI `open_doc` output and in the MCP result metadata.
+Runtime consequences per state:
 
-`devdocs source approve <library> <stage>` moves the state and stamps the operator and date. Every transition appends to `meta` as an audit line: `(audit:<ts>, library, from, to, operator)`.
+| State | Query hit | Verbatim text | Full-document render |
+|---|---|---|---|
+| `pending_review` | No indexed content to hit | No | No |
+| `approved_fetch` … `approved_cache` | Yes, metadata only | No | No |
+| `approved_snippet` | Yes | Yes, spans within the token budget | No |
+| `denied`, `expired`, `revoked` | `search` drops them silently; a direct-name query and `open` answer `NOT_AVAILABLE`, exit 2, `miss_reason: license_blocked`, hint `run: devdocs source list` | No | No |
+
+No state grants a full-document render. `open` serves spans within the token budget only. Only `approved_snippet` serves verbatim text; the approved states below it stay queryable but serve no verbatim text.
+
+### Expiry sweep
+
+`sources.license_expires_at` records the lapse date (migration 0002, docs/implementation/06). Every read path and the sync gate runs the sweep first: a row whose recorded expiry has passed and which does not already sit in a terminal refusal flips to `expired`, and the sweep appends one audit line with the operator `auto:expiry`. A row without an expiry never flips. Rows already `denied`, `expired`, or `revoked` stay put.
+
+### Registry commands
+
+```text
+devdocs source approve <library> <stage> [--note N] [--operator O] [--expires D]
+devdocs source deny <library> [--note N] [--operator O]
+devdocs source list
+```
+
+`approve` moves the library's rows to `stage` and stamps the operator and the instant on the audit line. `--expires` records the lapse date the sweep enforces. `deny` records the refusal. `source list` runs the sweep first, so the printed states reflect passed expiries. `denied → pending_review` requires `--note`.
+
+Every transition appends one audit line to `meta`. The key is `audit:<rfc3339 nanosecond timestamp>`; a same-instant collision takes a `-<n>` suffix. The value is `(audit:<ts>, library, from, to, operator[, note])`. `from` joins the distinct row states with `|` when the library's rows disagree.
+
+Attribution: the operator records the `attribution` line on the config entry. `open` joins it into `ResultItem.attribution` — the MCP seam — and prints it in human output (docs/implementation/05 §Configuration).
 
 ## Normalization pipeline
 
@@ -204,5 +230,5 @@ Velocity-stratified, config-driven (research: architecture.md §L1). Defaults:
 | Everything else | 30 | on demand only |
 
 - `devdocs sync` checks all approved sources against `refresh_days`, respects ETag/If-None-Match for HTTP sources, and skips anything unchanged by hash.
-- Never refresh a source whose license state is below `approved_fetch`. Expired or revoked states block sync and emit `not_available` at query time.
+- Never refresh a source whose stored license state is below `approved_fetch`. The sync gate reads the store authority and runs the expiry sweep first. A terminal state (`denied`, `expired`, `revoked`) blocks sync; terminal sources emit `not_available` on direct queries and drop from search (docs/implementation/07 §License gate).
 - Every response carries `fetched_at`, so staleness is visible at answer time (research: architecture.md, risk table).

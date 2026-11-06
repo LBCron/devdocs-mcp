@@ -3,7 +3,7 @@ type: guide
 title: Retrieval and Interfaces (L3 + L4)
 description: The hybrid retrieval pipeline, version resolution, budget enforcement, fallback ladder, the result shape, the full CLI contract, and the MCP adapter.
 tags: [devdocs, retrieval, cli, mcp, rrf, max-tokens]
-timestamp: 2026-11-06T18:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -82,7 +82,7 @@ Entered only on low confidence or an explicit `miss_reason` match (research: ret
 
 A cold miss returns `not_indexed` with a sync hint. An abstention is a valid result (research: retrieval-design.md §3.7).
 
-`miss_reason` values: `not_indexed`, `version_absent`, `license_blocked`, `quarantined_only`, `low_confidence`. The JSON error on exit 2 carries `miss_reason` and a `hint`; a cold miss — the library or the requested version absent — carries `error = "PKG_NOT_INDEXED"`, every other valid-query miss `error = "NO_RESULT"` (docs/implementation/05 §Error model).
+`miss_reason` values: `not_indexed`, `version_absent`, `license_blocked`, `quarantined_only`, `low_confidence`. The JSON error on exit 2 carries `miss_reason` and a `hint`; a cold miss — the library or the requested version absent — carries `error = "PKG_NOT_INDEXED"`; a license-blocked miss carries `error = "NOT_AVAILABLE"` with `miss_reason: license_blocked` (docs/implementation/09 §License gate enforcement points); every other valid-query miss `error = "NO_RESULT"` (docs/implementation/05 §Error model).
 
 ## Result envelope
 
@@ -130,7 +130,9 @@ Commands:
 | `devdocs open <ref> [--cursor C] [--max-tokens T] [--json]` | Read one section by ref |
 | `devdocs verify <ref> [--json]` | Re-derive and compare the content hash |
 | `devdocs versions <library> [--json]` | List the active versions a library serves |
-| `devdocs source approve|deny|list` | License registry operations |
+| `devdocs source approve <library> <stage> [--note N] [--operator O] [--expires D]` | Move the library to the stage, stamp the operator, record the expiry |
+| `devdocs source deny <library> [--note N] [--operator O]` | Record the refusal |
+| `devdocs source list` | Registry entries with their store-authoritative states; runs the expiry sweep first |
 | `devdocs skill install [--path P]` | Write the SKILL.md companion file |
 | `devdocs mcp [--transport stdio]` | Start the MCP server on stdio |
 | `devdocs db migrate|vacuum|stats|quarantine list` | Database operations |
@@ -207,4 +209,4 @@ Stable `UPPER_SNAKE` codes in JSON errors and MCP errors:
 | `UPSTREAM_ERROR` | 3 | Network, git, or parse failure |
 | `BUDGET_EXCEEDED` | 4 | Budget consumed with no deliverable content |
 | `HASH_MISMATCH` | 3 | Index drifted. Re-sync suggested |
-| `NOT_AVAILABLE` | 2 | Source expired or revoked |
+| `NOT_AVAILABLE` | 2 | The license gate refused the source: `expired`, `revoked`, or `denied`. Carries `miss_reason: license_blocked`; the hint names `run: devdocs source list` |
