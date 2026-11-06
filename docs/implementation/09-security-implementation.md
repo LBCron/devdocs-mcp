@@ -3,7 +3,7 @@ type: guide
 title: Security Implementation
 description: The mapping from the research threat model to concrete controls in code, the fetch-guard invariants and tests, injection-filter operations, storage controls, and the security checklist.
 tags: [devdocs, security, ssrf, injection, licensing]
-timestamp: 2026-11-07T13:00:00Z
+timestamp: 2026-11-07T03:05:11Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -85,7 +85,7 @@ The state machine is defined in [07](07-ingest-pipeline.md). The SQLite store is
 
 1. The ingest planner refuses sources below `approved_fetch`.
 2. The store refuses to flip a source to `active` below `approved_index`, and publishing a terminal license state (`denied`, `expired`, `revoked`) deactivates the source, withdrawing it from search. The publish transaction re-reads the stored license states inside its own commit: a terminal state on any row of the library deactivates every row of the library, and that deactivation commits before the refusal returns, so a revocation that lands while a re-sync is in flight wins over the stale record the caller holds.
-3. The retrieve layer filters on the stored license state at query time. A source whose stored state is terminal drops out of results at the next query: `search` drops it silently, and a direct-name query or `open` answers `NOT_AVAILABLE` with `miss_reason: license_blocked`. No re-sync is needed — the check reads the store, so `devdocs source deny` reaches the query at once. The same read paths run the expiry sweep: a passed `sources.license_expires_at` flips the rows to `expired` and appends an audit line with the operator `auto:expiry` (docs/implementation/07 §Expiry sweep). An `add` run for a URL whose gate refusal fires withdraws the published generation before the error returns; the withdrawal is mandatory, and when the store cannot record it the command returns `UPSTREAM_ERROR` instead of `FETCH_BLOCKED`.
+3. The retrieve layer filters on the stored license state at query time. A source whose stored state is terminal drops out of results at the next query: `search` drops it silently, and a direct-name query or `open` answers `NOT_AVAILABLE` with `miss_reason: license_blocked`. No re-sync is needed — the check reads the store, so `devdocs source deny` reaches the query at once. The same read paths run the expiry sweep: a passed `sources.license_expires_at` flips the rows to `expired` and appends an audit line with the operator `auto:expiry` (docs/implementation/07 §Expiry sweep). An `add` run for a URL whose gate refusal fires withdraws the published generation before the error returns; the withdrawal is mandatory, and when the store cannot record it the command returns `UPSTREAM_ERROR` instead of `FETCH_BLOCKED`. The discovery surfaces (`list`, `versions`) report the indexed state and do not refuse a terminal library — only the content paths (`search`, `open`, `verify`) filter — so terminal content never serves while an operator can still discover what is blocked.
 4. Output rendering enforces the snippet-vs-full rule per source state. Only `approved_snippet` serves verbatim text; no state grants a full-document render.
 
 All four points are implemented, each with its own tests (docs/implementation/13 §M7).
