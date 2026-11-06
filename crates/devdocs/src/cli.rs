@@ -507,7 +507,7 @@ fn skill_install(path: Option<&std::path::Path>, force: bool) -> Result<(), Erro
             )),
             IoTarget::File if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 Error::Usage(format!(
-                    "SKILL.md already exists at {}; pass --force to overwrite",
+                    "skill file already exists at {}; pass --force to overwrite",
                     path.display()
                 ))
             }
