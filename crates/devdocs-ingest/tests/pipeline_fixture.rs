@@ -82,8 +82,7 @@ fn config() -> Config {
             kind: Some(String::from("llms_txt")),
             url: Some(String::from("https://docs.acme.test/llms.txt")),
             license: Some(String::from("MIT")),
-            attribution: None,
-            expires: None,
+            status: Some(String::from("approved_index")),
             refresh_days: None,
         },
     );

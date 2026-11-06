@@ -43,8 +43,7 @@ fn config(index_url: &str) -> Config {
             kind: Some(String::from("llms_txt")),
             url: Some(index_url.to_owned()),
             license: Some(String::from("MIT")),
-            attribution: None,
-            expires: None,
+            status: Some(String::from("approved_index")),
             refresh_days: None,
         },
     );

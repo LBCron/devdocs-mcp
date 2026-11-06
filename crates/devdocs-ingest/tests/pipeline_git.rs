@@ -48,8 +48,7 @@ fn config(repo_url: &Url) -> Config {
             kind: Some(String::from("git")),
             url: Some(repo_url.to_string()),
             license: Some(String::from("MIT")),
-            attribution: None,
-            expires: None,
+            status: Some(String::from("approved_index")),
             refresh_days: None,
         },
     );
