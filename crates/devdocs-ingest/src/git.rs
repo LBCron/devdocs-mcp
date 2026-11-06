@@ -610,9 +610,17 @@ mod tests {
     static TEMP_CLONE_ORDER: Mutex<()> = Mutex::new(());
 
     /// Runs `git` against a fixture with the same argv-only, pinned-env
-    /// discipline the testkit uses, returning trimmed stdout.
+    /// discipline the testkit uses, returning trimmed stdout. Inherited
+    /// `GIT_*` variables are removed so a hook environment cannot
+    /// redirect the child to the host repository.
     fn fixture_git(dir: &Path, args: &[&str]) -> String {
-        let output = StdCommand::new("git")
+        let mut child = StdCommand::new("git");
+        for (key, _) in std::env::vars_os() {
+            if key.as_encoded_bytes().starts_with(b"GIT_") {
+                child.env_remove(&key);
+            }
+        }
+        let output = child
             .args(args)
             .current_dir(dir)
             .env("GIT_CONFIG_NOSYSTEM", "1")

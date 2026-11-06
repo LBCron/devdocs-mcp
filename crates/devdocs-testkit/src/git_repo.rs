@@ -2,7 +2,8 @@
 //!
 //! The helpers shell out to the `git` binary with argv vectors only: no
 //! shell, no interpolated command line. The child env pins
-//! `GIT_CONFIG_NOSYSTEM=1` and `GIT_TERMINAL_PROMPT=0`, and each repo
+//! `GIT_CONFIG_NOSYSTEM=1` and `GIT_TERMINAL_PROMPT=0`, removes every
+//! inherited `GIT_*` variable, and each repo
 //! sets `user.name` and `user.email` locally, so a fixture run cannot
 //! read the host identity or ever prompt.
 
@@ -27,7 +28,8 @@ pub struct DocsRepo {
 
 /// Run `git` with `args` in `dir` and return trimmed stdout. The
 /// isolation env and argv-only invocation keep the child off the host's
-/// interactive and system configuration.
+/// interactive and system configuration. The child runs with a clean
+/// git environment: all inherited `GIT_*` variables are removed.
 fn git<I, S>(dir: &Path, args: I) -> io::Result<String>
 where
     I: IntoIterator<Item = S>,
@@ -37,7 +39,15 @@ where
         .into_iter()
         .map(|arg| arg.as_ref().to_owned())
         .collect();
-    let output = Command::new("git")
+    let mut child = Command::new("git");
+    // A hook process inherits GIT_DIR, GIT_INDEX_FILE and friends; drop
+    // them so the child only sees the fixture repository.
+    for (key, _) in std::env::vars_os() {
+        if key.as_encoded_bytes().starts_with(b"GIT_") {
+            child.env_remove(&key);
+        }
+    }
+    let output = child
         .args(&command)
         .current_dir(dir)
         .env("GIT_CONFIG_NOSYSTEM", "1")
