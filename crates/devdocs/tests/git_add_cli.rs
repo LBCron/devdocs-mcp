@@ -294,6 +294,9 @@ fn add_git_with_a_missing_tag_fails_upstream() {
 /// A `git` entry on PATH that exists but cannot execute fails as
 /// `UPSTREAM_ERROR` with the `GIT_SPAWN_FAILED` detail — the spawn arm
 /// beside the not-found arm (docs/implementation/08 §Error codes).
+/// POSIX only: a non-executable `git` on PATH fails spawn there; Windows
+/// resolves executables by extension and never reaches this error.
+#[cfg(unix)]
 #[test]
 fn add_git_with_an_unrunnable_git_binary_fails_spawn() {
     let env = Env::new();

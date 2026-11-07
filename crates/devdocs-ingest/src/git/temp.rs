@@ -70,10 +70,9 @@ fn sweep_stale_clones(tmp: &Path) {
         }
         let stale = entry
             .metadata()
-            .and_then(|meta| meta.modified())
             .ok()
-            .and_then(|mtime| mtime.elapsed().ok())
-            .is_some_and(|age| age >= TOTAL_INGEST_CAP);
+            .and_then(|meta| meta.modified().ok())
+            .is_some_and(|mtime| mtime.elapsed().is_ok_and(|age| age >= TOTAL_INGEST_CAP));
         if !stale {
             continue;
         }
@@ -222,6 +221,29 @@ mod tests {
     #[cfg(unix)]
     use super::{create_private_dir, verify_private_dir};
 
+    /// Ages a path's mtime past the sweep bound. Windows cannot open a
+    /// directory with a plain `File::open`; `FILE_FLAG_BACKUP_SEMANTICS`
+    /// grants a directory handle there.
+    fn age_path(path: &Path, old: std::time::SystemTime) {
+        #[cfg(unix)]
+        {
+            std::fs::File::open(path)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .custom_flags(0x0200_0000)
+                .open(path)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+    }
+
     /// A path that already exists as a file refuses the private-dir
     /// create: the error names the path (`GitTempDir` mapping).
     #[cfg(unix)]
@@ -306,7 +328,6 @@ mod tests {
     /// clone (docs/implementation/09 §Local storage controls).
     #[test]
     fn a_stale_clone_dir_is_swept_at_the_next_create() {
-        use std::fs::File;
         use std::time::{Duration, SystemTime};
 
         let _order = TEMP_CLONE_ORDER.lock().unwrap();
@@ -326,7 +347,7 @@ mod tests {
         // Age the planted dir past the cap: the sweep only removes
         // entries older than the total ingest cap.
         let old = SystemTime::now() - crate::pipeline::TOTAL_INGEST_CAP - Duration::from_secs(60);
-        File::open(&stale).unwrap().set_modified(old).unwrap();
+        age_path(&stale, old);
 
         // A young clone dir stays: it could belong to another process's
         // live clone (the registry is per-process).
@@ -343,7 +364,6 @@ mod tests {
     /// sweep candidate: the sweep removes it by file, not only by dir.
     #[test]
     fn the_sweep_removes_a_stale_stray_file() {
-        use std::fs::File;
         use std::time::{Duration, SystemTime};
 
         let _order = TEMP_CLONE_ORDER.lock().unwrap();
@@ -358,7 +378,7 @@ mod tests {
         let stray = tmp.join("devdocs-git-loose");
         std::fs::write(&stray, "not a dir").unwrap();
         let old = SystemTime::now() - crate::pipeline::TOTAL_INGEST_CAP - Duration::from_secs(60);
-        File::open(&stray).unwrap().set_modified(old).unwrap();
+        age_path(&stray, old);
 
         let guard = TempClone::create(data.path()).unwrap();
         assert!(!stray.exists(), "the stale stray file must be swept");
@@ -371,7 +391,6 @@ mod tests {
     /// storage controls).
     #[test]
     fn the_sweep_skips_the_registered_clone() {
-        use std::fs::File;
         use std::time::{Duration, SystemTime};
 
         let _order = TEMP_CLONE_ORDER.lock().unwrap();
@@ -380,7 +399,7 @@ mod tests {
         let registered = guard.path().to_path_buf();
         // Age the live clone past the cap.
         let old = SystemTime::now() - crate::pipeline::TOTAL_INGEST_CAP - Duration::from_secs(60);
-        File::open(&registered).unwrap().set_modified(old).unwrap();
+        age_path(&registered, old);
 
         // A second create in the same process sweeps, but must skip the
         // registered path.
@@ -390,7 +409,9 @@ mod tests {
 
     /// A tmp root left at 0755 fails the private-dir contract: the create
     /// refuses with `GitTempDir` naming the wrong mode
-    /// (docs/implementation/09 §Local storage controls).
+    /// (docs/implementation/09 §Local storage controls). POSIX modes only:
+    /// Windows has no owner-rwx restriction to violate.
+    #[cfg(unix)]
     #[test]
     fn an_unprivate_tmp_root_refuses_the_create() {
         let _order = TEMP_CLONE_ORDER.lock().unwrap();
@@ -412,7 +433,9 @@ mod tests {
     }
 
     /// A guard whose clone dir cannot be removed logs the failure and
-    /// clears the registry slot anyway (the `Drop` warn path).
+    /// clears the registry slot anyway (the `Drop` warn path). POSIX only:
+    /// a write-revoked directory stays removable on Windows.
+    #[cfg(unix)]
     #[test]
     fn an_unremovable_clone_dir_warns_on_drop() {
         let _order = TEMP_CLONE_ORDER.lock().unwrap();

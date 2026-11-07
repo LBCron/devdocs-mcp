@@ -58,8 +58,13 @@ pub(crate) fn walk_docs(
             skipped_non_utf8 += 1;
             continue;
         };
+        // Chunk paths join URLs and store keys: the separator is `/` on
+        // every host, never the platform separator.
+        let path_string = relative
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
         docs.push(PageDocument {
-            path: relative.to_string_lossy().into_owned(),
+            path: path_string,
             body,
         });
     }
@@ -139,7 +144,9 @@ mod tests {
 
     /// A subdirectory the walk cannot read surfaces as `GitWalk` — the
     /// walker error is the adapter's walk failure, not a silent skip
-    /// (docs/implementation/07 §Git adapter).
+    /// (docs/implementation/07 §Git adapter). POSIX only: a 000
+    /// directory stays readable for its owner on Windows.
+    #[cfg(unix)]
     #[test]
     fn an_unreadable_subdir_fails_the_walk() {
         let repo_dir = tempdir().unwrap();
