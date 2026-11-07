@@ -621,6 +621,49 @@ fn nested_fence_counters_match_top_level_ones() {
     assert_eq!(stats.unsupported_fence_languages, 0);
 }
 
+/// An oversized list that splits routes each nested-fence symbol group to
+/// the piece containing its fence, not to the first piece: a rust fence in
+/// a later item carries its symbol on the chunk holding that fence.
+#[test]
+fn split_container_routes_nested_symbols_to_their_piece() {
+    // Prose items push the list into the (target, 2× target) band of the
+    // 40-token segmenter (~62 heuristic tokens); the fence sits in the
+    // final item, past the first split piece.
+    let mut items: Vec<String> = (1..=6)
+        .map(|n| format!("- prose item number {n} with words\n"))
+        .collect();
+    items.push("- last:\n\n  ```rust\n  fn deep_item_fn() {}\n  ```\n".to_owned());
+    let page = format!("## List\n\n{}", items.join("\n"));
+    let chunks = small().segment("lib", "1.0", &page);
+    let list_chunks: Vec<_> = chunks
+        .iter()
+        .filter(|chunk| chunk.section_path == vec!["List"])
+        .collect();
+    assert!(
+        list_chunks.len() >= 2,
+        "expected the list to split: {list_chunks:?}"
+    );
+    let carrying: Vec<_> = list_chunks
+        .iter()
+        .filter(|chunk| chunk.symbols.iter().any(|s| s.name == "deep_item_fn"))
+        .collect();
+    assert_eq!(
+        carrying.len(),
+        1,
+        "the symbol lands on exactly one piece: {list_chunks:?}"
+    );
+    assert!(
+        carrying[0].body.contains("fn deep_item_fn() {}"),
+        "the carrying piece holds the fence: {:?}",
+        carrying[0].body
+    );
+    assert!(
+        !list_chunks[0].body.contains("fn deep_item_fn() {}"),
+        "the first piece is prose only: {:?}",
+        list_chunks[0].body
+    );
+}
+
 /// The fence language is the first token up to whitespace or a comma, so
 /// attribute-bearing info strings name their language
 /// (docs/implementation/07 §Symbol extraction).

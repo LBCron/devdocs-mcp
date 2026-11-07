@@ -134,21 +134,27 @@ pub(crate) fn fence_language_unknown(info: &str) -> bool {
 /// container node (a list, blockquote, or their nesting) and accumulates
 /// the fence counters on the way. Top-level fences take the direct-child
 /// arm of the section walk, so this only sees fenced blocks a container
-/// wraps; they attach to the container's single block and land on the
-/// chunk that block packs into.
+/// wraps. Returns one group per symbol-capable fence, each tagged with the
+/// fence's page-absolute start offset so a container block that splits can
+/// still route each group to the piece containing its fence.
 fn nested_fence_symbols<'a>(
     node: &'a comrak::nodes::AstNode<'a>,
+    offset: &impl Fn(usize, usize) -> usize,
     stats: &mut SegmentStats,
-) -> Vec<ExtractedSymbol> {
-    let mut symbols = Vec::new();
+) -> Vec<(usize, Vec<ExtractedSymbol>)> {
+    let mut groups = Vec::new();
     for desc in node.descendants().skip(1) {
         if let NodeValue::CodeBlock(blocked) = &desc.data().value
             && blocked.fenced
         {
-            symbols.extend(fence_symbols(blocked, stats));
+            let symbols = fence_symbols(blocked, stats);
+            if !symbols.is_empty() {
+                let pos = desc.data().sourcepos.start;
+                groups.push((offset(pos.line, pos.column), symbols));
+            }
         }
     }
-    symbols
+    groups
 }
 
 /// Extracts the symbols of one fenced code block and accumulates the fence
@@ -369,11 +375,31 @@ impl Segmenter {
                 }
                 NodeValue::CodeBlock(blocked) if blocked.fenced => {
                     let symbols = fence_symbols(blocked, &mut stats);
-                    push_block(&mut sections, node, page_body, &offset, symbols, &mut stats);
+                    push_block(
+                        &mut sections,
+                        node,
+                        page_body,
+                        &offset,
+                        symbols,
+                        Vec::new(),
+                        &mut stats,
+                    );
                 }
                 _ => {
-                    let symbols = nested_fence_symbols(node, &mut stats);
-                    push_block(&mut sections, node, page_body, &offset, symbols, &mut stats);
+                    let groups = nested_fence_symbols(node, &offset, &mut stats);
+                    let symbols = groups
+                        .iter()
+                        .flat_map(|(_, syms)| syms.iter().cloned())
+                        .collect();
+                    push_block(
+                        &mut sections,
+                        node,
+                        page_body,
+                        &offset,
+                        symbols,
+                        groups,
+                        &mut stats,
+                    );
                 }
             }
         }
@@ -404,21 +430,26 @@ impl Segmenter {
             } else if tokens > self.target_tokens {
                 // Between the target and twice the target: split at
                 // semantic boundaries with the overlap. Only non-fenced
-                // blocks split; a container block's nested-fence symbols
-                // ride on the first piece.
+                // blocks split; each nested-fence symbol group rides on the
+                // piece whose span contains its fence start (half-open), so
+                // a boundary landing inside a nested fence is repaired by
+                // the merge pass below, which extends symbols on merge.
                 flush_packed(&mut current, &mut candidates);
+                let pieces = self.split_oversized(text, block.start);
+                let mut per_piece: Vec<Vec<ExtractedSymbol>> =
+                    pieces.iter().map(|_| Vec::new()).collect();
+                for (fence_start, syms) in &block.symbol_groups {
+                    let idx = pieces
+                        .iter()
+                        .position(|piece| piece.end > *fence_start)
+                        .unwrap_or(per_piece.len() - 1);
+                    per_piece[idx].extend(syms.iter().cloned());
+                }
                 candidates.extend(
-                    self.split_oversized(text, block.start)
+                    pieces
                         .into_iter()
-                        .enumerate()
-                        .map(|(i, span)| Candidate {
-                            span,
-                            symbols: if i == 0 {
-                                block.symbols.clone()
-                            } else {
-                                Vec::new()
-                            },
-                        }),
+                        .zip(per_piece)
+                        .map(|(span, symbols)| Candidate { span, symbols }),
                 );
             } else if tokens > 0 {
                 self.pack_small(section, &mut current, &mut candidates, block, range, tokens);
@@ -517,12 +548,15 @@ pub fn contextual_header(library: &str, version: &str, section_path: &[String]) 
 
 /// One top-level block of a section: its absolute byte range, whether
 /// the block is a fenced code block (never split), and the symbols its
-/// fence declared (empty for non-fenced blocks).
+/// fence declared (empty for non-fenced blocks). A container block also
+/// carries its nested-fence symbol groups, each tagged with the fence's
+/// page-absolute start, so a split can route groups by position.
 struct Block {
     start: usize,
     end: usize,
     fenced: bool,
     symbols: Vec<ExtractedSymbol>,
+    symbol_groups: Vec<(usize, Vec<ExtractedSymbol>)>,
 }
 
 /// One section under construction.
@@ -638,6 +672,7 @@ fn push_block<'a>(
     page_body: &'a str,
     offset: &impl Fn(usize, usize) -> usize,
     symbols: Vec<ExtractedSymbol>,
+    symbol_groups: Vec<(usize, Vec<ExtractedSymbol>)>,
     stats: &mut SegmentStats,
 ) {
     let fenced = matches!(&node.data().value, NodeValue::CodeBlock(boxed) if boxed.fenced);
@@ -664,6 +699,7 @@ fn push_block<'a>(
             end,
             fenced,
             symbols,
+            symbol_groups,
         });
     }
 }
