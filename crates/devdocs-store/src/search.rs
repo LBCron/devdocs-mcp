@@ -282,23 +282,28 @@ fn like_escape(prefix: &str) -> String {
         .replace('_', "\\_")
 }
 
-/// The WHERE predicate, the ORDER BY head, and the escaped match pattern
-/// of one symbol-match mode. `?1` binds the raw identifier (equality and
-/// match quality); the pattern sits at `?3` in the prefix modes and Exact
-/// carries none.
+/// The WHERE predicate, the match-quality expression, and the escaped
+/// match pattern of one symbol-match mode. `?1` binds the raw identifier
+/// (equality and match quality); the pattern sits at `?3` in the prefix
+/// modes and Exact carries none. The quality expression orders exact
+/// matches before prefixes, inside the per-chunk pick and across chunks.
 fn match_shape(mode: SymbolMatch, symbol: &str) -> (String, String, Option<String>) {
     match mode {
-        SymbolMatch::Exact => (String::from("sym.symbol = ?1"), String::new(), None),
+        SymbolMatch::Exact => (
+            String::from("sym.symbol = ?1"),
+            String::from("(sym.symbol = ?1)"),
+            None,
+        ),
         SymbolMatch::CaseSensitivePrefix => (
             String::from("sym.symbol GLOB (?3 || '*')"),
-            String::from("(sym.symbol = ?1) DESC, "),
+            String::from("(sym.symbol = ?1)"),
             Some(glob_escape(symbol)),
         ),
         SymbolMatch::CaseInsensitive => (
             String::from(
                 "sym.symbol = ?1 COLLATE NOCASE OR sym.symbol LIKE (?3 || '%') ESCAPE '\\'",
             ),
-            String::from("(sym.symbol = ?1 COLLATE NOCASE) DESC, "),
+            String::from("(sym.symbol = ?1 COLLATE NOCASE)"),
             Some(like_escape(symbol)),
         ),
     }
@@ -322,8 +327,10 @@ fn scope_filter(scope: SymbolScope, idx: usize) -> (String, Option<rusqlite::typ
 impl Store {
     /// The symbol-lookup ladder over active sources: matches `symbol` per
     /// `mode`, narrowed to `scope`, best match quality first with ties in
-    /// the lower chunk id. Returns at most `limit` hits, and the
-    /// terminal-license clause drops refused sources at query time
+    /// the lower chunk id. One hit per chunk — the per-chunk pick keeps the
+    /// best-quality row (exact before prefix, then lowest symbol) — so the
+    /// limit counts chunks, not symbol rows. The terminal-license clause
+    /// drops refused sources at query time
     /// (docs/implementation/09 §License gate enforcement points, point 3).
     pub fn search_symbols(
         &self,
@@ -335,7 +342,7 @@ impl Store {
         // `?1` is always the raw identifier (equality and match quality),
         // `?2` the limit; the escaped match pattern sits at `?3` in the
         // prefix modes, and the scope value takes the next index.
-        let (predicate, order, pattern) = match_shape(mode, symbol);
+        let (predicate, quality, pattern) = match_shape(mode, symbol);
         let scope_idx = if pattern.is_some() { 4 } else { 3 };
         let (scope_clause, scope_value) = scope_filter(scope, scope_idx);
         let mut bind = vec![
@@ -348,10 +355,17 @@ impl Store {
         // Deterministic in the mode and scope only, so `prepare_cached`
         // keeps one entry per mode and scope variant.
         let sql = format!(
-            "SELECT {SYMBOL_BASE_COLUMNS}, sym.kind \
-             FROM {SYMBOL_FROM} \
-             WHERE ({predicate}) AND s.active = 1 {LICENSE_PLACEHOLDER}{scope_clause} \
-             ORDER BY {order}c.chunk_id \
+            "SELECT * FROM (\
+                 SELECT {SYMBOL_BASE_COLUMNS}, sym.kind, {quality} AS quality, \
+                        ROW_NUMBER() OVER (\
+                            PARTITION BY c.chunk_id \
+                            ORDER BY {quality} DESC, sym.symbol, sym.kind\
+                        ) AS rn \
+                 FROM {SYMBOL_FROM} \
+                 WHERE ({predicate}) AND s.active = 1 {LICENSE_PLACEHOLDER}{scope_clause}\
+             ) \
+             WHERE rn = 1 \
+             ORDER BY quality DESC, chunk_id \
              LIMIT ?2"
         )
         .replace(LICENSE_PLACEHOLDER, TERMINAL_LICENSE_CLAUSE);

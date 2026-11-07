@@ -282,7 +282,8 @@ fn symbol_case_sensitive_prefix_respects_case() {
 
 /// The case-insensitive mode falls back across case: `USE_ROUTER` matches
 /// the stored `use_router` rows; prefix matches of the same head trail the
-/// exact ones, ties in the lower chunk id.
+/// exact ones, ties in the lower chunk id. A chunk matched by exact and
+/// prefix rows surfaces once — the exact row wins the per-chunk pick.
 #[test]
 fn symbol_case_insensitive_fallback_matches() {
     let s = ladder();
@@ -295,13 +296,15 @@ fn symbol_case_insensitive_fallback_matches() {
             10,
         )
         .unwrap();
+    assert_eq!(ids(&hits), vec![s.chunk_a, s.chunk_b, s.vue_chunk]);
     assert_eq!(
-        ids(&hits),
-        vec![s.chunk_a, s.chunk_b, s.vue_chunk, s.chunk_b]
+        hits[1].symbol.as_deref(),
+        Some("use_router"),
+        "the exact row wins chunk_b's pick"
     );
 
     // A prefix query in the same mode matches every identifier head, with
-    // exact matches ranking before prefixes.
+    // exact matches ranking before prefixes and one hit per chunk.
     let hits = s
         .store
         .search_symbols(
@@ -313,8 +316,8 @@ fn symbol_case_insensitive_fallback_matches() {
         .unwrap();
     assert_eq!(
         ids(&hits),
-        vec![s.chunk_a, s.chunk_b, s.vue_chunk, s.chunk_b],
-        "use_router_polyfill trails the exact matches"
+        vec![s.chunk_a, s.chunk_b, s.vue_chunk],
+        "use_router_polyfill dedupes into chunk_b's exact row"
     );
 }
 
@@ -403,6 +406,33 @@ fn symbol_limit_caps_the_results() {
         .search_symbols("use_router", SymbolMatch::Exact, SymbolScope::All, 1)
         .unwrap();
     assert_eq!(ids(&hits), vec![s.chunk_a], "the lower chunk id wins");
+}
+
+/// The limit counts chunks, not symbol rows: one chunk with several
+/// matching declarations consumes one slot, leaving room for other chunks.
+#[test]
+fn symbol_limit_counts_chunks_not_symbol_rows() {
+    let s = ladder();
+    symbol(&s.conn, s.chunk_a, "use_router_a", "function");
+    symbol(&s.conn, s.chunk_a, "use_router_b", "function");
+    symbol(&s.conn, s.chunk_a, "use_router_c", "function");
+
+    // Six matching rows over two chunks (four on chunk_a); the per-chunk
+    // pick keeps one row each, so both chunks fit under the limit.
+    let hits = s
+        .store
+        .search_symbols(
+            "use_router",
+            SymbolMatch::CaseSensitivePrefix,
+            SymbolScope::All,
+            2,
+        )
+        .unwrap();
+    assert_eq!(
+        ids(&hits),
+        vec![s.chunk_a, s.chunk_b],
+        "chunk_a's extra matches must not consume chunk_b's slot"
+    );
 }
 
 /// Inactive sources drop out of the ladder, like every serving query.
