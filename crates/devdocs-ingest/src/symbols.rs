@@ -102,10 +102,11 @@ fn mapped_kind(node: Node<'_>) -> Option<&'static str> {
         } else {
             "function"
         }),
-        // Rust `type_item` and the Go `type_spec` (under `type_declaration`);
-        // a Go `type_spec` whose type child is an `interface_type` node is
-        // an interface declaration (docs/implementation/06 §Symbol columns).
-        "type_item" | "type_spec" => Some(go_type_kind(node)),
+        // Rust `type_item`, the Go `type_spec`, and the Go `type_alias`
+        // (all under the enclosing type declaration node); a Go node whose
+        // type child is an `interface_type` is an interface declaration
+        // (docs/implementation/06 §Symbol columns).
+        "type_item" | "type_spec" | "type_alias" => Some(go_type_kind(node)),
         // Python: a class-body `function_definition` is a method.
         "function_definition" => Some(if python_class_member(node) {
             "method"
@@ -162,14 +163,14 @@ fn push(node: Node<'_>, kind: &str, src: &[u8], out: &mut Vec<ExtractedSymbol>) 
     }
 }
 
-/// The kind of a mapped type declaration: a Go `type_spec` whose `type`
-/// field child is an `interface_type` node is an `interface`; everything
-/// else (including every Rust `type_item`) stays a `type`.
+/// The kind of a mapped type declaration: a Go `type_spec` or `type_alias`
+/// whose `type` field child is an `interface_type` node is an `interface`;
+/// everything else (including every Rust `type_item`, whose `type` child is
+/// never an `interface_type`) stays a `type`.
 fn go_type_kind(node: Node<'_>) -> &'static str {
-    if node.kind() == "type_spec"
-        && node
-            .child_by_field_name("type")
-            .is_some_and(|child| child.kind() == "interface_type")
+    if node
+        .child_by_field_name("type")
+        .is_some_and(|child| child.kind() == "interface_type")
     {
         "interface"
     } else {

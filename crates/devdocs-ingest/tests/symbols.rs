@@ -57,6 +57,8 @@ fn go_fixture_extracts_declarations_in_source_order() {
             ("Target", "type"),
             ("Planner", "interface"),
             ("DefaultPlanner", "type"),
+            ("Client", "type"),
+            ("Handler", "interface"),
             ("Plan", "method"),
             ("mu", "variable"),
             ("cacheVersion", "constant"),

@@ -25,6 +25,14 @@ type Planner interface {
 // DefaultPlanner plans without side effects.
 type DefaultPlanner struct{}
 
+// Client is a plain transport alias.
+type Client = Transport
+
+// Handler is an interface alias.
+type Handler = interface {
+	Handle(target Target) error
+}
+
 // Plan builds the plan for one target.
 func (p *DefaultPlanner) Plan(target Target) (string, error) {
 	if target.Name == "" {
