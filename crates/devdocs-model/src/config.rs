@@ -121,7 +121,11 @@ pub struct IndexConfig {
 }
 
 /// Search behavior.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+///
+/// `Default` is inert zeros: the production values live in `Config`
+/// resolution, not here, so a default-constructed `SearchConfig` never
+/// masquerades as a valid configuration.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct SearchConfig {
     /// Default `--max-tokens` for read paths. Default 2000.
     pub max_tokens_default: u64,
@@ -129,19 +133,6 @@ pub struct SearchConfig {
     pub limit_default: u32,
     /// The RRF fusion constant. Default 60.
     pub rrf_k: u32,
-}
-
-impl Default for SearchConfig {
-    fn default() -> Self {
-        // The read-path budget binds through a named local: this field
-        // name next to a literal trips Codacy's hardcoded-token scanner.
-        let read_budget: u64 = 2000;
-        Self {
-            max_tokens_default: read_budget,
-            limit_default: 8,
-            rrf_k: 60,
-        }
-    }
 }
 
 /// Ingest behavior.

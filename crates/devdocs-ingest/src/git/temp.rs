@@ -235,8 +235,13 @@ mod tests {
         #[cfg(windows)]
         {
             use std::os::windows::fs::OpenOptionsExt;
+            // FILE_WRITE_ATTRIBUTES | FILE_FLAG_BACKUP_SEMANTICS: the
+            // only access pair that opens a directory handle and may
+            // change its times.
+            const FILE_WRITE_ATTRIBUTES: u32 = 0x0001_0000;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
             std::fs::OpenOptions::new()
-                .custom_flags(0x0200_0000)
+                .access_mode(FILE_WRITE_ATTRIBUTES | FILE_FLAG_BACKUP_SEMANTICS)
                 .open(path)
                 .unwrap()
                 .set_modified(old)
