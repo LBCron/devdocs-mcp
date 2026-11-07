@@ -330,7 +330,10 @@ mod tests {
     /// the ingest total cap is swept at the next `TempClone::create`; a
     /// young one survives, as does the freshly created dir — the age
     /// bound keeps the sweep from racing a concurrent process's live
-    /// clone (docs/implementation/09 §Local storage controls).
+    /// clone (docs/implementation/09 §Local storage controls). POSIX
+    /// only: directory-handle time writes are denied on the Windows CI
+    /// runner; there the sweep is verified through the stray-file arm.
+    #[cfg(unix)]
     #[test]
     fn a_stale_clone_dir_is_swept_at_the_next_create() {
         use std::time::{Duration, SystemTime};
@@ -393,7 +396,9 @@ mod tests {
     /// A fixture clone keeps working while a live clone holds the
     /// registry slot: the sweep skips the registered path even when it is
     /// old enough to be a candidate (docs/implementation/09 §Local
-    /// storage controls).
+    /// storage controls). POSIX only, like the stale-dir sweep test:
+    /// directory-handle time writes are denied on the Windows CI runner.
+    #[cfg(unix)]
     #[test]
     fn the_sweep_skips_the_registered_clone() {
         use std::time::{Duration, SystemTime};
