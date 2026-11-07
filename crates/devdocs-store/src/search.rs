@@ -182,6 +182,14 @@ const BASE_COLUMNS: &str = "c.chunk_id, c.source_id, s.library, s.version, c.sec
      c.symbol, c.text, c.token_count, c.content_hash, s.origin_url, s.commit_sha, \
      s.license_status";
 
+/// [`BASE_COLUMNS`] with `sym.symbol` in the `c.symbol` slot, for the
+/// queries that drive off the `symbols` table: the hit then names the
+/// matched symbol, not the chunk's primary symbol, so `Hit::symbol` and
+/// `Hit::symbol_kind` describe the same row.
+const SYMBOL_BASE_COLUMNS: &str = "c.chunk_id, c.source_id, s.library, s.version, c.section_path, \
+     sym.symbol, c.text, c.token_count, c.content_hash, s.origin_url, s.commit_sha, \
+     s.license_status";
+
 /// The FTS suffix columns behind [`BASE_COLUMNS`]: the `snippet()` fragment
 /// at index 12 and the bm25 rank at index 13, with the documented weights.
 const FTS_COLUMNS: &str = "snippet(chunks_fts, 1, '<mark>', '</mark>', '…', 16), \
@@ -340,7 +348,7 @@ impl Store {
         // Deterministic in the mode and scope only, so `prepare_cached`
         // keeps one entry per mode and scope variant.
         let sql = format!(
-            "SELECT {BASE_COLUMNS}, sym.kind \
+            "SELECT {SYMBOL_BASE_COLUMNS}, sym.kind \
              FROM {SYMBOL_FROM} \
              WHERE ({predicate}) AND s.active = 1 {LICENSE_PLACEHOLDER}{scope_clause} \
              ORDER BY {order}c.chunk_id \
@@ -399,13 +407,13 @@ fn fts_source_set_clause(count: usize) -> String {
 }
 
 /// Composes one ordinal-ordered query (symbol lookups, full-chunk reads):
-/// the shared projection, one query-specific suffix column at index 12,
-/// the FROM/JOIN, and the clause. Deterministic in its arguments, so the
-/// same shape yields the same SQL string on every call and
+/// one projection column list, one query-specific suffix column at index
+/// 12, the FROM/JOIN, and the clause. Deterministic in its arguments, so
+/// the same shape yields the same SQL string on every call and
 /// `prepare_cached` stays effective.
-fn plain_sql(from_clause: &str, where_clause: &str, suffix_column: &str) -> String {
+fn plain_sql(columns: &str, from_clause: &str, where_clause: &str, suffix_column: &str) -> String {
     format!(
-        "SELECT {BASE_COLUMNS}, {suffix_column} \
+        "SELECT {columns}, {suffix_column} \
          FROM {from_clause} \
          WHERE {where_clause} \
          ORDER BY c.ordinal"
@@ -480,7 +488,7 @@ impl Store {
         src: devdocs_model::SourceId,
     ) -> Result<Vec<Hit>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
-        let sql = plain_sql(SYMBOL_FROM, SYMBOL_CLAUSE, "sym.kind");
+        let sql = plain_sql(SYMBOL_BASE_COLUMNS, SYMBOL_FROM, SYMBOL_CLAUSE, "sym.kind");
         let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![symbol, src.0], plain_hit)?;
         rows.collect::<Result<Vec<Hit>, _>>()
@@ -553,7 +561,12 @@ impl Store {
     /// Every chunk of one source in ordinal order — the `open` read path.
     pub fn source_chunks(&self, source_id: i64) -> Result<Vec<Hit>, StoreError> {
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
-        let sql = plain_sql(SOURCE_CHUNKS_FROM, SOURCE_CHUNKS_CLAUSE, "NULL");
+        let sql = plain_sql(
+            BASE_COLUMNS,
+            SOURCE_CHUNKS_FROM,
+            SOURCE_CHUNKS_CLAUSE,
+            "NULL",
+        );
         let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![source_id], plain_hit)?;
         rows.collect::<Result<Vec<Hit>, _>>()

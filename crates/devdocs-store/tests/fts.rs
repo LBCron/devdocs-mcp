@@ -318,6 +318,42 @@ fn symbol_case_insensitive_fallback_matches() {
     );
 }
 
+/// A secondary symbol reports itself: looking up `plan` on a chunk whose
+/// primary symbol is `Planner` returns `Hit::symbol = "plan"` and `plan`'s
+/// kind, not the chunk's primary symbol.
+#[test]
+fn symbol_lookups_report_the_matched_symbol() {
+    let s = ladder();
+    let chunk = devdocs_testkit::seed_chunk(
+        &s.conn,
+        s.next_source,
+        2,
+        "[\"Planning\"]",
+        Some("Planner"),
+        "Plans things.",
+    )
+    .unwrap();
+    symbol(&s.conn, chunk, "Planner", "struct");
+    symbol(&s.conn, chunk, "plan", "method");
+
+    let hits = s
+        .store
+        .lookup_symbol("plan", SourceId(s.next_source))
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].chunk_id, chunk);
+    assert_eq!(hits[0].symbol.as_deref(), Some("plan"));
+    assert_eq!(hits[0].symbol_kind.as_deref(), Some("method"));
+
+    let hits = s
+        .store
+        .search_symbols("plan", SymbolMatch::Exact, SymbolScope::All, 10)
+        .unwrap();
+    assert_eq!(ids(&hits), vec![chunk]);
+    assert_eq!(hits[0].symbol.as_deref(), Some("plan"));
+    assert_eq!(hits[0].symbol_kind.as_deref(), Some("method"));
+}
+
 /// The scope narrows to one library or one source id.
 #[test]
 fn symbol_scope_narrows_the_search() {
