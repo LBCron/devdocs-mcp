@@ -3,6 +3,15 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use super::{Segmenter, boundary_inside_fence, contextual_header, fence_intervals};
+use crate::symbols::grammar_for;
+
+/// Whether this build carries the grammar for `lang`: without its feature
+/// the fence counts unsupported and yields no symbol, so each
+/// symbol-carrying test branches on it and pins the degrade behavior in
+/// every feature state.
+fn grammar_enabled(lang: &str) -> bool {
+    grammar_for(lang).is_some()
+}
 
 /// The fence probe over a text's precomputed intervals.
 fn probe(text: &str, at: usize) -> bool {
@@ -504,6 +513,17 @@ fn rust_fence_symbols_land_on_the_chunk() {
         "1.0",
         "# T\n\nprose\n\n```rust\nfn parse_config() {}\nstruct Command;\n```\n\nmore prose\n",
     );
+    if !grammar_enabled("rust") {
+        assert_eq!(
+            stats.unsupported_fence_languages, 1,
+            "without the grammar the fence counts unsupported"
+        );
+        assert!(
+            chunks.iter().all(|chunk| chunk.symbols.is_empty()),
+            "without the grammar no symbol is extracted"
+        );
+        return;
+    }
     assert_eq!(stats.unsupported_fence_languages, 0);
     let chunk = chunks
         .iter()
@@ -558,37 +578,61 @@ fn unsupported_and_unknown_fences_are_counted_but_never_fail() {
 #[test]
 fn nested_fences_extract_symbols() {
     let page = "# Guide\n\n- step one:\n\n  ```rust\n  fn nested_in_list() {}\n  ```\n";
-    let (chunks, _) = Segmenter::new()
+    let (chunks, stats) = Segmenter::new()
         .unwrap()
         .segment_with_stats("lib", "1.0", page);
     let names: Vec<&str> = chunks
         .iter()
         .flat_map(|chunk| chunk.symbols.iter().map(|s| s.name.as_str()))
         .collect();
-    assert_eq!(names, vec!["nested_in_list"]);
+    if grammar_enabled("rust") {
+        assert_eq!(names, vec!["nested_in_list"]);
+    } else {
+        assert_eq!(
+            stats.unsupported_fence_languages, 1,
+            "without the grammar the fence counts unsupported"
+        );
+        assert!(names.is_empty(), "without the grammar no symbol emerges");
+    }
 
     // A fence inside a blockquote.
     let page = "# Guide\n\n> run this:\n>\n> ```go\n> func Nested() {}\n> ```\n";
-    let (chunks, _) = Segmenter::new()
+    let (chunks, stats) = Segmenter::new()
         .unwrap()
         .segment_with_stats("lib", "1.0", page);
     let names: Vec<&str> = chunks
         .iter()
         .flat_map(|chunk| chunk.symbols.iter().map(|s| s.name.as_str()))
         .collect();
-    assert_eq!(names, vec!["Nested"]);
+    if grammar_enabled("go") {
+        assert_eq!(names, vec!["Nested"]);
+    } else {
+        assert_eq!(
+            stats.unsupported_fence_languages, 1,
+            "without the grammar the fence counts unsupported"
+        );
+        assert!(names.is_empty(), "without the grammar no symbol emerges");
+    }
 
     // A fence inside a list nested in a list.
     let page =
         "# Guide\n\n- outer:\n\n  - inner:\n\n    ```python\n    def deep(): pass\n    ```\n";
-    let (chunks, _) = Segmenter::new()
+    let (chunks, stats) = Segmenter::new()
         .unwrap()
         .segment_with_stats("lib", "1.0", page);
     let names: Vec<&str> = chunks
         .iter()
         .flat_map(|chunk| chunk.symbols.iter().map(|s| s.name.as_str()))
         .collect();
-    assert_eq!(names, vec!["deep"]);
+    if grammar_enabled("python") {
+        assert_eq!(names, vec!["deep"]);
+    } else {
+        assert_eq!(
+            stats.unsupported_fence_languages, 1,
+            "without the grammar the fence counts unsupported"
+        );
+        assert!(names.is_empty(), "without the grammar no symbol emerges");
+    }
 }
 
 /// The fence counters cover nested fences too: an unknown nested language
@@ -643,6 +687,13 @@ fn split_container_routes_nested_symbols_to_their_piece() {
         list_chunks.len() >= 2,
         "expected the list to split: {list_chunks:?}"
     );
+    if !grammar_enabled("rust") {
+        assert!(
+            list_chunks.iter().all(|chunk| chunk.symbols.is_empty()),
+            "without the grammar no symbol is extracted: {list_chunks:?}"
+        );
+        return;
+    }
     let carrying: Vec<_> = list_chunks
         .iter()
         .filter(|chunk| chunk.symbols.iter().any(|s| s.name == "deep_item_fn"))
@@ -676,12 +727,19 @@ fn fence_info_attributes_do_not_hide_the_language() {
         "# T\n\n```rust,ignore\nfn tagged() {}\n```\n\nbody\n",
     );
     assert_eq!(stats.unknown_fence_languages, 0);
-    assert!(
-        chunks
-            .iter()
-            .any(|chunk| chunk.symbols.iter().any(|s| s.name == "tagged")),
-        "the comma attribute keeps the language symbol-capable"
-    );
+    if grammar_enabled("rust") {
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.symbols.iter().any(|s| s.name == "tagged")),
+            "the comma attribute keeps the language symbol-capable"
+        );
+    } else {
+        assert!(
+            chunks.iter().all(|chunk| chunk.symbols.is_empty()),
+            "without the grammar no symbol is extracted"
+        );
+    }
 
     // A colon-joined attribute after a comma.
     let (_, stats) = Segmenter::new().unwrap().segment_with_stats(

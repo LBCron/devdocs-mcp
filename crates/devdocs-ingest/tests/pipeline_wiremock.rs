@@ -197,6 +197,10 @@ async fn wire_ingest_fails_when_the_llms_full_probe_hits_a_server_error() {
 /// table holds the extracted rows, and republishing the same generation
 /// leaves the symbol row counts unchanged — idempotent
 /// (docs/implementation/07 §Normalization pipeline, the symbol pass).
+///
+/// Gated on the rust grammar: every assertion here is about symbol
+/// publication, which only makes sense when the build carries a grammar.
+#[cfg(feature = "grammar-rust")]
 #[tokio::test]
 async fn wire_ingest_publishes_symbols_idempotently() {
     let server = MockServer::start().await;

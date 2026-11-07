@@ -15,6 +15,13 @@ fn pairs(symbols: &[devdocs_ingest::ExtractedSymbol]) -> Vec<(&str, &str)> {
         .collect()
 }
 
+/// Whether this build carries the grammar for `lang`: without its feature
+/// the extraction degrades to empty, so each language fixture branches on
+/// it and pins the degrade behavior in every feature state.
+fn grammar_enabled(lang: &str) -> bool {
+    grammar_for(lang).is_some()
+}
+
 /// The Rust grammar extracts the module's declarations in source order.
 /// Impl members carry `method`; the trait's `run` declaration and the
 /// free functions stay `function`.
@@ -22,6 +29,13 @@ fn pairs(symbols: &[devdocs_ingest::ExtractedSymbol]) -> Vec<(&str, &str)> {
 fn rust_fixture_extracts_declarations_in_source_order() {
     let code = include_str!("fixtures/symbols/rust.sample");
     let symbols = extract("rust", code);
+    if !grammar_enabled("rust") {
+        assert!(
+            symbols.is_empty(),
+            "without the grammar the extraction degrades to empty"
+        );
+        return;
+    }
     assert_eq!(
         pairs(&symbols),
         vec![
@@ -49,6 +63,13 @@ fn rust_fixture_extracts_declarations_in_source_order() {
 fn go_fixture_extracts_declarations_in_source_order() {
     let code = include_str!("fixtures/symbols/go.sample");
     let symbols = extract("golang", code);
+    if !grammar_enabled("golang") {
+        assert!(
+            symbols.is_empty(),
+            "without the grammar the extraction degrades to empty"
+        );
+        return;
+    }
     assert_eq!(
         pairs(&symbols),
         vec![
@@ -75,6 +96,13 @@ fn go_fixture_extracts_declarations_in_source_order() {
 fn python_fixture_extracts_classes_methods_and_functions() {
     let code = include_str!("fixtures/symbols/python.sample");
     let symbols = extract("py", code);
+    if !grammar_enabled("py") {
+        assert!(
+            symbols.is_empty(),
+            "without the grammar the extraction degrades to empty"
+        );
+        return;
+    }
     assert_eq!(
         pairs(&symbols),
         vec![
@@ -99,6 +127,13 @@ fn python_fixture_extracts_classes_methods_and_functions() {
 fn javascript_fixture_extracts_declarations_classes_and_variables() {
     let code = include_str!("fixtures/symbols/javascript.sample");
     let symbols = extract("jsx", code);
+    if !grammar_enabled("jsx") {
+        assert!(
+            symbols.is_empty(),
+            "without the grammar the extraction degrades to empty"
+        );
+        return;
+    }
     assert_eq!(
         pairs(&symbols),
         vec![
@@ -143,6 +178,14 @@ fn javascript_module_scope_declarators_only() {
         "    var innerVar = 5;\n",
         "}\n",
     );
+    let symbols = extract("javascript", code);
+    if !grammar_enabled("javascript") {
+        assert!(
+            symbols.is_empty(),
+            "without the grammar the extraction degrades to empty"
+        );
+        return;
+    }
     assert_eq!(
         pairs(&extract("javascript", code)),
         vec![
@@ -162,6 +205,13 @@ fn rust_impl_members_are_methods() {
         "rust",
         "trait T {\n    fn provided(&self) {}\n}\n\nimpl T for S {\n    fn provided(&self) {}\n}\n\nfn free() {}\n",
     );
+    if !grammar_enabled("rust") {
+        assert!(
+            symbols.is_empty(),
+            "without the grammar the extraction degrades to empty"
+        );
+        return;
+    }
     assert_eq!(
         pairs(&symbols),
         vec![
@@ -188,8 +238,10 @@ fn rust_impl_members_are_methods() {
 #[test]
 fn unknown_languages_and_aliases() {
     assert_eq!(extract("cobol", "MOVE A TO B."), Vec::new());
-    assert_eq!(extract("rust", "fn main() {}").len(), 1);
-    assert!(grammar_for("rust").is_some());
+    if grammar_enabled("rust") {
+        assert_eq!(extract("rust", "fn main() {}").len(), 1);
+        assert!(grammar_for("rust").is_some());
+    }
     assert_eq!(grammar_for("go"), grammar_for("golang"));
     assert!(grammar_for("typescript").is_none());
 }
