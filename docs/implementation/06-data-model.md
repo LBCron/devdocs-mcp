@@ -3,7 +3,7 @@ type: guide
 title: Data Model
 description: The complete SQLite schema for devdocs, the FTS5 configuration, the migration system, and the hashing policy. Targets SQLite 3.54 bundled in rusqlite 0.41.
 tags: [devdocs, sqlite, fts5, schema, migrations]
-timestamp: 2026-11-06T18:00:00Z
+timestamp: 2026-11-07T00:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -111,6 +111,9 @@ CREATE TABLE symbols (
   PRIMARY KEY (symbol, chunk_id)
 );
 CREATE INDEX idx_symbols_chunk ON symbols(chunk_id);
+-- migration 0002: case-insensitive prefix matching for the symbol ladder;
+-- the column collation stays BINARY so exact mode matches byte-exact
+CREATE INDEX idx_symbols_symbol_nocase ON symbols(symbol COLLATE NOCASE);
 -- session_trajectory: per-session served-chunk dedup (phase 2)
 CREATE TABLE session_trajectory (
   session_id TEXT NOT NULL,

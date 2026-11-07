@@ -227,9 +227,15 @@ const FTS_SOURCE_PREDICATE: &str = " AND s.source_id = ?3";
 
 /// The FROM/JOIN of the symbol lookup: the symbol table driving the chunk
 /// and source joins.
+/// The FROM/JOIN of the symbol lookup: the symbol table driving the chunk
+/// and source joins. CROSS JOIN pins the loop order sym-first (SQLite
+/// §Query planner, manual control of join order): every mode constrains
+/// `sym.symbol` indexably, and the free reorder would otherwise drive from
+/// `sources` and filter the symbol predicate per row instead of through
+/// the symbol indexes.
 const SYMBOL_FROM: &str = "symbols sym \
-     JOIN chunks c ON c.chunk_id = sym.chunk_id \
-     JOIN sources s ON s.source_id = c.source_id";
+     CROSS JOIN chunks c ON c.chunk_id = sym.chunk_id \
+     CROSS JOIN sources s ON s.source_id = c.source_id";
 
 /// The symbol-lookup WHERE clause: the exact symbol of one source, active
 /// only, with the terminal-license placeholder.
@@ -284,9 +290,11 @@ fn like_escape(prefix: &str) -> String {
 
 /// The WHERE predicate, the match-quality expression, and the escaped
 /// match pattern of one symbol-match mode. `?1` binds the raw identifier
-/// (equality and match quality); the pattern sits at `?3` in the prefix
-/// modes and Exact carries none. The quality expression orders exact
-/// matches before prefixes, inside the per-chunk pick and across chunks.
+/// (equality and match quality); the complete pattern sits at `?3` in the
+/// prefix modes (bound whole, not concatenated in SQL, so LIKE and GLOB
+/// can use a prefix index) and Exact carries none. The quality expression
+/// orders exact matches before prefixes, inside the per-chunk pick and
+/// across chunks.
 fn match_shape(mode: SymbolMatch, symbol: &str) -> (String, String, Option<String>) {
     match mode {
         SymbolMatch::Exact => (
@@ -295,16 +303,17 @@ fn match_shape(mode: SymbolMatch, symbol: &str) -> (String, String, Option<Strin
             None,
         ),
         SymbolMatch::CaseSensitivePrefix => (
-            String::from("sym.symbol GLOB (?3 || '*')"),
+            String::from("sym.symbol GLOB ?3"),
             String::from("(sym.symbol = ?1)"),
-            Some(glob_escape(symbol)),
+            Some(format!("{}*", glob_escape(symbol))),
         ),
         SymbolMatch::CaseInsensitive => (
-            String::from(
-                "sym.symbol = ?1 COLLATE NOCASE OR sym.symbol LIKE (?3 || '%') ESCAPE '\\'",
-            ),
+            // The prefix pattern already covers the exact match, so the
+            // predicate is the LIKE alone — one indexable term. The
+            // quality expression keeps exact matches ahead of prefixes.
+            String::from("sym.symbol LIKE ?3 ESCAPE '\\'"),
             String::from("(sym.symbol = ?1 COLLATE NOCASE)"),
-            Some(like_escape(symbol)),
+            Some(format!("{}%", like_escape(symbol))),
         ),
     }
 }

@@ -17,7 +17,9 @@ mod store;
 
 pub use error::StoreError;
 pub use hash::{canonical_body, content_hash, fast_hash};
-pub use migrate::{AppliedMigration, MigrateOptions, migrate, migrate_with_options};
+pub use migrate::{
+    AppliedMigration, MIGRATION_COUNT, MigrateOptions, migrate, migrate_with_options,
+};
 pub use publish::{NewChunk, Symbol};
 pub use query::build_match_query;
 pub use search::{Hit, SymbolMatch, SymbolScope};

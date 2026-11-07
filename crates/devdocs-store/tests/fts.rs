@@ -357,6 +357,53 @@ fn symbol_lookups_report_the_matched_symbol() {
     assert_eq!(hits[0].symbol_kind.as_deref(), Some("method"));
 }
 
+/// The case-insensitive ladder is index-backed: the prefix arm runs
+/// through `idx_symbols_symbol_nocase` as a bounded range, not a
+/// symbol-table scan. The SQL mirrors the CaseInsensitive/All shape that
+/// `search_symbols` composes, with the pattern substituted as a literal:
+/// SQLite plans a bound-parameter pattern only after its reparse on the
+/// first step, which `EXPLAIN QUERY PLAN` does not surface — with the
+/// pattern known (bound or literal) the planner takes the same branch.
+#[test]
+fn case_insensitive_lookup_uses_the_nocase_index() {
+    let s = ladder();
+    // Test-fixture value, doubled for a SQL string literal — user input
+    // never reaches this substitution path in production.
+    let literal = "USE_ROUTER".replace('\'', "''");
+    let pattern = "use\\_router%".replace('\'', "''");
+    let sql = format!(
+        "EXPLAIN QUERY PLAN SELECT * FROM (\
+         SELECT c.chunk_id, c.source_id, s.library, s.version, c.section_path, \
+         sym.symbol, c.text, c.token_count, c.content_hash, s.origin_url, \
+         s.commit_sha, s.license_status, sym.kind, \
+         (sym.symbol = '{literal}' COLLATE NOCASE) AS quality, \
+         ROW_NUMBER() OVER (PARTITION BY c.chunk_id ORDER BY \
+         (sym.symbol = '{literal}' COLLATE NOCASE) DESC, sym.symbol, sym.kind) AS rn \
+         FROM symbols sym CROSS JOIN chunks c ON c.chunk_id = sym.chunk_id \
+         CROSS JOIN sources s ON s.source_id = c.source_id \
+         WHERE sym.symbol LIKE '{pattern}' ESCAPE '\\' \
+         AND s.active = 1) WHERE rn = 1 \
+         ORDER BY quality DESC, chunk_id LIMIT 10"
+    );
+    let plan = s
+        .conn
+        .prepare(&sql)
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<Vec<String>, _>>()
+        .unwrap();
+    let joined = plan.join("\n");
+    assert!(
+        joined.contains("idx_symbols_symbol_nocase (symbol>? AND symbol<?)"),
+        "the prefix arm must be a bounded range on the NOCASE index: {joined}"
+    );
+    assert!(
+        !joined.contains("SCAN sym"),
+        "no symbol-table scan may remain: {joined}"
+    );
+}
+
 /// The scope narrows to one library or one source id.
 #[test]
 fn symbol_scope_narrows_the_search() {

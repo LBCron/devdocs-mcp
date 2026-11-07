@@ -21,15 +21,29 @@ struct EmbeddedMigration {
 /// header comment carries `devdocs: destructive` sets the flag; applying
 /// one without `--force` refuses
 /// (docs/implementation/06 §Migrations).
-const MIGRATIONS: &[EmbeddedMigration] = &[EmbeddedMigration {
-    version: 1,
-    name: "0001_init",
-    sql: include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/migrations/0001_init.sql"
-    )),
-    destructive: false,
-}];
+const MIGRATIONS: &[EmbeddedMigration] = &[
+    EmbeddedMigration {
+        version: 1,
+        name: "0001_init",
+        sql: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/0001_init.sql"
+        )),
+        destructive: false,
+    },
+    EmbeddedMigration {
+        version: 2,
+        name: "0002_symbols_symbol_nocase",
+        sql: include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/0002_symbols_symbol_nocase.sql"
+        )),
+        destructive: false,
+    },
+];
+
+/// How many migrations ship with the store, in application order.
+pub const MIGRATION_COUNT: usize = MIGRATIONS.len();
 
 /// Options for the migration runner.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -202,9 +216,9 @@ mod tests {
         let mut first = rusqlite::Connection::open(dir.path().join("docs.db")).unwrap();
         let mut second = rusqlite::Connection::open(dir.path().join("docs.db")).unwrap();
 
-        // Another connection wins the race and applies the migration.
+        // Another connection wins the race and applies every migration.
         let applied = apply_all(&mut first, super::MIGRATIONS, MigrateOptions::default()).unwrap();
-        assert_eq!(applied.len(), 1);
+        assert_eq!(applied.len(), super::MIGRATIONS.len());
 
         // The loser's `apply_all` fast path would still see the migration
         // as pending if its read happened before the winner committed;
