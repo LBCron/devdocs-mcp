@@ -174,21 +174,31 @@ fn plain_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<Hit> {
 
 /// The chunk and source column list every serving query shares, in the
 /// fixed order the row readers ([`base_columns`]) index: `chunk_id`,
-/// `source_id`, `library`, `version`, `section_path`, `symbol`, `text`,
-/// `token_count`, `content_hash`, `origin_url`, `commit_sha`,
+/// `source_id`, `library`, `version`, `section_path`, the symbol slot,
+/// `text`, `token_count`, `content_hash`, `origin_url`, `commit_sha`,
 /// `license_status` at indices 0..12. Each query appends its
-/// query-specific suffix columns behind them.
-const BASE_COLUMNS: &str = "c.chunk_id, c.source_id, s.library, s.version, c.section_path, \
-     c.symbol, c.text, c.token_count, c.content_hash, s.origin_url, s.commit_sha, \
-     s.license_status";
+/// query-specific suffix columns behind them. The `$symbol` slot is the
+/// only difference between [`BASE_COLUMNS`] and [`SYMBOL_BASE_COLUMNS`],
+/// so a column added to one list cannot silently miss the other.
+macro_rules! base_columns {
+    ($symbol:literal) => {
+        concat!(
+            "c.chunk_id, c.source_id, s.library, s.version, c.section_path, ",
+            $symbol,
+            "c.text, c.token_count, c.content_hash, s.origin_url, s.commit_sha, \
+             s.license_status"
+        )
+    };
+}
+
+/// The chunk and source column list, naming the chunk's primary symbol.
+const BASE_COLUMNS: &str = base_columns!("c.symbol, ");
 
 /// [`BASE_COLUMNS`] with `sym.symbol` in the `c.symbol` slot, for the
 /// queries that drive off the `symbols` table: the hit then names the
 /// matched symbol, not the chunk's primary symbol, so `Hit::symbol` and
 /// `Hit::symbol_kind` describe the same row.
-const SYMBOL_BASE_COLUMNS: &str = "c.chunk_id, c.source_id, s.library, s.version, c.section_path, \
-     sym.symbol, c.text, c.token_count, c.content_hash, s.origin_url, s.commit_sha, \
-     s.license_status";
+const SYMBOL_BASE_COLUMNS: &str = base_columns!("sym.symbol, ");
 
 /// The FTS suffix columns behind [`BASE_COLUMNS`]: the `snippet()` fragment
 /// at index 12 and the bm25 rank at index 13, with the documented weights.
