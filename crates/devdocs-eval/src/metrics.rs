@@ -147,20 +147,27 @@ impl QuestionScore {
 /// `unanswerable` questions pass only with an empty result set — a hit is a
 /// failure (docs/implementation/14 §Golden-set format). `ref_match` scans
 /// the full result list; `symbol_match` passes only at full symbol recall.
-/// A symbol counts only from a hit on the question's own library and
-/// version pin — a `multi_library` question grades its symbols against
-/// that primary pin, even though its refs may target other libraries.
+/// Symbol recall grades from `symbol_hits` — the symbol rung's hits, not
+/// the packed page (docs/implementation/14 §Metrics) — while every other
+/// grader grades from the served `hits`. A symbol counts only from a hit on
+/// the question's own library and version pin — a `multi_library` question
+/// grades its symbols against that primary pin, even though its refs may
+/// target other libraries.
 #[must_use]
-pub fn grade_question(question: &Question, hits: &[RetrievedRef]) -> QuestionScore {
+pub fn grade_question(
+    question: &Question,
+    hits: &[RetrievedRef],
+    symbol_hits: &[RetrievedRef],
+) -> QuestionScore {
     let refs = question.expect_refs.as_deref().unwrap_or_default();
     let symbols = question.expect_symbols.as_deref().unwrap_or_default();
-    // A symbol counts only when a hit from the question's own library and
-    // pinned version documents it — the same library/version rule the ref
-    // grader applies (docs/implementation/14 §Version correctness).
+    // A symbol counts only when a rung hit from the question's own library
+    // and pinned version documents it — the same library/version rule the
+    // ref grader applies (docs/implementation/14 §Version correctness).
     let symbols_found = symbols
         .iter()
         .filter(|s| {
-            hits.iter().any(|h| {
+            symbol_hits.iter().any(|h| {
                 h.symbol.as_deref() == Some(s.as_str())
                     && h.version == question.version
                     && h.library.eq_ignore_ascii_case(&question.library)
@@ -426,11 +433,11 @@ mod tests {
     #[test]
     fn unanswerable_questions_pass_only_with_no_hits() {
         let q = question(Grader::RefMatch, TaskType::Unanswerable, Vec::new());
-        let passed = grade_question(&q, &[]).passed;
+        let passed = grade_question(&q, &[], &[]).passed;
         assert!(passed, "an empty result set passes");
 
         let hits = vec![hit(1, "next.js", "16.2.9", "proxy", None)];
-        let failed = grade_question(&q, &hits).passed;
+        let failed = grade_question(&q, &hits, &hits).passed;
         assert!(!failed, "a hit is a failure");
     }
 
@@ -445,12 +452,12 @@ mod tests {
             ]),
         );
         let hits = vec![hit(1, "next.js", "16.2.9", "config", None)];
-        let score = grade_question(&q, &hits);
+        let score = grade_question(&q, &hits, &hits);
         assert!(score.passed);
         assert!(score.hit_at_5);
 
         let misses = vec![hit(1, "next.js", "16.2.9", "routing", None)];
-        assert!(!grade_question(&q, &misses).passed);
+        assert!(!grade_question(&q, &misses, &misses).passed);
     }
 
     #[test]
@@ -462,7 +469,7 @@ mod tests {
             hit(1, "next.js", "16.2.9", "proxy", Some("middleware")),
             hit(2, "next.js", "16.2.9", "proxy", Some("other")),
         ];
-        let score = grade_question(&q, &hits);
+        let score = grade_question(&q, &hits, &hits);
         assert!(!score.passed, "partial recall counts as wrong");
         assert_eq!(score.symbol_recall(), Some(0.5));
 
@@ -470,7 +477,7 @@ mod tests {
             hit(1, "next.js", "16.2.9", "proxy", Some("middleware")),
             hit(2, "next.js", "16.2.9", "proxy", Some("rewrite")),
         ];
-        assert!(grade_question(&q, &full).passed);
+        assert!(grade_question(&q, &full, &full).passed);
     }
 
     #[test]
@@ -482,7 +489,7 @@ mod tests {
         );
         let hits = vec![hit(1, "next.js", "16.2.9", "proxy", None)];
         assert!(
-            !grade_question(&q, &hits).passed,
+            !grade_question(&q, &hits, &hits).passed,
             "runs refuse manual-grader suites; the grader still never passes"
         );
     }
@@ -493,15 +500,15 @@ mod tests {
         q.expect_symbols = Some(refs(&["middleware"]));
 
         let foreign_version = vec![hit(1, "next.js", "16.1.0", "proxy", Some("middleware"))];
-        let score = grade_question(&q, &foreign_version);
+        let score = grade_question(&q, &foreign_version, &foreign_version);
         assert_eq!(score.symbols_found, 0, "another version does not count");
 
         let foreign_library = vec![hit(1, "zod", "16.2.9", "proxy", Some("middleware"))];
-        let score = grade_question(&q, &foreign_library);
+        let score = grade_question(&q, &foreign_library, &foreign_library);
         assert_eq!(score.symbols_found, 0, "another library does not count");
 
         let case_insensitive = vec![hit(1, "Next.js", "16.2.9", "proxy", Some("middleware"))];
-        let score = grade_question(&q, &case_insensitive);
+        let score = grade_question(&q, &case_insensitive, &case_insensitive);
         assert_eq!(score.symbols_found, 1, "library case does not matter");
     }
 
@@ -513,14 +520,14 @@ mod tests {
             refs(&["docs://next.js/v16.2.9/proxy"]),
         );
         let exact = vec![hit(1, "next.js", "16.2.9", "proxy", None)];
-        assert!(grade_question(&q, &exact).version_correct);
+        assert!(grade_question(&q, &exact, &exact).version_correct);
 
         let fallback = vec![hit(1, "next.js", "16.1.0", "proxy", None)];
-        assert!(!grade_question(&q, &fallback).version_correct);
+        assert!(!grade_question(&q, &fallback, &fallback).version_correct);
 
         let foreign = vec![hit(1, "zod", "16.2.9", "proxy", None)];
         assert!(
-            !grade_question(&q, &foreign).version_correct,
+            !grade_question(&q, &foreign, &foreign).version_correct,
             "another library with the same version string does not count"
         );
     }
@@ -540,10 +547,13 @@ mod tests {
         let q_unans = question(Grader::RefMatch, TaskType::Unanswerable, Vec::new());
 
         let hit_proxy = vec![hit(1, "next.js", "16.2.9", "proxy", Some("a"))];
-        let sym_score = grade_question(&q_sym, &hit_proxy); // partial recall → fail
-        let unans_score = grade_question(&q_unans, &hit_proxy.clone()); // hit on unanswerable → fail
+        let sym_score = grade_question(&q_sym, &hit_proxy, &hit_proxy); // partial recall → fail
+        let unans_score = grade_question(&q_unans, &hit_proxy.clone(), &hit_proxy.clone()); // hit on unanswerable → fail
         let scored = vec![
-            (q_ref.clone(), grade_question(&q_ref, &hit_proxy)), // pass, hit@5, 1/2 symbols, version ok
+            (
+                q_ref.clone(),
+                grade_question(&q_ref, &hit_proxy, &hit_proxy),
+            ), // pass, hit@5, 1/2 symbols, version ok
             (q_sym, sym_score),
             (q_unans, unans_score),
         ];

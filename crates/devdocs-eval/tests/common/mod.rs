@@ -103,11 +103,19 @@ pub fn fixture(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
         "middleware rewrite the incoming request path",
     )
     .unwrap();
+    let chunk_id: i64 = conn
+        .query_row("SELECT chunk_id FROM chunks LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    conn.execute(
+        "INSERT INTO symbols(symbol, chunk_id, kind) VALUES ('rewrite', ?1, 'function')",
+        [chunk_id],
+    )
+    .unwrap();
     drop(conn);
 
     let suite_path = dir.join("fixture.jsonl");
     let lines = [
-        r#"{"id":"answered-001","library":"test-lib","version":"1.0.0","task_type":"exact_api","question":"rewrite the request path","expect_refs":["docs://test-lib/v1.0.0/proxy#rewrite"],"expect_symbols":["rewrite"],"grader":"ref_match","notes":"the seeded chunk"}"#,
+        r#"{"id":"answered-001","library":"test-lib","version":"1.0.0","task_type":"exact_api","question":"rewrite()","expect_refs":["docs://test-lib/v1.0.0/proxy#rewrite"],"expect_symbols":["rewrite"],"grader":"ref_match","notes":"the seeded chunk"}"#,
         r#"{"id":"unanswerable-001","library":"test-lib","version":"1.0.0","task_type":"unanswerable","question":"quantum flux capacitor wiring","expect_refs":[],"grader":"ref_match","notes":"nothing matches"}"#,
         r#"{"id":"missed-001","library":"test-lib","version":"1.0.0","task_type":"exact_api","question":"rewrite the request path","expect_refs":["docs://test-lib/v1.0.0/absent"],"grader":"ref_match","notes":"never seeded"}"#,
     ];

@@ -65,6 +65,10 @@ pub struct PackedSearch {
     pub served_version: Option<String>,
     /// The requested version text, when the query carried one.
     pub requested_text: Option<String>,
+    /// The symbol-rung (rung 1) hits as captured before fusion and packing
+    /// — the eval harness's symbol-recall input, independent of what the
+    /// budget pack served (docs/implementation/14 §Metrics).
+    pub symbol_rung_hits: Vec<Hit>,
 }
 
 /// Runs the search pipeline end to end.
@@ -149,6 +153,9 @@ pub fn search_packed(
             headroom,
         )?],
     };
+    // The rung-1 output, captured before the FTS rungs land in
+    // `rung_hits`: the union of the symbol rung's lists.
+    let symbol_rung_hits = rung_hits.iter().flatten().cloned().collect();
     let (pick_status, served_version, requested_text) = version_rung_hits(
         store,
         query,
@@ -177,6 +184,7 @@ pub fn search_packed(
         pick_status,
         served_version,
         requested_text,
+        symbol_rung_hits,
     })
 }
 

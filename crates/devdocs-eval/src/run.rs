@@ -179,16 +179,17 @@ fn in_process_pass(store: &Store, suite: &Suite) -> Result<InProcess, EvalError>
     let mut graded = Vec::with_capacity(suite.questions.len());
     for question in &suite.questions {
         let start = Instant::now();
-        let hits = pipeline::retrieve(store, question)?;
+        let retrieval = pipeline::retrieve(store, question)?;
         let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
-        let verdict = metrics::grade_question(question, &hits);
+        let verdict = metrics::grade_question(question, &retrieval.refs, &retrieval.symbol_refs);
         rows.push(QuestionResult {
             id: question.id.clone(),
             task_type: question.task_type.as_str(),
             grader: question.grader.as_str(),
             in_process: PassResult {
                 wall_ms,
-                hits: hits
+                hits: retrieval
+                    .refs
                     .iter()
                     .map(|h| HitRow {
                         rank: h.rank,
