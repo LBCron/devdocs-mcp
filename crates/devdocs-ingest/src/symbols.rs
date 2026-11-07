@@ -269,9 +269,13 @@ fn javascript_top_level(node: Node<'_>) -> bool {
 
 /// The kind of a JavaScript `variable_declarator`: a function or class
 /// value makes it a declaration of that kind, everything else a variable.
+/// The expression-form generator (`function* () {...}`) is a
+/// `generator_function` node and stays a `function` too.
 fn javascript_variable_kind(node: Node<'_>) -> &'static str {
     match node.child_by_field_name("value").map(|value| value.kind()) {
-        Some("function_expression" | "arrow_function" | "function") => "function",
+        Some("function_expression" | "arrow_function" | "function" | "generator_function") => {
+            "function"
+        }
         Some("class") => "class",
         _ => "variable",
     }

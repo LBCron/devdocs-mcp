@@ -121,6 +121,7 @@ fn javascript_fixture_extracts_declarations_classes_and_variables() {
             ("retry", "function"),
             ("deploy", "function"),
             ("planOne", "function"),
+            ("regenerate", "function"),
         ]
     );
 }

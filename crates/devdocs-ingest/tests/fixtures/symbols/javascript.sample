@@ -59,3 +59,8 @@ var deploy = function deploy(target) {
 
 /** The arrow-shaped alias. */
 const planOne = (target) => deploy(target);
+
+/** The generator-valued binding. */
+const regenerate = function* () {
+  yield 'plan';
+};
