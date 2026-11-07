@@ -537,6 +537,72 @@ fn seeded_symbol_two_origins() -> (tempfile::TempDir, Store) {
     (dir, store)
 }
 
+/// Seeds one `acme` 1.0.0 source with 40 chunks that all declare the
+/// `useRouter` symbol — more than the limit×4 retrieval head (8×4 = 32).
+fn seeded_many_symbol_chunks() -> (tempfile::TempDir, Store) {
+    let dir = tempdir().unwrap();
+    let store = devdocs_testkit::open_migrated_and(&dir.path().join("docs.db"), |conn| {
+        let source = devdocs_testkit::seed_source(conn, "acme", true)?;
+        for ordinal in 0..40 {
+            let chunk = devdocs_testkit::seed_chunk(
+                conn,
+                source,
+                i64::from(ordinal),
+                &format!("[\"Guide {ordinal}\"]"),
+                None,
+                "The router hook configures navigation.",
+            )?;
+            conn.execute(
+                "INSERT INTO symbols(symbol, chunk_id, kind) VALUES ('useRouter', ?1, 'function')",
+                [chunk],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    (dir, store)
+}
+
+/// Symbol pagination reaches past the retrieval head: 40 matches page
+/// through `--cursor` without repeats, and the final page closes with an
+/// honest `truncated: false` instead of reporting the head as the whole
+/// result set (docs/08 §Result envelope: truncated when content remains).
+#[test]
+fn symbol_pagination_reaches_past_the_retrieval_head() {
+    let (_dir, store) = seeded_many_symbol_chunks();
+    let plan = Plan::defaults();
+    let mut served: Vec<String> = Vec::new();
+    let mut cursor: Option<u64> = None;
+    for page in 0..10 {
+        let page_plan = Plan {
+            cursor,
+            ..plan.clone()
+        };
+        let envelope = symbol(&store, "acme", None, "useRouter", &page_plan).unwrap();
+        assert!(
+            envelope.results.len() <= 8,
+            "a page never exceeds the limit: {}",
+            envelope.results.len()
+        );
+        served.extend(envelope.results.iter().map(|item| item.doc_ref.clone()));
+        let Some(next) = envelope.next_cursor else {
+            assert!(
+                !envelope.truncated,
+                "the final page must close honestly: page {page}"
+            );
+            break;
+        };
+        assert!(
+            envelope.truncated,
+            "a cursor page implies content remains: page {page}"
+        );
+        cursor = Some(next.parse().unwrap());
+    }
+    assert_eq!(served.len(), 40, "every match is reachable");
+    let unique: std::collections::BTreeSet<&String> = served.iter().collect();
+    assert_eq!(unique.len(), 40, "no repeats across pages");
+}
+
 /// Seeds `acme` 1.0.0 and 0.9.0; only 1.0.0 declares the `makeWidget`
 /// symbol, while the 0.9.0 chunk mentions it in text so the pinned FTS
 /// rung still serves a page.

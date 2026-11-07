@@ -257,7 +257,7 @@ fn symbol_exact_matches_all_sources_in_chunk_id_order() {
     let s = ladder();
     let hits = s
         .store
-        .search_symbols("use_router", SymbolMatch::Exact, SymbolScope::All, 10)
+        .search_symbols("use_router", SymbolMatch::Exact, SymbolScope::All, 10, 0)
         .unwrap();
     assert_eq!(ids(&hits), vec![s.chunk_a, s.chunk_b, s.vue_chunk]);
     assert_eq!(hits[0].symbol_kind.as_deref(), Some("function"));
@@ -275,6 +275,7 @@ fn symbol_case_sensitive_prefix_respects_case() {
             SymbolMatch::CaseSensitivePrefix,
             SymbolScope::All,
             10,
+            0,
         )
         .unwrap();
     assert_eq!(ids(&hits), vec![s.chunk_a], "useRoute only");
@@ -294,6 +295,7 @@ fn symbol_case_insensitive_fallback_matches() {
             SymbolMatch::CaseInsensitive,
             SymbolScope::All,
             10,
+            0,
         )
         .unwrap();
     assert_eq!(ids(&hits), vec![s.chunk_a, s.chunk_b, s.vue_chunk]);
@@ -312,6 +314,7 @@ fn symbol_case_insensitive_fallback_matches() {
             SymbolMatch::CaseInsensitive,
             SymbolScope::All,
             10,
+            0,
         )
         .unwrap();
     assert_eq!(
@@ -350,7 +353,7 @@ fn symbol_lookups_report_the_matched_symbol() {
 
     let hits = s
         .store
-        .search_symbols("plan", SymbolMatch::Exact, SymbolScope::All, 10)
+        .search_symbols("plan", SymbolMatch::Exact, SymbolScope::All, 10, 0)
         .unwrap();
     assert_eq!(ids(&hits), vec![chunk]);
     assert_eq!(hits[0].symbol.as_deref(), Some("plan"));
@@ -415,6 +418,7 @@ fn symbol_scope_narrows_the_search() {
             SymbolMatch::Exact,
             SymbolScope::Library(String::from("NEXT.JS")),
             10,
+            0,
         )
         .unwrap();
     assert_eq!(ids(&hits), vec![s.chunk_a, s.chunk_b]);
@@ -426,6 +430,7 @@ fn symbol_scope_narrows_the_search() {
             SymbolMatch::Exact,
             SymbolScope::Library(String::from("vue")),
             10,
+            0,
         )
         .unwrap();
     assert_eq!(hits.len(), 1, "only the vue chunk");
@@ -438,6 +443,7 @@ fn symbol_scope_narrows_the_search() {
             SymbolMatch::Exact,
             SymbolScope::Source(s.vue_source),
             10,
+            0,
         )
         .unwrap();
     assert_eq!(hits.len(), 1);
@@ -450,7 +456,7 @@ fn symbol_limit_caps_the_results() {
     let s = ladder();
     let hits = s
         .store
-        .search_symbols("use_router", SymbolMatch::Exact, SymbolScope::All, 1)
+        .search_symbols("use_router", SymbolMatch::Exact, SymbolScope::All, 1, 0)
         .unwrap();
     assert_eq!(ids(&hits), vec![s.chunk_a], "the lower chunk id wins");
 }
@@ -473,6 +479,7 @@ fn symbol_limit_counts_chunks_not_symbol_rows() {
             SymbolMatch::CaseSensitivePrefix,
             SymbolScope::All,
             2,
+            0,
         )
         .unwrap();
     assert_eq!(
@@ -494,7 +501,7 @@ fn symbol_ladder_skips_inactive_sources() {
         .unwrap();
     let hits = s
         .store
-        .search_symbols("use_router", SymbolMatch::Exact, SymbolScope::All, 10)
+        .search_symbols("use_router", SymbolMatch::Exact, SymbolScope::All, 10, 0)
         .unwrap();
     assert_eq!(hits.len(), 1, "only the vue chunk stays");
 }

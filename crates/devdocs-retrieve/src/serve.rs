@@ -19,7 +19,7 @@ use crate::fusion::fuse;
 use crate::item::{match_ref, to_result_item};
 use crate::matchexpr::rung_match_expr;
 use crate::resolver::{ProjectContext, Query, resolve};
-use crate::rung::{Scope, fts_rung, symbol_rung, symbol_rungs};
+use crate::rung::{Scope, fts_rung, symbol_rung, symbol_rungs, symbol_rungs_attempt};
 use crate::version::{Version, is_migration_query, pick};
 
 /// The search/open knobs the CLI carries.
@@ -141,7 +141,7 @@ pub fn search_packed(
     let headroom = plan.limit.saturating_mul(4).max(1);
     let served = version_pick(store, &resolved)?;
     let mut rung_hits: Vec<Vec<Hit>> = match &served {
-        Some(pinned) => symbol_rungs(store, &query.text, &pinned.source_ids, headroom)?,
+        Some(pinned) => symbol_rungs(store, &query.text, &pinned.source_ids, headroom, 0)?.0,
         None => vec![symbol_rung(
             store,
             &query.text,
@@ -202,17 +202,16 @@ pub fn symbol(
     plan: &Plan,
 ) -> Result<ResultEnvelope, RetrieveError> {
     let headroom = plan.limit.saturating_mul(4).max(1);
-    let (rung_hits, served_version) =
-        symbol_target_rungs(store, library, version, symbol, headroom)?;
+    let (source_ids, served_version) = symbol_target_sources(store, library, version)?;
     // The ladder attempts ran across the pinned sources — the first
     // attempt with a non-empty union fixed the match mode — so one
     // source's exact hit beats another source's prefix-only match; fusion
-    // ranks that attempt's per-source rungs, ties by chunk id.
-    let fused = fuse(plan.rrf_k, &rung_hits);
-    if fused.is_empty() {
+    // ranks that attempt's per-source rungs, ties by chunk id. Pagination
+    // walks headroom-sized windows past the retrieval head.
+    let fused = symbol_stream(store, symbol, &source_ids, plan, headroom)?;
+    let Some(fused) = fused else {
         return Err(MissReason::SymbolAbsent.into());
-    }
-    let fused = resume_after_cursor(fused, plan.cursor)?;
+    };
     let pick_status = if served_version.is_some() {
         VersionStatus::Verified
     } else {
@@ -244,11 +243,11 @@ pub fn symbol(
     })
 }
 
-/// The rung hits of one symbol lookup target: both branches pin — a
+/// The pinned sources of one symbol lookup target: both branches pin — a
 /// pinned version resolves to its sources, a bare library to the highest
 /// active version's sources (the alias rule, docs/08 §Version policy), so
 /// a stale version's lower chunk ids never surface first. Returns the
-/// rungs and the served version, `Some` only for a pinned one — the
+/// source ids and the served version, `Some` only for a pinned one — the
 /// pick-status input.
 ///
 /// # Errors
@@ -256,13 +255,11 @@ pub fn symbol(
 /// library has no active version, with [`MissReason::VersionAbsent`] when
 /// the served version resolves to no source, [`RetrieveError::Store`] for
 /// store failures.
-fn symbol_target_rungs(
+fn symbol_target_sources(
     store: &Store,
     library: &str,
     version: Option<&str>,
-    symbol: &str,
-    headroom: u32,
-) -> Result<(Vec<Vec<Hit>>, Option<String>), RetrieveError> {
+) -> Result<(Vec<i64>, Option<String>), RetrieveError> {
     let available: Vec<Version> = store
         .library_versions(library)?
         .into_iter()
@@ -288,10 +285,70 @@ fn symbol_target_rungs(
     if source_ids.is_empty() {
         return Err(MissReason::VersionAbsent.into());
     }
-    Ok((
-        symbol_rungs(store, symbol, &source_ids, headroom)?,
-        version.map(str::to_owned),
-    ))
+    Ok((source_ids, version.map(str::to_owned)))
+}
+
+/// Walks the pinned symbol stream window by window. Window 0 runs the
+/// ladder and fixes the match attempt; with a cursor, further
+/// headroom-sized windows fetch past the retrieval head — every store
+/// query stays bounded — until the cursor is found and the tail covers
+/// the page with one lookahead row, which keeps the packed `truncated`
+/// flag honest. Returns `None` when the lookup matched nothing at all —
+/// the [`MissReason::SymbolAbsent`] miss input.
+///
+/// # Errors
+/// [`RetrieveError::Usage`] for a cursor the stream never served,
+/// [`RetrieveError::Store`] for store failures.
+fn symbol_stream(
+    store: &Store,
+    symbol: &str,
+    source_ids: &[i64],
+    plan: &Plan,
+    headroom: u32,
+) -> Result<Option<Vec<(Hit, f64)>>, RetrieveError> {
+    let head = usize::try_from(headroom).unwrap_or(usize::MAX);
+    let limit = usize::try_from(plan.limit).unwrap_or(usize::MAX);
+    let mut stream: Vec<(Hit, f64)> = Vec::new();
+    let mut attempt: Option<usize> = None;
+    let mut window: u32 = 0;
+    loop {
+        let offset = window.saturating_mul(headroom);
+        let rungs = if let Some(index) = attempt {
+            symbol_rungs_attempt(store, symbol, source_ids, headroom, offset, index)?
+        } else {
+            let (rungs, won) = symbol_rungs(store, symbol, source_ids, headroom, offset)?;
+            attempt = won;
+            rungs
+        };
+        // A rung at the full window marks the store's LIMIT: more windows
+        // may follow.
+        let more = rungs.iter().any(|rung| rung.len() >= head);
+        stream.extend(fuse(plan.rrf_k, &rungs));
+        if window == 0 && stream.is_empty() {
+            return Ok(None);
+        }
+        let Some(cursor) = plan.cursor else {
+            // No cursor: the first page serves the retrieval head.
+            return Ok(Some(stream));
+        };
+        let id = i64::try_from(cursor).unwrap_or(-1);
+        match stream.iter().position(|(hit, _)| hit.chunk_id == id) {
+            Some(position) => {
+                // One row past the limit keeps `truncated` honest; the
+                // store running out does the same.
+                if stream.len() - (position + 1) > limit || !more {
+                    return Ok(Some(stream[position + 1..].to_vec()));
+                }
+            }
+            // The cursor names no served chunk and the store ran out.
+            None if !more => {
+                return Err(UsageError::UnknownCursor(cursor.to_string()).into());
+            }
+            // Not found yet, more windows may follow.
+            None => {}
+        }
+        window += 1;
+    }
 }
 
 /// The fallback rungs (docs/08 §Version resolution, step 4): search every

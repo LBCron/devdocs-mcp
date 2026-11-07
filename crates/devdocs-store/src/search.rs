@@ -338,8 +338,10 @@ impl Store {
     /// `mode`, narrowed to `scope`, best match quality first with ties in
     /// the lower chunk id. One hit per chunk — the per-chunk pick keeps the
     /// best-quality row (exact before prefix, then lowest symbol) — so the
-    /// limit counts chunks, not symbol rows. The terminal-license clause
-    /// drops refused sources at query time
+    /// limit counts chunks, not symbol rows. `offset` skips that many
+    /// ranked chunks — the pagination window past the retrieval head; the
+    /// ordering stays deterministic in the mode and scope. The
+    /// terminal-license clause drops refused sources at query time
     /// (docs/implementation/09 §License gate enforcement points, point 3).
     pub fn search_symbols(
         &self,
@@ -347,13 +349,16 @@ impl Store {
         mode: SymbolMatch,
         scope: SymbolScope,
         limit: u32,
+        offset: u32,
     ) -> Result<Vec<Hit>, StoreError> {
         // `?1` is always the raw identifier (equality and match quality),
         // `?2` the limit; the escaped match pattern sits at `?3` in the
-        // prefix modes, and the scope value takes the next index.
+        // prefix modes, the scope value takes the next index when the
+        // scope narrows, and the offset follows the last used index.
         let (predicate, quality, pattern) = match_shape(mode, symbol);
         let scope_idx = if pattern.is_some() { 4 } else { 3 };
         let (scope_clause, scope_value) = scope_filter(scope, scope_idx);
+        let offset_idx = 3 + usize::from(pattern.is_some()) + usize::from(scope_value.is_some());
         let mut bind = vec![
             rusqlite::types::Value::from(symbol.to_owned()),
             rusqlite::types::Value::from(i64::from(limit)),
@@ -375,7 +380,7 @@ impl Store {
              ) \
              WHERE rn = 1 \
              ORDER BY quality DESC, chunk_id \
-             LIMIT ?2"
+             LIMIT ?2 OFFSET ?{offset_idx}"
         )
         .replace(LICENSE_PLACEHOLDER, TERMINAL_LICENSE_CLAUSE);
         let conn = self.conn.lock().map_err(|_| StoreError::LockPoisoned)?;
@@ -383,6 +388,7 @@ impl Store {
         if let Some(value) = scope_value {
             bind.push(value);
         }
+        bind.push(rusqlite::types::Value::from(i64::from(offset)));
         let rows = stmt.query_map(rusqlite::params_from_iter(bind), plain_hit)?;
         rows.collect::<Result<Vec<Hit>, _>>()
             .map_err(StoreError::Sql)

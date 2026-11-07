@@ -93,7 +93,7 @@ pub fn symbol_rung(
     }
     let store_scope = store_scope(scope);
     for (mode, candidate) in ladder_attempts(&normalized) {
-        let hits = store.search_symbols(&candidate, mode, store_scope.clone(), limit)?;
+        let hits = store.search_symbols(&candidate, mode, store_scope.clone(), limit, 0)?;
         if !hits.is_empty() {
             return Ok(hits);
         }
@@ -102,17 +102,25 @@ pub fn symbol_rung(
 }
 
 /// The per-source rung lists of one ladder attempt over a pinned source
-/// set: each source queries the same candidate at the same mode.
+/// set: each source queries the same candidate at the same mode, `limit`
+/// rows past `offset` — the pagination window past the retrieval head.
 fn source_rungs(
     store: &Store,
     candidate: &str,
     mode: SymbolMatch,
     source_ids: &[i64],
     limit: u32,
+    offset: u32,
 ) -> Result<Vec<Vec<Hit>>, RetrieveError> {
     let mut rungs = Vec::with_capacity(source_ids.len());
     for id in source_ids {
-        rungs.push(store.search_symbols(candidate, mode, SymbolScope::Source(*id), limit)?);
+        rungs.push(store.search_symbols(
+            candidate,
+            mode,
+            SymbolScope::Source(*id),
+            limit,
+            offset,
+        )?);
     }
     Ok(rungs)
 }
@@ -123,7 +131,8 @@ fn source_rungs(
 /// precedence holds across the pinned target instead of per source
 /// (docs/implementation/08 §Retrieval ladder). One source's exact hit
 /// then outranks another source's prefix-only match. An empty source set
-/// serves nothing.
+/// serves nothing. Returns the winning attempt's rung lists and its
+/// ladder index, so pagination windows re-query the same attempt.
 ///
 /// # Errors
 /// [`RetrieveError::Store`] when a store query fails.
@@ -132,18 +141,40 @@ pub fn symbol_rungs(
     query: &str,
     source_ids: &[i64],
     limit: u32,
-) -> Result<Vec<Vec<Hit>>, RetrieveError> {
+    offset: u32,
+) -> Result<(Vec<Vec<Hit>>, Option<usize>), RetrieveError> {
     let normalized = normalize_symbol(query);
     if normalized.is_empty() || source_ids.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
-    for (mode, candidate) in ladder_attempts(&normalized) {
-        let rungs = source_rungs(store, &candidate, mode, source_ids, limit)?;
+    for (index, (mode, candidate)) in ladder_attempts(&normalized).into_iter().enumerate() {
+        let rungs = source_rungs(store, &candidate, mode, source_ids, limit, offset)?;
         if rungs.iter().any(|rung| !rung.is_empty()) {
-            return Ok(rungs);
+            return Ok((rungs, Some(index)));
         }
     }
-    Ok(Vec::new())
+    Ok((Vec::new(), None))
+}
+
+/// One pinned ladder attempt at a window offset: the per-source rung
+/// lists of attempt `index`, without re-running the ladder — pagination
+/// past the retrieval head must not switch match modes mid-stream.
+///
+/// # Errors
+/// [`RetrieveError::Store`] when a store query fails.
+pub fn symbol_rungs_attempt(
+    store: &Store,
+    query: &str,
+    source_ids: &[i64],
+    limit: u32,
+    offset: u32,
+    index: usize,
+) -> Result<Vec<Vec<Hit>>, RetrieveError> {
+    let normalized = normalize_symbol(query);
+    let Some((mode, candidate)) = ladder_attempts(&normalized).into_iter().nth(index) else {
+        return Ok(Vec::new());
+    };
+    source_rungs(store, &candidate, mode, source_ids, limit, offset)
 }
 
 /// The store scope a rung scope lowers to.
