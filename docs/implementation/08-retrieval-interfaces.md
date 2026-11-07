@@ -3,7 +3,7 @@ type: guide
 title: Retrieval and Interfaces (L3 + L4)
 description: The hybrid retrieval pipeline, version resolution, budget enforcement, fallback ladder, the result shape, the full CLI contract, and the MCP adapter.
 tags: [devdocs, retrieval, cli, mcp, rrf, max-tokens]
-timestamp: 2026-11-06T19:30:00Z
+timestamp: 2026-11-07T06:40:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -148,7 +148,7 @@ Contract properties (research: architecture.md §L4, GEM §5 checklist):
 - Pagination: `--cursor C` resumes a truncated page — for `search` the cursor is the last served chunk id, for `open` the character offset into the chunk.
 - Exit codes 0/1/2/3/4 per [05](05-architecture.md) (usage errors remap clap's default 2 to 1).
 
-`devdocs symbol <library[@version]> <symbol>` resolves the target first. A library the index lacks is `PKG_NOT_INDEXED` (`not_indexed`), a version it lacks is `PKG_NOT_INDEXED` (`version_absent`) — both exit 2. The target resolved, the symbol rung runs alone through the same fusion-and-pack path as `search`. An empty fusion is the `symbol_absent` miss with the `devdocs search <symbol>` hint. `--cursor C` resumes after the last served chunk id of a truncated page, the same chunk-id cursor `search` uses. The command defines no `--limit` flag; the limit is the search default (8). A malformed or empty target is a usage error, exit 1.
+`devdocs symbol <library[@version]> <symbol>` resolves the target first. A library the index lacks is `PKG_NOT_INDEXED` (`not_indexed`), a version it lacks is `PKG_NOT_INDEXED` (`version_absent`) — both exit 2. An unpinned target pins to the highest active version under the alias rule (§Version resolution), and the match ladder applies across the pinned target's origins with ladder precedence holding over source order. The target resolved, the symbol rung runs alone through the same fusion-and-pack path as `search`. An empty fusion is the `symbol_absent` miss with the `devdocs search <symbol>` hint. `--cursor C` resumes after the last served chunk id of a truncated page, the same chunk-id cursor `search` uses; pagination walks headroom-sized windows past the cursor, so matches beyond the retrieval head stay reachable and `truncated` stays accurate. The command defines no `--limit` flag; the limit is the search default (8). A malformed or empty target is a usage error, exit 1.
 - Progressive disclosure: `devdocs list --json` is the ~20-token discovery surface. `devdocs versions <lib> --json` the per-library surface. `search` and `open` the full read. No prose man page. `--help` stays short.
 - No secrets in argv or stdout. The tool holds no credentials in v1 (public sources only). A future private-source feature will read tokens from the environment or an OS keystore, never from config files.
 - One static binary. No daemon. `devdocs mcp` reuses the same process.
