@@ -263,8 +263,8 @@ fn symbol_exact_matches_all_sources_in_chunk_id_order() {
     assert_eq!(hits[0].symbol_kind.as_deref(), Some("function"));
 }
 
-/// The case-sensitive prefix does not fold case or punctuation: `useR`
-/// matches `useRoute` only, never `use_router` or `useRouter`.
+/// The case-sensitive prefix does not fold case: `useR` matches
+/// `useRoute`, never the stored `use_router` rows.
 #[test]
 fn symbol_case_sensitive_prefix_respects_case() {
     let s = ladder();

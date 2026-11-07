@@ -236,7 +236,7 @@ pub enum SymbolMatch {
     /// The whole identifier, byte-exact.
     Exact,
     /// The identifier starts with the query, case-sensitively — the
-    /// completion shape (`useR` does not match `useRouter`).
+    /// completion shape (`useR` matches `useRouter`).
     CaseSensitivePrefix,
     /// The identifier equals the query or starts with it,
     /// case-insensitively; exact matches rank before prefixes.
