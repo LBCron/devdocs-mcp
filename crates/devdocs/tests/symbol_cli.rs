@@ -224,6 +224,33 @@ fn symbol_cold_miss_is_pkg_not_indexed() {
     );
 }
 
+/// The degenerate scoped target `@/pkg` — an empty scope — is not a
+/// scoped-name escape hatch: it resolves as the literal library name and
+/// the cold miss follows: exit 2, `PKG_NOT_INDEXED`, `not_indexed`.
+#[test]
+fn degenerate_scoped_target_is_pkg_not_indexed() {
+    let (env, config) = symbol_env();
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "symbol",
+            "@/pkg",
+            "makeWidget",
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+        ],
+    );
+    assert_eq!(code, 2, "stdout: {stdout} stderr: {stderr}");
+    assert!(stdout.is_empty(), "a miss prints nothing on stdout");
+    let envelope: ErrorEnvelope = serde_json::from_str(stderr.trim()).expect("stderr is JSON");
+    assert_eq!(envelope.error, "PKG_NOT_INDEXED");
+    assert_eq!(
+        envelope.miss_reason,
+        Some(devdocs_model::MissReason::NotIndexed)
+    );
+}
+
 /// A version the library does not carry is the other cold miss: exit 2,
 /// `PKG_NOT_INDEXED`, `miss_reason: version_absent`.
 #[test]
