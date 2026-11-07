@@ -120,15 +120,25 @@ pub fn run_search(
 
 /// Splits a `devdocs symbol` target into its `(library, version)` pair:
 /// `library@version` pins the version, a bare `library` keeps the library
-/// scope (docs/implementation/08 §CLI contract).
+/// scope, and a scoped `@scope/pkg` keeps its full name
+/// (docs/implementation/08 §CLI contract). The split reuses the resolver's
+/// `name@version` splitter so scoped pins keep the name.
 ///
 /// # Errors
 /// [`Error::Usage`] for an empty or malformed target.
 fn split_symbol_target(target: &str) -> Result<(&str, Option<&str>), Error> {
+    if let Some((library, version)) = devdocs_retrieve::resolver::split_name_version(target) {
+        return Ok((library, Some(version)));
+    }
+    // An unpinned scoped name `@scope/pkg`: the splitter returns `None`
+    // for a missing version, but the full name is the library.
+    if let Some(rest) = target.strip_prefix('@')
+        && !rest.contains('@')
+        && rest.contains('/')
+    {
+        return Ok((target, None));
+    }
     match target.split_once('@') {
-        Some((library, version)) if !library.is_empty() && !version.is_empty() => {
-            Ok((library, Some(version)))
-        }
         Some(_) => Err(Error::Usage(format!(
             "bad symbol target `{target}`: expected library@version"
         ))),

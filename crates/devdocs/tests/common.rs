@@ -153,18 +153,22 @@ fn write_manifest(dir: &Path, responses: &Value) {
     .expect("manifest written");
 }
 
-/// Write the devdocs.toml pointing at the acme `llms.txt` source; return
+/// Write the devdocs.toml pointing at the acme `llms.txt` source under
+/// the given `[sources.<name>]` key — the key is the library name; return
 /// its path.
-fn write_config(root: &Path) -> PathBuf {
+fn write_config(root: &Path, name: &str) -> PathBuf {
     let config = root.join("devdocs.toml");
     std::fs::write(
         &config,
-        concat!(
-            "[sources.acme]\n",
-            "kind = \"llms_txt\"\n",
-            "url = \"https://docs.acme.test/llms.txt\"\n",
-            "license = \"MIT\"\n",
-            "status = \"approved_index\"\n"
+        format!(
+            concat!(
+                "[sources.\"{name}\"]\n",
+                "kind = \"llms_txt\"\n",
+                "url = \"https://docs.acme.test/llms.txt\"\n",
+                "license = \"MIT\"\n",
+                "status = \"approved_index\"\n"
+            ),
+            name = name
         ),
     )
     .expect("config written");
@@ -197,7 +201,7 @@ pub fn indexed_env() -> (Env, PathBuf) {
     let env = Env::new();
     let dir = env.root.join("fixture");
     std::fs::create_dir_all(&dir).expect("fixture dir");
-    let config = write_config(&env.root);
+    let config = write_config(&env.root, "acme");
     add_fixture_version(&env, &dir, &config, "1.0", &acme_responses(INTRO_V1));
     add_fixture_version(&env, &dir, &config, "2.0", &acme_responses(INTRO_V2));
     (env, config)
@@ -224,7 +228,19 @@ pub fn symbol_env() -> (Env, PathBuf) {
     let env = Env::new();
     let dir = env.root.join("fixture");
     std::fs::create_dir_all(&dir).expect("fixture dir");
-    let config = write_config(&env.root);
+    let config = write_config(&env.root, "acme");
+    add_fixture_version(&env, &dir, &config, "1.0", &acme_responses(INTRO_SYMBOL));
+    (env, config)
+}
+
+/// The symbol corpus of [`symbol_env`] indexed under the scoped library
+/// name `@scope/pkg` — the `[sources.<name>]` key is the library name.
+/// Returns the environment and the config path every CLI run needs.
+pub fn scoped_symbol_env() -> (Env, PathBuf) {
+    let env = Env::new();
+    let dir = env.root.join("fixture");
+    std::fs::create_dir_all(&dir).expect("fixture dir");
+    let config = write_config(&env.root, "@scope/pkg");
     add_fixture_version(&env, &dir, &config, "1.0", &acme_responses(INTRO_SYMBOL));
     (env, config)
 }
@@ -265,7 +281,7 @@ pub fn two_symbol_env() -> (Env, PathBuf) {
     let env = Env::new();
     let dir = env.root.join("fixture");
     std::fs::create_dir_all(&dir).expect("fixture dir");
-    let config = write_config(&env.root);
+    let config = write_config(&env.root, "acme");
     add_fixture_version(&env, &dir, &config, "1.0", &symbol_responses());
     (env, config)
 }

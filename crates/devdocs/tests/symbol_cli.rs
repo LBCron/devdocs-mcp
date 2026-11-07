@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{output, symbol_env, two_symbol_env};
+use common::{output, scoped_symbol_env, symbol_env, two_symbol_env};
 use devdocs_model::{ErrorEnvelope, ResultEnvelope};
 use serde_json::Value;
 
@@ -75,6 +75,55 @@ fn bare_library_target_serves_across_versions() {
     let envelope: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
     assert_eq!(envelope.results.len(), 1, "{stdout}");
     assert_eq!(envelope.results[0].served_version, "1.0");
+}
+
+/// A scoped `@scope/pkg` target keeps its full name: the unpinned form
+/// pins to the highest active version and still serves.
+#[test]
+fn scoped_library_target_serves_without_a_version() {
+    let (env, config) = scoped_symbol_env();
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "symbol",
+            "@scope/pkg",
+            "makeWidget",
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+        ],
+    );
+    assert_eq!(code, 0, "symbol failed: {stderr}");
+    let envelope: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    assert_eq!(envelope.results.len(), 1, "{stdout}");
+    assert_eq!(envelope.results[0].served_version, "1.0");
+    assert_eq!(envelope.results[0].requested_version, None);
+}
+
+/// A pinned scoped target `@scope/pkg@1.0` keeps its full name and serves
+/// the pinned version.
+#[test]
+fn scoped_pinned_target_serves_the_pinned_version() {
+    let (env, config) = scoped_symbol_env();
+    let (code, stdout, stderr) = output(
+        env.cmd(),
+        &[
+            "symbol",
+            "@scope/pkg@1.0",
+            "makeWidget",
+            "--json",
+            "--config",
+            config.to_str().expect("config path"),
+        ],
+    );
+    assert_eq!(code, 0, "symbol failed: {stderr}");
+    let envelope: ResultEnvelope = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    assert_eq!(envelope.results.len(), 1, "{stdout}");
+    assert_eq!(envelope.results[0].served_version, "1.0");
+    assert_eq!(
+        envelope.results[0].requested_version.as_deref(),
+        Some("1.0")
+    );
 }
 
 /// The symbol output is byte-identical across runs except `served_at`.

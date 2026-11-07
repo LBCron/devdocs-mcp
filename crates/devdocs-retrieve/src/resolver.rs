@@ -383,7 +383,8 @@ pub fn parse_pnpm_lock(content: &str) -> Vec<Dep> {
 }
 
 /// Splits `name@version` (scoped `@scope/name@version` included).
-fn split_name_version(entry: &str) -> Option<(&str, &str)> {
+#[must_use]
+pub fn split_name_version(entry: &str) -> Option<(&str, &str)> {
     let at = if let Some(rest) = entry.strip_prefix('@') {
         rest.find('@').map(|i| i + 1)?
     } else {
