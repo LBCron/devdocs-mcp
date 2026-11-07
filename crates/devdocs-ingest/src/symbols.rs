@@ -248,10 +248,11 @@ fn python_class_member(node: Node<'_>) -> bool {
 }
 
 /// Whether a JavaScript `variable_declarator` sits at module scope: its
-/// declaration statement's parent must be the `program` or an
-/// `export_statement`. Everything else — a function body, a
-/// `for`-statement initializer, a `switch`-case declaration — is not an
-/// indexable module symbol.
+/// declaration statement, climbed past the transparent non-scoping
+/// wrappers (`labeled_statement`, a single-statement `if_statement`
+/// body), must reach the `program` or an `export_statement`. Everything
+/// else — a function body, a `for`-statement initializer, a `switch`-case
+/// declaration — is not an indexable module symbol.
 fn javascript_top_level(node: Node<'_>) -> bool {
     let Some(declaration) = node.parent() else {
         return false;
@@ -262,9 +263,14 @@ fn javascript_top_level(node: Node<'_>) -> bool {
     ) {
         return false;
     }
-    declaration
-        .parent()
-        .is_some_and(|parent| matches!(parent.kind(), "program" | "export_statement"))
+    let mut ancestor = declaration.parent();
+    while let Some(wrapper) = ancestor {
+        match wrapper.kind() {
+            "labeled_statement" | "if_statement" => ancestor = wrapper.parent(),
+            kind => return matches!(kind, "program" | "export_statement"),
+        }
+    }
+    false
 }
 
 /// The kind of a JavaScript `variable_declarator`: a function or class

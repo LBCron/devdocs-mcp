@@ -164,18 +164,27 @@ fn javascript_fixture_extracts_declarations_classes_and_variables() {
 /// A JavaScript `variable_declarator` is indexed only at module scope:
 /// `for`-statement initializers and `switch`-case declarations stay out,
 /// while plain module-level declarations and `export`ed ones stay in.
+/// The transparent non-scoping wrappers — a label and a single-statement
+/// `if` body — keep the declaration at module scope when they themselves
+/// sit there, and the same shapes inside a function stay out.
 #[test]
 fn javascript_module_scope_declarators_only() {
     let code = concat!(
         "let top = 1;\n",
         "export const exported = 2;\n",
         "var alsoTop = 3;\n",
+        "outer: var labeled = 4;\n",
+        "if (top) var conditional = 5;\n",
         "for (let i = 0; i < 1; i++) {}\n",
         "for (var j = 0; j < 1; j++) {}\n",
         "switch (top) {\n",
         "  case 1:\n",
-        "    let inner = 4;\n",
-        "    var innerVar = 5;\n",
+        "    let inner = 6;\n",
+        "    var innerVar = 7;\n",
+        "}\n",
+        "function f() {\n",
+        "  inner: var hidden = 8;\n",
+        "  if (top) var buried = 9;\n",
         "}\n",
     );
     let symbols = extract("javascript", code);
@@ -187,11 +196,14 @@ fn javascript_module_scope_declarators_only() {
         return;
     }
     assert_eq!(
-        pairs(&extract("javascript", code)),
+        pairs(&symbols),
         vec![
             ("top", "variable"),
             ("exported", "variable"),
             ("alsoTop", "variable"),
+            ("labeled", "variable"),
+            ("conditional", "variable"),
+            ("f", "function"),
         ]
     );
 }
