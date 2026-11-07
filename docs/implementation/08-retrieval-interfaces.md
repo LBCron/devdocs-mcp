@@ -3,7 +3,7 @@ type: guide
 title: Retrieval and Interfaces (L3 + L4)
 description: The hybrid retrieval pipeline, version resolution, budget enforcement, fallback ladder, the result shape, the full CLI contract, and the MCP adapter.
 tags: [devdocs, retrieval, cli, mcp, rrf, max-tokens]
-timestamp: 2026-11-07T06:40:00Z
+timestamp: 2026-11-07T08:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -58,7 +58,7 @@ Migration questions: when the query matches a migration pattern ("upgrade", "mig
 
 ## Rungs
 
-1. **Symbol exact.** `SELECT ... FROM symbols JOIN chunks` on the normalized identifier. Cheap, decisive for API names. Exact identifiers beat dense retrieval for API names (research: retrieval-design.md §3.1). The rung normalizes the query first: trim it, then strip trailing balanced `(...)`, `[...]`, and `<...>` groups repeatedly (`useRouter()` becomes `useRouter`). Dots stay: `obj.method` keeps its path. The ladder tries, in order: exact, the last dot-segment of a dotted form as a second exact attempt, case-sensitive prefix, case-insensitive. The first non-empty list wins. The rung requests 4× the hit count for fusion headroom, the same shape the FTS rung applies. The case-insensitive rung folds ASCII only — SQLite's NOCASE/LIKE fold ASCII letters, so an identifier cased with non-ASCII letters must match its stored case.
+1. **Symbol exact.** `SELECT ... FROM symbols JOIN chunks` on the normalized identifier. Cheap, decisive for API names. Exact identifiers beat dense retrieval for API names (research: retrieval-design.md §3.1). The rung normalizes the query first: trim it, then strip trailing balanced `(...)`, `[...]`, and `<...>` groups repeatedly (`useRouter()` becomes `useRouter`). Dots stay: `obj.method` keeps its path. The ladder tries, in order: exact, the last dot-segment of a dotted form as a second exact attempt, case-sensitive prefix, case-insensitive. The first non-empty list wins. The rung requests 4× the hit count for fusion headroom, the same shape the FTS rung applies. The case-insensitive rung folds ASCII only — SQLite's NOCASE/LIKE fold ASCII letters, so an identifier cased with non-ASCII letters must match its stored case. When the request resolves to a library (§Version resolution), the rung pins to that library's served version's sources; otherwise it scans the resolved scope.
 2. **FTS5 BM25.** Build the MATCH expression from the query: split on whitespace, drop operators, wrap each token as a quoted literal, append `*` to the last token of each run for prefix matching. Example: query `rewrite proxy request` becomes `"rewrite" "proxy" "request" *`. This construction is a property-tested invariant ([04](04-testing-strategy.md)). Ranking: `bm25(chunks_fts, 5.0, 1.0)` with `LIMIT` at 4× the requested hits for fusion headroom. Attach `snippet(chunks_fts, 1, '⟦', '⟧', '…', 12)` for highlight offsets.
 3. **Vector scan** (feature `embeddings`, phase 3). Embed the query with the same model that built the index, scan `chunks_vec` in-process by hamming distance, take the top 4× hits.
 
