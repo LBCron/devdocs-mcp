@@ -537,6 +537,72 @@ fn seeded_symbol_two_origins() -> (tempfile::TempDir, Store) {
     (dir, store)
 }
 
+/// Seeds `acme` with two active versions — 0.9.0 ingested first (lower
+/// chunk ids), 1.0.0 second — both declaring the `makeWidget` symbol.
+fn seeded_symbol_both_versions() -> (tempfile::TempDir, Store) {
+    let dir = tempdir().unwrap();
+    let store = devdocs_testkit::open_migrated_and(&dir.path().join("docs.db"), |conn| {
+        let older = devdocs_testkit::seed_source(conn, "acme", true)?;
+        conn.execute(
+            "UPDATE sources SET version = '0.9.0', \
+             origin_url = 'https://example.test/acme-old' WHERE source_id = ?1",
+            [older],
+        )?;
+        let current = devdocs_testkit::seed_source(conn, "acme", true)?;
+        for (source, ordinal) in [(older, 0), (current, 0)] {
+            let chunk = devdocs_testkit::seed_chunk(
+                conn,
+                source,
+                ordinal,
+                "[\"Widgets\"]",
+                None,
+                "The widget factory builds one widget.",
+            )?;
+            conn.execute(
+                "INSERT INTO symbols(symbol, chunk_id, kind) VALUES ('makeWidget', ?1, 'function')",
+                [chunk],
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    (dir, store)
+}
+
+/// The unpinned symbol lookup serves the highest active version: a bare
+/// library target pins to it under the alias rule instead of searching
+/// the library scope, where the stale version's lower chunk ids would
+/// surface first (docs/08 §Version policy).
+#[test]
+fn the_unpinned_symbol_lookup_serves_the_highest_version() {
+    let (_dir, store) = seeded_symbol_both_versions();
+    let envelope = symbol(&store, "acme", None, "makeWidget", &Plan::defaults()).unwrap();
+    assert!(
+        envelope
+            .results
+            .iter()
+            .all(|item| item.served_version == "1.0.0"),
+        "the unpinned lookup must serve 1.0.0 only, got {:?}",
+        envelope
+            .results
+            .iter()
+            .map(|item| item.served_version.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        envelope
+            .results
+            .iter()
+            .all(|item| item.version_status == VersionStatus::Alias),
+        "the unpinned lookup keeps the alias status, got {:?}",
+        envelope
+            .results
+            .iter()
+            .map(|item| item.version_status)
+            .collect::<Vec<_>>()
+    );
+}
+
 /// The symbol ladder applies across the pinned target: the exact hit in
 /// the second origin outranks the prefix-only sibling in the first, whose
 /// lower chunk ids would otherwise win the rank tie

@@ -174,9 +174,10 @@ pub fn search_packed(
 /// [`MissReason::VersionAbsent`] — then the symbol rung runs alone through
 /// the same fusion-and-pack path (docs/implementation/08 §Retrieval ladder:
 /// cheap, decisive). A pinned version scopes the rung to that version's
-/// sources; without one the rung keeps the library scope. A resolved
-/// target whose lookup serves nothing is the [`MissReason::SymbolAbsent`]
-/// miss (docs/implementation/13 §M5).
+/// sources; without one the rung pins to the highest active version's
+/// sources under the alias rule, the items keeping the alias status. A
+/// resolved target whose lookup serves nothing is the
+/// [`MissReason::SymbolAbsent`] miss (docs/implementation/13 §M5).
 ///
 /// # Errors
 /// [`RetrieveError::Miss`] on the miss paths (exit 2) and
@@ -188,12 +189,9 @@ pub fn symbol(
     symbol: &str,
     plan: &Plan,
 ) -> Result<ResultEnvelope, RetrieveError> {
-    if store.library_versions(library)?.is_empty() {
-        return Err(MissReason::NotIndexed.into());
-    }
     let headroom = plan.limit.saturating_mul(4).max(1);
     let (rung_hits, served_version) =
-        pinned_symbol_rungs(store, library, version, symbol, headroom)?;
+        symbol_target_rungs(store, library, version, symbol, headroom)?;
     // The ladder attempts ran across the pinned sources — the first
     // attempt with a non-empty union fixed the match mode — so one
     // source's exact hit beats another source's prefix-only match; fusion
@@ -234,42 +232,54 @@ pub fn symbol(
     })
 }
 
-/// The rung hits of one symbol lookup target: a pinned version runs the
-/// ladder across its resolved sources (docs/implementation/08
-/// §Retrieval ladder); a bare library keeps the library scope. Returns
-/// the rungs and the served version, `Some` only for a pinned one — the
+/// The rung hits of one symbol lookup target: both branches pin — a
+/// pinned version resolves to its sources, a bare library to the highest
+/// active version's sources (the alias rule, docs/08 §Version policy), so
+/// a stale version's lower chunk ids never surface first. Returns the
+/// rungs and the served version, `Some` only for a pinned one — the
 /// pick-status input.
 ///
 /// # Errors
-/// [`RetrieveError::Miss`] with [`MissReason::VersionAbsent`] when a
-/// pinned version resolves to no source, [`RetrieveError::Store`] for
+/// [`RetrieveError::Miss`] with [`MissReason::NotIndexed`] when the
+/// library has no active version, with [`MissReason::VersionAbsent`] when
+/// the served version resolves to no source, [`RetrieveError::Store`] for
 /// store failures.
-fn pinned_symbol_rungs(
+fn symbol_target_rungs(
     store: &Store,
     library: &str,
     version: Option<&str>,
     symbol: &str,
     headroom: u32,
 ) -> Result<(Vec<Vec<Hit>>, Option<String>), RetrieveError> {
-    match version {
-        Some(version) => {
-            let source_ids = store.find_sources(library, version)?;
-            if source_ids.is_empty() {
-                return Err(MissReason::VersionAbsent.into());
-            }
-            let rungs = symbol_rungs(store, symbol, &source_ids, headroom)?;
-            Ok((rungs, Some(version.to_owned())))
-        }
-        None => Ok((
-            vec![symbol_rung(
-                store,
-                symbol,
-                Scope::Library(library),
-                headroom,
-            )?],
-            None,
-        )),
+    let available: Vec<Version> = store
+        .library_versions(library)?
+        .into_iter()
+        .map(Version::from)
+        .collect();
+    if available.is_empty() {
+        return Err(MissReason::NotIndexed.into());
     }
+    let served = match version {
+        Some(version) => version.to_owned(),
+        None => {
+            // The unpinned request serves the highest active version; the
+            // returned served-version element stays `None` so the items
+            // keep the alias status.
+            pick(&available, None)
+                .version
+                .ok_or(MissReason::NotIndexed)?
+                .as_str()
+                .to_owned()
+        }
+    };
+    let source_ids = store.find_sources(library, &served)?;
+    if source_ids.is_empty() {
+        return Err(MissReason::VersionAbsent.into());
+    }
+    Ok((
+        symbol_rungs(store, symbol, &source_ids, headroom)?,
+        version.map(str::to_owned),
+    ))
 }
 
 /// The fallback rungs (docs/08 §Version resolution, step 4): search every
