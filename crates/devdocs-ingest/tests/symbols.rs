@@ -104,6 +104,13 @@ fn javascript_fixture_extracts_declarations_classes_and_variables() {
         vec![
             ("MAX_RETRIES", "variable"),
             ("cacheVersion", "variable"),
+            ("makeWidget", "variable"),
+            ("tool", "variable"),
+            ("withDefault", "variable"),
+            ("restProps", "variable"),
+            ("first", "variable"),
+            ("remaining", "variable"),
+            ("version", "variable"),
             ("Planner", "class"),
             ("constructor", "method"),
             ("plan", "method"),

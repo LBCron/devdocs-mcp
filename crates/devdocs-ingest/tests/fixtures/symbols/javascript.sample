@@ -6,6 +6,15 @@ const MAX_RETRIES = 3;
 
 let cacheVersion = 'v2';
 
+/** The destructured planner parts. */
+const { makeWidget, buildTool: tool, withDefault = MAX_RETRIES, ...restProps } = factories;
+
+/** The destructured plan sequence. */
+const [first, ...remaining] = planSeq;
+
+/** The destructured nested metadata. */
+const { meta: { version } } = factories;
+
 /** Builds deploy plans for targets. */
 class Planner {
   constructor(zone) {

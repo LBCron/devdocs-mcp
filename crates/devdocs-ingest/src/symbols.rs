@@ -149,17 +149,61 @@ fn simple_kind(kind: &str) -> Option<&'static str> {
 }
 
 /// Records one declaration: its `name` field child and its start line.
-/// A node without a usable `name` (a parse-error hole) contributes nothing.
+/// A destructuring pattern name (`const { a, b } = ...`) records one
+/// entry per bound identifier. A node without a usable `name` (a
+/// parse-error hole) contributes nothing.
 fn push(node: Node<'_>, kind: &str, src: &[u8], out: &mut Vec<ExtractedSymbol>) {
-    if let Some(name) = node
-        .child_by_field_name("name")
-        .and_then(|name| name.utf8_text(src).ok().filter(|text| !text.is_empty()))
+    let Some(name) = node.child_by_field_name("name") else {
+        return;
+    };
+    let mut names = Vec::new();
+    if matches!(name.kind(), "object_pattern" | "array_pattern") {
+        pattern_bindings(name, src, &mut names);
+    } else if let Ok(text) = name.utf8_text(src)
+        && !text.is_empty()
     {
+        names.push(text);
+    }
+    let line = u32::try_from(node.start_position().row + 1).unwrap_or(u32::MAX);
+    for text in names {
         out.push(ExtractedSymbol {
-            name: name.to_owned(),
+            name: text.to_owned(),
             kind: kind.to_owned(),
-            line: u32::try_from(node.start_position().row + 1).unwrap_or(u32::MAX),
+            line,
         });
+    }
+}
+
+/// The identifiers a destructuring pattern binds, in source order.
+/// Structural only: an assignment pattern contributes its `left`, a
+/// `pair_pattern` its `value`, so default-value expressions and object
+/// keys stay out.
+fn pattern_bindings<'a>(pattern: Node<'_>, src: &'a [u8], out: &mut Vec<&'a str>) {
+    match pattern.kind() {
+        "identifier" | "shorthand_property_identifier_pattern" => {
+            if let Ok(text) = pattern.utf8_text(src)
+                && !text.is_empty()
+            {
+                out.push(text);
+            }
+        }
+        "assignment_pattern" | "object_assignment_pattern" => {
+            if let Some(left) = pattern.child_by_field_name("left") {
+                pattern_bindings(left, src, out);
+            }
+        }
+        "pair_pattern" => {
+            if let Some(value) = pattern.child_by_field_name("value") {
+                pattern_bindings(value, src, out);
+            }
+        }
+        "rest_pattern" | "object_pattern" | "array_pattern" => {
+            let mut cursor = pattern.walk();
+            for child in pattern.children(&mut cursor) {
+                pattern_bindings(child, src, out);
+            }
+        }
+        _ => {}
     }
 }
 
