@@ -165,10 +165,10 @@ fn javascript_fixture_extracts_declarations_classes_and_variables() {
 /// `for`-statement initializers and `switch`-case declarations stay out,
 /// while plain module-level declarations and `export`ed ones stay in.
 /// The transparent non-scoping wrappers — a label, and a single-statement
-/// `if` body for `var` alone — keep the declaration at module scope when
-/// they themselves sit there, and the same shapes inside a function stay
-/// out. A `let` under an `if` stays out (a `SyntaxError` in real JavaScript,
-/// but the grammar still parses it).
+/// `if` body — keep a `var` declaration at module scope when they
+/// themselves sit there, and the same shapes inside a function stay out.
+/// A lexical declaration (`let`/`const`) allows neither wrapper (a
+/// `SyntaxError` in real JavaScript, but the grammar still parses it).
 #[test]
 fn javascript_module_scope_declarators_only() {
     let code = concat!(
@@ -176,6 +176,7 @@ fn javascript_module_scope_declarators_only() {
         "export const exported = 2;\n",
         "var alsoTop = 3;\n",
         "outer: var labeled = 4;\n",
+        "outer: let labeledLet = 11;\n",
         "if (top) var conditional = 5;\n",
         "if (top) let blocked = 10;\n",
         "for (let i = 0; i < 1; i++) {}\n",

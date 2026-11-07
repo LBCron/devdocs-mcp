@@ -249,9 +249,10 @@ fn python_class_member(node: Node<'_>) -> bool {
 
 /// Whether a JavaScript `variable_declarator` sits at module scope: its
 /// declaration statement, climbed past the transparent non-scoping
-/// wrappers (`labeled_statement` for both declaration kinds, a
-/// single-statement `if_statement` body for `var`, which alone hoists
-/// out of an `if`), must reach the `program` or an `export_statement`.
+/// wrappers (`labeled_statement` and a single-statement `if_statement`
+/// body for `var` alone, which hoists out of both; a lexical
+/// declaration allows neither wrapper — `outer: let x = 1;` is a
+/// `SyntaxError`), must reach the `program` or an `export_statement`.
 /// Everything else — a function body, a `for`-statement initializer, a
 /// `switch`-case declaration — is not an indexable module symbol.
 fn javascript_top_level(node: Node<'_>) -> bool {
@@ -268,8 +269,7 @@ fn javascript_top_level(node: Node<'_>) -> bool {
     let mut ancestor = declaration.parent();
     while let Some(wrapper) = ancestor {
         match wrapper.kind() {
-            "labeled_statement" => ancestor = wrapper.parent(),
-            "if_statement" if hoists => ancestor = wrapper.parent(),
+            "labeled_statement" | "if_statement" if hoists => ancestor = wrapper.parent(),
             kind => return matches!(kind, "program" | "export_statement"),
         }
     }
