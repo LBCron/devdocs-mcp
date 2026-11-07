@@ -537,6 +537,80 @@ fn seeded_symbol_two_origins() -> (tempfile::TempDir, Store) {
     (dir, store)
 }
 
+/// Seeds `acme` 1.0.0 and 0.9.0; only 1.0.0 declares the `makeWidget`
+/// symbol, while the 0.9.0 chunk mentions it in text so the pinned FTS
+/// rung still serves a page.
+fn seeded_symbol_two_versions() -> (tempfile::TempDir, Store) {
+    let dir = tempdir().unwrap();
+    let store = devdocs_testkit::open_migrated_and(&dir.path().join("docs.db"), |conn| {
+        let current = devdocs_testkit::seed_source(conn, "acme", true)?;
+        conn.execute(
+            "INSERT INTO sources(library, version, kind, origin_url, license_status, fetched_at, active) \
+             VALUES ('acme', '0.9.0', 'llms_txt', 'https://example.test/acme-old', 'approved_index', \
+             '2026-01-01T00:00:00Z', 1)",
+            [],
+        )?;
+        let older = conn.last_insert_rowid();
+        let _older_chunk = devdocs_testkit::seed_chunk(
+            conn,
+            older,
+            0,
+            "[\"Widgets\"]",
+            None,
+            "The makeWidget factory maps routing requests.",
+        )?;
+        let current_chunk = devdocs_testkit::seed_chunk(
+            conn,
+            current,
+            0,
+            "[\"Widgets\"]",
+            None,
+            "The widget factory builds one widget.",
+        )?;
+        conn.execute(
+            "INSERT INTO symbols(symbol, chunk_id, kind) VALUES ('makeWidget', ?1, 'function')",
+            [current_chunk],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    (dir, store)
+}
+
+/// The search symbol rung pins to the served version: a symbol only the
+/// non-pinned version carries must not answer a pinned search — the rung
+/// used to run at the library scope, leaking the other version's symbol
+/// chunk (docs/08 §Version resolution).
+#[test]
+fn the_search_symbol_rung_serves_only_the_pinned_version() {
+    let (dir, store) = seeded_symbol_two_versions();
+    let query = Query::new("makeWidget", Some("acme"), Some("0.9.0"));
+    let envelope = search(&store, &query, dir.path(), &Plan::defaults()).unwrap();
+    let served: Vec<&str> = envelope
+        .results
+        .iter()
+        .map(|item| item.served_version.as_str())
+        .collect();
+    assert_eq!(served, vec!["0.9.0"], "{served:?}");
+
+    // The unpinned search still finds the symbol through the picked
+    // highest version.
+    let query = Query::new("makeWidget", Some("acme"), None);
+    let envelope = search(&store, &query, dir.path(), &Plan::defaults()).unwrap();
+    assert!(
+        envelope
+            .results
+            .iter()
+            .any(|item| item.doc_ref.ends_with("#makewidget")),
+        "the unpinned search must serve the symbol, got {:?}",
+        envelope
+            .results
+            .iter()
+            .map(|i| &i.doc_ref)
+            .collect::<Vec<_>>()
+    );
+}
+
 /// Seeds `acme` with two active versions — 0.9.0 ingested first (lower
 /// chunk ids), 1.0.0 second — both declaring the `makeWidget` symbol.
 fn seeded_symbol_both_versions() -> (tempfile::TempDir, Store) {

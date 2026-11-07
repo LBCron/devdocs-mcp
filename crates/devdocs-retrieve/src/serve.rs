@@ -135,16 +135,28 @@ pub fn search_packed(
     let resolved = resolve(query, ctx);
 
     // Plan the rungs from the resolution. The headroom is 4× the requested
-    // hits (docs/08 §Rungs, rungs 1 and 2).
+    // hits (docs/08 §Rungs, rungs 1 and 2). The version pick hoists ahead
+    // of the rungs so the symbol rung pins to the served version exactly
+    // like the FTS rungs do.
     let headroom = plan.limit.saturating_mul(4).max(1);
-    let mut rung_hits: Vec<Vec<Hit>> = vec![symbol_rung(
+    let served = version_pick(store, &resolved)?;
+    let mut rung_hits: Vec<Vec<Hit>> = match &served {
+        Some(pinned) => symbol_rungs(store, &query.text, &pinned.source_ids, headroom)?,
+        None => vec![symbol_rung(
+            store,
+            &query.text,
+            scope_for(&resolved),
+            headroom,
+        )?],
+    };
+    let (pick_status, served_version, requested_text) = version_rung_hits(
         store,
-        &query.text,
-        scope_for(&resolved),
+        query,
+        &resolved,
         headroom,
-    )?];
-    let (pick_status, served_version, requested_text) =
-        version_rung_hits(store, query, &resolved, headroom, &mut rung_hits)?;
+        &mut rung_hits,
+        served.as_ref(),
+    )?;
 
     // Fuse the rungs and pack under the count cap and the token budget.
     let fused = fuse(plan.rrf_k, &rung_hits);
@@ -314,34 +326,36 @@ fn fallback_rung_hits(
     Ok((VersionStatus::Alias, None, version.map(str::to_owned)))
 }
 
-/// The version-resolution rungs (docs/08 §Version resolution): with a
-/// resolved library, the served source's FTS rung plus the
-/// migration-question rung via [`nearest_older`]; without one, the
-/// fallback rungs via [`fallback_rung_hits`]. Appends the rungs to
-/// `rung_hits` and returns the per-item status inputs — the pick status,
-/// the served version, and the requested version.
+/// The version a resolved library serves, computed once for the whole
+/// search: the pick outcome, the pinned source ids of the served version,
+/// and the available versions (the migration rung's input).
+struct ServedVersion {
+    /// The library the pick served, for the migration rung's lookup.
+    library: String,
+    /// The served version.
+    served: Version,
+    /// The status the served results carry.
+    status: VersionStatus,
+    /// Every active source of the `(library, version)` pair.
+    source_ids: Vec<i64>,
+    /// Every active version the library carries.
+    available: Vec<Version>,
+}
+
+/// The version pick over a resolved library's available versions
+/// (docs/08 §Version resolution), with the served version's pinned source
+/// ids. `None` when no library resolved or the index carries no active
+/// version for it — the caller turns that into the weak-hint fallback or
+/// the `not_indexed` miss.
 ///
 /// # Errors
-/// [`RetrieveError::Miss`] with `not_indexed` when the library has no
-/// sources or the pick serves none, [`RetrieveError::Store`] for store
-/// failures.
-fn version_rung_hits(
+/// [`RetrieveError::Store`] for store failures.
+fn version_pick(
     store: &Store,
-    query: &Query,
     resolved: &crate::resolver::Resolved,
-    headroom: u32,
-    rung_hits: &mut Vec<Vec<Hit>>,
-) -> Result<(VersionStatus, Option<String>, Option<String>), RetrieveError> {
+) -> Result<Option<ServedVersion>, RetrieveError> {
     let Some(library) = &resolved.library else {
-        // Without a library, search every approved source (docs/08
-        // §Version resolution, step 4).
-        return fallback_rung_hits(
-            store,
-            query,
-            resolved.version.as_deref(),
-            headroom,
-            rung_hits,
-        );
+        return Ok(None);
     };
     let available: Vec<Version> = store
         .library_versions(library)?
@@ -349,33 +363,71 @@ fn version_rung_hits(
         .map(Version::from)
         .collect();
     if available.is_empty() {
-        if query.library.is_none() {
-            // The library came from a lockfile or a query mention — a
-            // weak hint (docs/08 §Version resolution, steps 2 and 3). An
-            // absent weak-hint library degrades to the fallback (step 4);
-            // only a flag-named library is a hard miss. A version rides
-            // along only from the flags (step 1), never from the weak
-            // hint that named the absent library.
-            return fallback_rung_hits(store, query, query.version.as_deref(), headroom, rung_hits);
-        }
-        return Err(MissReason::NotIndexed.into());
+        return Ok(None);
     }
-    let pick = pick(&available, resolved.version.as_deref());
-    let served = pick.version.clone().ok_or(MissReason::NotIndexed)?;
-    // The pinned scope serves every active origin of the
-    // `(library, version)` pair; the schema allows several per pair.
+    let picked = pick(&available, resolved.version.as_deref());
+    let Some(served) = picked.version else {
+        return Ok(None);
+    };
     let source_ids = store.find_sources(library, served.as_str())?;
     if source_ids.is_empty() {
-        return Err(MissReason::NotIndexed.into());
+        return Ok(None);
     }
+    Ok(Some(ServedVersion {
+        library: library.clone(),
+        served,
+        status: picked.status,
+        source_ids,
+        available,
+    }))
+}
+
+/// The version-resolution rungs (docs/08 §Version resolution): with a
+/// served version (precomputed by [`version_pick`]), the pinned sources'
+/// FTS rung plus the migration-question rung via [`nearest_older`];
+/// without one, the fallback rungs via [`fallback_rung_hits`]. Appends
+/// the rungs to `rung_hits` and returns the per-item status inputs — the
+/// pick status, the served version, and the requested version.
+///
+/// # Errors
+/// [`RetrieveError::Miss`] with `not_indexed` when a flag-named library
+/// serves no version, [`RetrieveError::Store`] for store failures.
+fn version_rung_hits(
+    store: &Store,
+    query: &Query,
+    resolved: &crate::resolver::Resolved,
+    headroom: u32,
+    rung_hits: &mut Vec<Vec<Hit>>,
+    served: Option<&ServedVersion>,
+) -> Result<(VersionStatus, Option<String>, Option<String>), RetrieveError> {
+    let Some(served) = served else {
+        // No version serves. A flag-named library is the hard miss; the
+        // weak hints — lockfile, query mention, no library at all —
+        // degrade to the fallback (docs/08 §Version resolution, steps 2
+        // through 4). A version rides along only from the flags (step 1),
+        // never from the weak hint that named the absent library.
+        if query.library.is_some() {
+            return Err(MissReason::NotIndexed.into());
+        }
+        return fallback_rung_hits(store, query, query.version.as_deref(), headroom, rung_hits);
+    };
+    // The pinned scope serves every active origin of the
+    // `(library, version)` pair; the schema allows several per pair.
     let expr = rung_match_expr(&query.text);
-    rung_hits.push(store.search_fts_sources(&expr, &source_ids, headroom)?);
-    if let Some(migration) = migration_rung(store, query, library, &served, &available, headroom)? {
+    rung_hits.push(store.search_fts_sources(&expr, &served.source_ids, headroom)?);
+    if let Some(migration) = migration_rung(
+        store,
+        query,
+        &served.library,
+        &served.served,
+        &served.available,
+        headroom,
+    )? {
         rung_hits.push(migration);
     }
     Ok((
-        pick.status,
-        Some(served.as_str().to_owned()),
+        served.status,
+        Some(served.served.as_str().to_owned()),
         resolved.version.clone(),
     ))
 }
