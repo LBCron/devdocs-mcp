@@ -492,3 +492,67 @@ fn a_store_failure_propagates_from_the_symbol_rung() {
     let error = symbol(&store, "acme", None, "makeWidget", &plan).unwrap_err();
     assert!(matches!(error, RetrieveError::Store(_)), "{error}");
 }
+
+/// Seeds `acme` 1.0.0 with two active origins: the first carries only the
+/// prefix sibling `makeWidgetPro` (its chunk ids are lower), the second
+/// carries the exact `makeWidget`.
+fn seeded_symbol_two_origins() -> (tempfile::TempDir, Store) {
+    let dir = tempdir().unwrap();
+    let store = devdocs_testkit::open_migrated_and(&dir.path().join("docs.db"), |conn| {
+        conn.execute(
+            "INSERT INTO sources(library, version, kind, origin_url, license_status, fetched_at, active) \
+             VALUES ('acme', '1.0.0', 'llms_txt', 'https://example.test/acme-b', 'approved_index', \
+             '2026-01-01T00:00:00Z', 1)",
+            [],
+        )?;
+        let prefix = conn.last_insert_rowid();
+        let exact = devdocs_testkit::seed_source(conn, "acme", true)?;
+        let prefix_chunk = devdocs_testkit::seed_chunk(
+            conn,
+            prefix,
+            0,
+            "[\"Widgets\"]",
+            None,
+            "The widget factory grows a second form.",
+        )?;
+        conn.execute(
+            "INSERT INTO symbols(symbol, chunk_id, kind) VALUES ('makeWidgetPro', ?1, 'function')",
+            [prefix_chunk],
+        )?;
+        let exact_chunk = devdocs_testkit::seed_chunk(
+            conn,
+            exact,
+            0,
+            "[\"Widgets\"]",
+            None,
+            "The widget factory builds one widget.",
+        )?;
+        conn.execute(
+            "INSERT INTO symbols(symbol, chunk_id, kind) VALUES ('makeWidget', ?1, 'function')",
+            [exact_chunk],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    (dir, store)
+}
+
+/// The symbol ladder applies across the pinned target: the exact hit in
+/// the second origin outranks the prefix-only sibling in the first, whose
+/// lower chunk ids would otherwise win the rank tie
+/// (docs/implementation/08 §Retrieval ladder).
+#[test]
+fn the_symbol_ladder_applies_across_the_pinned_target() {
+    let (_dir, store) = seeded_symbol_two_origins();
+    let plan = Plan {
+        limit: 1,
+        ..Plan::defaults()
+    };
+    let envelope = symbol(&store, "acme", Some("1.0.0"), "makeWidget", &plan).unwrap();
+    assert_eq!(envelope.results.len(), 1, "{:?}", envelope.results);
+    assert!(
+        envelope.results[0].doc_ref.ends_with("#makewidget"),
+        "the exact hit must rank first, got {:?}",
+        envelope.results
+    );
+}

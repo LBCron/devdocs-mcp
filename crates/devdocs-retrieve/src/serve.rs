@@ -19,7 +19,7 @@ use crate::fusion::fuse;
 use crate::item::{match_ref, to_result_item};
 use crate::matchexpr::rung_match_expr;
 use crate::resolver::{ProjectContext, Query, resolve};
-use crate::rung::{Scope, fts_rung, symbol_rung};
+use crate::rung::{Scope, fts_rung, symbol_rung, symbol_rungs};
 use crate::version::{Version, is_migration_query, pick};
 
 /// The search/open knobs the CLI carries.
@@ -194,8 +194,10 @@ pub fn symbol(
     let headroom = plan.limit.saturating_mul(4).max(1);
     let (rung_hits, served_version) =
         pinned_symbol_rungs(store, library, version, symbol, headroom)?;
-    // A single rung fuses as identity; several pinned sources rank their
-    // best hits equally, ties by chunk id.
+    // The ladder attempts ran across the pinned sources — the first
+    // attempt with a non-empty union fixed the match mode — so one
+    // source's exact hit beats another source's prefix-only match; fusion
+    // ranks that attempt's per-source rungs, ties by chunk id.
     let fused = fuse(plan.rrf_k, &rung_hits);
     if fused.is_empty() {
         return Err(MissReason::SymbolAbsent.into());
@@ -232,10 +234,11 @@ pub fn symbol(
     })
 }
 
-/// The rung hits of one symbol lookup target: a pinned version runs one
-/// `Scope::Source` rung per resolved source; a bare library keeps the
-/// library scope. Returns the rungs and the served version, `Some` only
-/// for a pinned one — the pick-status input.
+/// The rung hits of one symbol lookup target: a pinned version runs the
+/// ladder across its resolved sources (docs/implementation/08
+/// §Retrieval ladder); a bare library keeps the library scope. Returns
+/// the rungs and the served version, `Some` only for a pinned one — the
+/// pick-status input.
 ///
 /// # Errors
 /// [`RetrieveError::Miss`] with [`MissReason::VersionAbsent`] when a
@@ -254,10 +257,7 @@ fn pinned_symbol_rungs(
             if source_ids.is_empty() {
                 return Err(MissReason::VersionAbsent.into());
             }
-            let rungs = source_ids
-                .iter()
-                .map(|id| symbol_rung(store, symbol, Scope::Source(*id), headroom))
-                .collect::<Result<Vec<_>, _>>()?;
+            let rungs = symbol_rungs(store, symbol, &source_ids, headroom)?;
             Ok((rungs, Some(version.to_owned())))
         }
         None => Ok((

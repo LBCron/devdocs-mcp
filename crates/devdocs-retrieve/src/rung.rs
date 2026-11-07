@@ -101,6 +101,51 @@ pub fn symbol_rung(
     Ok(Vec::new())
 }
 
+/// The per-source rung lists of one ladder attempt over a pinned source
+/// set: each source queries the same candidate at the same mode.
+fn source_rungs(
+    store: &Store,
+    candidate: &str,
+    mode: SymbolMatch,
+    source_ids: &[i64],
+    limit: u32,
+) -> Result<Vec<Vec<Hit>>, RetrieveError> {
+    let mut rungs = Vec::with_capacity(source_ids.len());
+    for id in source_ids {
+        rungs.push(store.search_symbols(candidate, mode, SymbolScope::Source(*id), limit)?);
+    }
+    Ok(rungs)
+}
+
+/// The symbol rung over a pinned source set: the ladder attempts run per
+/// attempt across every source — each attempt unions the per-source hits
+/// and the first non-empty union fixes the match mode — so the ladder
+/// precedence holds across the pinned target instead of per source
+/// (docs/implementation/08 §Retrieval ladder). One source's exact hit
+/// then outranks another source's prefix-only match. An empty source set
+/// serves nothing.
+///
+/// # Errors
+/// [`RetrieveError::Store`] when a store query fails.
+pub fn symbol_rungs(
+    store: &Store,
+    query: &str,
+    source_ids: &[i64],
+    limit: u32,
+) -> Result<Vec<Vec<Hit>>, RetrieveError> {
+    let normalized = normalize_symbol(query);
+    if normalized.is_empty() || source_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    for (mode, candidate) in ladder_attempts(&normalized) {
+        let rungs = source_rungs(store, &candidate, mode, source_ids, limit)?;
+        if rungs.iter().any(|rung| !rung.is_empty()) {
+            return Ok(rungs);
+        }
+    }
+    Ok(Vec::new())
+}
+
 /// The store scope a rung scope lowers to.
 fn store_scope(scope: Scope<'_>) -> SymbolScope {
     match scope {
