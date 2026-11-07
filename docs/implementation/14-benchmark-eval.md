@@ -3,7 +3,7 @@ type: guide
 title: Benchmark and Eval Harness
 description: The golden-set format, the eval harness implementation, the gate metrics with thresholds, run artifacts, and the regression policy that wires the research benchmark protocol into devdocs.
 tags: [devdocs, eval, benchmark, golden-set, gates]
-timestamp: 2026-11-06T00:00:00Z
+timestamp: 2026-11-07T08:00:00Z
 resource: docs
 derives-from: [docs/research]
 ---
@@ -79,7 +79,7 @@ Timing note: the harness measures the in-process pipeline plus, in a second pass
 
 The binary grader: partial counts as wrong. The research protocol is explicit (research: benchmark-protocol.md Step 6).
 
-Denominators: hit@5 counts only questions with non-empty `expect_refs`; symbol recall counts pinned symbols; failure rate and version correctness count every question — an abstention with no results is not version-correct. The harness grades `ref_match` and `symbol_match`; a suite that carries the `manual` grader makes a run exit 1 until manual grading lands.
+Denominators: hit@5 counts only questions with non-empty `expect_refs`; symbol recall counts pinned symbols; failure rate and version correctness count every question — an abstention with no results is not version-correct. The harness grades `ref_match` and `symbol_match`; a suite that carries the `manual` grader makes a run exit 1 until manual grading lands. Symbol recall grades from the rung results within the retrieval headroom window (4× the page limit, docs/implementation/08 §Rungs), so a suite pinning more symbols than the window holds cannot reach full recall.
 
 ## Gate table
 
