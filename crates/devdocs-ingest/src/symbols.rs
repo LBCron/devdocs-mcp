@@ -203,19 +203,24 @@ fn python_class_member(node: Node<'_>) -> bool {
     false
 }
 
-/// Whether a JavaScript `variable_declarator` sits at module scope: a
-/// declarator nested inside a function body (`statement_block`) is a
-/// function-local, not an indexable symbol.
+/// Whether a JavaScript `variable_declarator` sits at module scope: its
+/// declaration statement's parent must be the `program` or an
+/// `export_statement`. Everything else — a function body, a
+/// `for`-statement initializer, a `switch`-case declaration — is not an
+/// indexable module symbol.
 fn javascript_top_level(node: Node<'_>) -> bool {
-    let mut current = node.parent();
-    while let Some(parent) = current {
-        match parent.kind() {
-            "statement_block" => return false,
-            "program" => return true,
-            _ => current = parent.parent(),
-        }
+    let Some(declaration) = node.parent() else {
+        return false;
+    };
+    if !matches!(
+        declaration.kind(),
+        "lexical_declaration" | "variable_declaration"
+    ) {
+        return false;
     }
-    false
+    declaration
+        .parent()
+        .is_some_and(|parent| matches!(parent.kind(), "program" | "export_statement"))
 }
 
 /// The kind of a JavaScript `variable_declarator`: a function or class

@@ -118,6 +118,33 @@ fn javascript_fixture_extracts_declarations_classes_and_variables() {
     );
 }
 
+/// A JavaScript `variable_declarator` is indexed only at module scope:
+/// `for`-statement initializers and `switch`-case declarations stay out,
+/// while plain module-level declarations and `export`ed ones stay in.
+#[test]
+fn javascript_module_scope_declarators_only() {
+    let code = concat!(
+        "let top = 1;\n",
+        "export const exported = 2;\n",
+        "var alsoTop = 3;\n",
+        "for (let i = 0; i < 1; i++) {}\n",
+        "for (var j = 0; j < 1; j++) {}\n",
+        "switch (top) {\n",
+        "  case 1:\n",
+        "    let inner = 4;\n",
+        "    var innerVar = 5;\n",
+        "}\n",
+    );
+    assert_eq!(
+        pairs(&extract("javascript", code)),
+        vec![
+            ("top", "variable"),
+            ("exported", "variable"),
+            ("alsoTop", "variable"),
+        ]
+    );
+}
+
 /// A Rust declaration inside an `impl_item` body is a method; a trait
 /// default method and a function nested in a method body stay functions
 /// (docs/implementation/06 §Symbol columns).
